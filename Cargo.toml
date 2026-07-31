@@ -1,0 +1,17 @@
+[package]
+name = "ocpp-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+env_logger = "0.11.11"
+futures-util = { version = "0.3.33", default-features = false, features = ["sink", "std"] }
+log = "0.4.33"
+ocpp_rs = "0.4.0"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite = "0.30.0"
+
+[patch.crates-io]
+ocpp_rs = { path = "../ocpp-rs" }
