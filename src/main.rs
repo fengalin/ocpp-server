@@ -22,6 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
 mod schedule;
+use schedule::*;
 
 const PORT: u16 = 9000;
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -39,10 +40,64 @@ struct Connection {
 }
 
 impl Connection {
+    fn define_schedule(&self) -> Option<call::SetChargingProfile> {
+        const SET_PROFILE: bool = true;
+        if !SET_PROFILE {
+            return None;
+        }
+
+        use chrono::NaiveTime;
+        let set_charing_profile = ChargingProfileBuilder::new()
+            .add(
+                ChargingSchedulePeriodBuild::starting_ending_today(
+                    NaiveTime::from_hms_opt(14, 30, 00).unwrap(),
+                    NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
+                )
+                .unwrap(),
+            )
+            .build();
+
+        if let Some(ref set_charging_profile) = set_charing_profile {
+            info!("{} {set_charging_profile:#?}", self.peer);
+            return None;
+        }
+
+        set_charing_profile
+    }
+
+    fn stop_transaction(&self) -> Option<call::RemoteStopTransaction> {
+        const TRANSACTION_ID: i32 = 0;
+        if TRANSACTION_ID == 0 {
+            return None;
+        }
+        Some(call::RemoteStopTransaction {
+            transaction_id: TRANSACTION_ID,
+        })
+    }
+
     fn prepare_first_actions(&mut self, _connector_id: u32) {
+        if let Some(stop_transaction) = self.stop_transaction() {
+            self.call_queue
+                .push_back(Action::RemoteStopTransaction(stop_transaction));
+        }
+
+        if let Some(set_charging_profile) = self.define_schedule() {
+            self.call_queue
+                .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
+                    id: None,
+                    connector_id: None,
+                    charging_profile_purpose: None,
+                    stack_level: None,
+                }));
+            self.call_queue
+                .push_back(Action::SetChargingProfile(set_charging_profile));
+        }
+
         // self.call_queue
-        //     .push_back(Action::RemoteStopTransaction(call::RemoteStopTransaction {
-        //         transaction_id: 2,
+        //     .push_back(Action::GetCompositeSchedule(call::GetCompositeSchedule {
+        //         connector_id: _connector_id,
+        //         duration: 7 * 24 * 60 * 60,
+        //         charging_rate_unit: None,
         //     }));
 
         // let availability_type = AvailabilityType::Inoperative;
@@ -57,34 +112,6 @@ impl Connection {
         //     .push_back(Action::GetConfiguration(call::GetConfiguration {
         //         key: None,
         //     }));
-
-        // self.call_queue
-        //     .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
-        //         id: None,
-        //         connector_id: None,
-        //         charging_profile_purpose: None,
-        //         stack_level: None,
-        //     }));
-        // // to make sure, but never use it with an active charging profile
-        // // or it will change the start time to now
-        // self.call_queue
-        //     .push_back(Action::GetCompositeSchedule(call::GetCompositeSchedule {
-        //         connector_id: 0,
-        //         duration: 7 * 24 * 60 * 60,
-        //         charging_rate_unit: Some(ChargingRateUnitType::W),
-        //     }));
-
-        // use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-        // let limit = 7_400.0; // W
-        // let day = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
-        // let start_time = NaiveTime::from_hms_opt(15, 30, 00).unwrap();
-        // let stop_time = NaiveTime::from_hms_opt(15, 35, 00).unwrap();
-        // let start = NaiveDateTime::new(day, start_time);
-        // let stop = NaiveDateTime::new(day, stop_time);
-        // match schedule::build_set_charging_profile(start, stop, limit) {
-        //     Ok(call) => self.call_queue.push_back(Action::SetChargingProfile(call)),
-        //     Err(err) => error!("failed to build charging profile: {err}"),
-        // }
 
         // self.call_queue
         //     .push_back(Action::UnlockConnector(call::UnlockConnector {
