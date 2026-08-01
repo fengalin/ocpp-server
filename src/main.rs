@@ -41,7 +41,7 @@ struct Connection {
 
 impl Connection {
     fn define_schedule(&self) -> Option<call::SetChargingProfile> {
-        const SET_PROFILE: bool = true;
+        const SET_PROFILE: bool = false;
         if !SET_PROFILE {
             return None;
         }
@@ -50,17 +50,17 @@ impl Connection {
         let set_charing_profile = ChargingProfileBuilder::new()
             .add(
                 ChargingSchedulePeriodBuild::starting_ending_today(
-                    NaiveTime::from_hms_opt(14, 30, 00).unwrap(),
+                    NaiveTime::from_hms_opt(14, 20, 00).unwrap(),
                     NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
                 )
                 .unwrap(),
             )
             .build();
 
-        if let Some(ref set_charging_profile) = set_charing_profile {
-            info!("{} {set_charging_profile:#?}", self.peer);
-            return None;
-        }
+        // if let Some(ref set_charging_profile) = set_charing_profile {
+        //     info!("{} {set_charging_profile:#?}", self.peer);
+        //     return None;
+        // }
 
         set_charing_profile
     }

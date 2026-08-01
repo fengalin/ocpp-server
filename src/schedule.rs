@@ -13,22 +13,16 @@ const DEFAULT_NB_OF_PHASES: i32 = 1;
 
 #[derive(Debug)]
 pub struct ChargingProfileBuilder {
-    periods: BTreeMap<NaiveDateTime, ChargingSchedulePeriodBuild>,
-}
-
-struct ChargingScheduleState {
-    // FIXME once actual behaviour is clarified,
-    // this also needs to be fixed:
-    // for an absolute schedule, the start_schedule should be
-    // set in the past so as to make sure it doesn't start
-    // if the car is connected before the first period is limit > 0
     start_schedule_utc: DateTime<Utc>,
-    last_end_utc: DateTime<Utc>,
+    periods: BTreeMap<NaiveDateTime, ChargingSchedulePeriodBuild>,
 }
 
 impl ChargingProfileBuilder {
     pub fn new() -> Self {
+        let schedule_start = Local::now();
+        debug!("Schedule start {schedule_start}");
         ChargingProfileBuilder {
+            start_schedule_utc: schedule_start.to_utc(),
             periods: BTreeMap::new(),
         }
     }
@@ -40,29 +34,18 @@ impl ChargingProfileBuilder {
 
     pub fn build(self) -> Option<call::SetChargingProfile> {
         let mut charging_schedule = vec![];
-        let mut charging_schedule_state = None;
+        let mut last_end_utc = None;
         for period in self.periods.values() {
             let start_utc = period.start.and_local_timezone(Local).unwrap().to_utc();
 
-            let state = charging_schedule_state.get_or_insert_with(|| {
-                let schedule_start_utc = NaiveDateTime::new(
-                    start_utc.date_naive(),
-                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                )
-                .and_utc();
-                debug!("Schedule start {schedule_start_utc}");
-                ChargingScheduleState {
-                    start_schedule_utc: schedule_start_utc,
-                    last_end_utc: schedule_start_utc,
-                }
-            });
+            let last_end_utc = last_end_utc.get_or_insert(self.start_schedule_utc);
 
-            if start_utc > state.last_end_utc {
+            if start_utc > *last_end_utc {
                 // add a gap
-                let gap = state.last_end_utc - state.start_schedule_utc;
+                let gap = *last_end_utc - self.start_schedule_utc;
                 debug!(
                     "Adding schedule gap: {} seconds",
-                    (start_utc - state.last_end_utc).num_seconds()
+                    (start_utc - *last_end_utc).num_seconds()
                 );
                 charging_schedule.push(data_types::ChargingSchedulePeriod {
                     start_period: gap.num_seconds() as i32,
@@ -71,7 +54,7 @@ impl ChargingProfileBuilder {
                 })
             }
 
-            let start_period = start_utc - state.start_schedule_utc;
+            let start_period = start_utc - self.start_schedule_utc;
             debug!("Adding schedule period: {period:?}");
             charging_schedule.push(data_types::ChargingSchedulePeriod {
                 start_period: start_period.num_seconds() as i32,
@@ -79,14 +62,14 @@ impl ChargingProfileBuilder {
                 number_phases: Some(DEFAULT_NB_OF_PHASES),
             });
 
-            state.last_end_utc = period.end.and_local_timezone(Local).unwrap().to_utc();
+            *last_end_utc = period.end.and_local_timezone(Local).unwrap().to_utc();
         }
 
-        let Some(state) = charging_schedule_state else {
+        let Some(last_end_utc) = last_end_utc else {
             return None;
         };
 
-        let last_end_start = state.last_end_utc - state.start_schedule_utc;
+        let last_end_start = last_end_utc - self.start_schedule_utc;
         if last_end_start.num_seconds() > 0 {
             charging_schedule.push(data_types::ChargingSchedulePeriod {
                 start_period: last_end_start.num_seconds() as i32,
@@ -118,9 +101,7 @@ impl ChargingProfileBuilder {
                     // * does the schedule starts running when the transaction starts?
                     // the later would also explain the behaviour observed
                     // when requesting the schedule
-                    start_schedule: Some(data_types::DateTimeWrapper::new(
-                        state.start_schedule_utc,
-                    )),
+                    start_schedule: Some(data_types::DateTimeWrapper::new(self.start_schedule_utc)),
                     charging_rate_unit: ChargingRateUnitType::W,
                     charging_schedule_period: charging_schedule,
                     min_charging_rate: None,
