@@ -468,6 +468,8 @@ dependencies = [
  "futures-util",
  "log",
  "ocpp_rs",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
 ]

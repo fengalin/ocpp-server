@@ -144,7 +144,42 @@ impl Connection {
             transaction_id: 0,
         }
     }
+}
 
+#[derive(Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct SampledValue {
+    context: String,
+    format: String,
+    location: String,
+    measurand: String,
+    phase: String,
+    unit: String,
+    value: String,
+}
+#[derive(Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+struct Dpm {
+    #[serde(rename = "DPM")]
+    data: DpmData,
+}
+#[derive(Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct DpmData {
+    sampled_value: Vec<SampledValue>,
+    timestamp: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_id: Option<i32>,
+}
+#[derive(Debug)]
+#[expect(unused)]
+struct DataTransfer {
+    timestamp: String,
+    transaction_id: Option<i32>,
+    sampled_values: Vec<String>,
+}
+
+impl Connection {
     async fn handle_incoming_message(&mut self, msg: &str) -> anyhow::Result<()> {
         // FIXME for every early return, we should enqueue an error Message
 
@@ -215,11 +250,102 @@ impl Connection {
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::MeterValues(action) => {
-                info!("{} >> incoming {action:?}", self.peer);
+                let meter_val_selection: Vec<_> = action
+                    .meter_value
+                    .iter()
+                    .map(|mv| {
+                        (
+                            mv.timestamp.inner().with_timezone(&chrono::Local),
+                            mv.sampled_value
+                                .iter()
+                                .filter_map(|sv| {
+                                    use Measurand::*;
+                                    match sv.measurand {
+                                        Some(PowerOffered) => Some(format!(
+                                            "Power Offered: {} {:?}",
+                                            if let Ok(val) = sv.value.parse::<i32>()
+                                                && (val < 0 || val == i32::MAX)
+                                            {
+                                                "N/A"
+                                            } else {
+                                                sv.value.as_str()
+                                            },
+                                            sv.unit.as_ref().unwrap()
+                                        )),
+                                        Some(PowerActiveImport) => Some(format!(
+                                            "Active Power I: {} {:?}",
+                                            sv.value,
+                                            sv.unit.as_ref().unwrap()
+                                        )),
+                                        Some(EnergyActiveImportRegister) => Some(format!(
+                                            "Active Energy I: {} {:?}",
+                                            sv.value,
+                                            sv.unit.as_ref().unwrap()
+                                        )),
+                                        Some(Temperature) => Some(format!(
+                                            "Temperature: {} {:?}",
+                                            sv.value,
+                                            sv.unit.as_ref().unwrap()
+                                        )),
+                                        Some(Frequency) => {
+                                            Some(format!("Frequency: {} Hz", sv.value))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                                .collect::<Vec<String>>(),
+                        )
+                    })
+                    .collect();
+
+                info!(
+                    "{} >> incoming MeterValues {meter_val_selection:#?}",
+                    self.peer
+                );
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::DataTransfer(action) => {
-                info!("{} >> incoming {action:#?}", self.peer);
+                let data_trans_selection: Vec<_> = action
+                    .data
+                    .iter()
+                    .map(|d| {
+                        let Ok(dpms) = serde_json::from_str::<Vec<Dpm>>(&d) else {
+                            return vec![DataTransfer {
+                                timestamp: "N/A".to_string(),
+                                transaction_id: None,
+                                sampled_values: vec![d.clone()],
+                            }];
+                        };
+                        dpms.iter()
+                            .map(|dpm| DataTransfer {
+                                timestamp: dpm.data.timestamp.clone(),
+                                transaction_id: dpm.data.transaction_id,
+                                sampled_values: dpm
+                                    .data
+                                    .sampled_value
+                                    .iter()
+                                    .filter_map(|sv| match sv.measurand.as_str() {
+                                        "Power.Active.Import" => Some(format!(
+                                            "Active Power I: {} {:?}, ",
+                                            sv.value, sv.unit,
+                                        )),
+                                        "Energy.Active.Import.Register" => Some(format!(
+                                            "Active Energy I: {} {:?}, ",
+                                            sv.value, sv.unit,
+                                        )),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                info!(
+                    "{} >> incoming Data Transfer {} {data_trans_selection:#?}",
+                    self.peer,
+                    action.message_id.as_ref().unwrap(),
+                );
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -444,4 +570,34 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_dpm_data() {
+        let dpm_data = "[{\"DPM\":{\"sampledValue\":[{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L1\",\"unit\":\"V\",\"value\":\"233\"}],\"timestamp\":\"2026-08-02T17:46:24Z\"}}]";
+
+        let dpms = serde_json::from_str::<Vec<Dpm>>(dpm_data).unwrap();
+        assert_eq!(
+            dpms,
+            vec![Dpm {
+                data: DpmData {
+                    sampled_value: vec![SampledValue {
+                        context: "Sample.Clock".to_string(),
+                        format: "Raw".to_string(),
+                        location: "Inlet".to_string(),
+                        measurand: "Voltage".to_string(),
+                        phase: "L1".to_string(),
+                        unit: "V".to_string(),
+                        value: "233".to_string(),
+                    }],
+                    timestamp: "2026-08-02T17:46:24Z".to_string(),
+                    transaction_id: None,
+                },
+            }]
+        );
+    }
 }
