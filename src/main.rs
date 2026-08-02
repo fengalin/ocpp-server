@@ -208,13 +208,24 @@ impl Connection {
                 if action.connector_id != 0 {
                     if !matches!(action.error_code, ChargePointErrorCode::NoError) {
                         warn!(
-                            "{} >> connector {}: {:?} {:?}",
-                            self.peer, action.connector_id, action.status, action.error_code,
+                            "{} >> connector {}: {:?} {:?}, timestamp: {:?}",
+                            self.peer,
+                            action.connector_id,
+                            action.status,
+                            action.error_code,
+                            action
+                                .timestamp
+                                .map(|ts| ts.inner().with_timezone(&chrono::Local)),
                         );
                     } else {
                         info!(
-                            "{} >> connector {}: {:?}",
-                            self.peer, action.connector_id, action.status
+                            "{} >> connector {}: {:?}, timestamp: {:?}",
+                            self.peer,
+                            action.connector_id,
+                            action.status,
+                            action
+                                .timestamp
+                                .map(|ts| ts.inner().with_timezone(&chrono::Local)),
                         );
                     }
                     if self.connector_id.is_none() {
@@ -358,8 +369,11 @@ impl Connection {
             Action::StartTransaction(action) => {
                 self.transaction_id += 1;
                 info!(
-                    "{} ## starting transaction with id {}",
-                    self.peer, self.transaction_id
+                    "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",
+                    self.peer,
+                    self.transaction_id,
+                    action.timestamp.inner().with_timezone(&chrono::Local),
+                    action.meter_start,
                 );
                 self.prepare_response(
                     action,
@@ -375,10 +389,13 @@ impl Connection {
                 );
             }
             Action::StopTransaction(action) => {
-                self.transaction_id += 1;
                 info!(
-                    "{} ## transaction with id {} stopped",
-                    self.peer, action.transaction_id
+                    "{} ## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
+                    self.peer,
+                    self.transaction_id,
+                    action.timestamp.inner().with_timezone(&chrono::Local),
+                    action.meter_stop,
+                    action.reason
                 );
                 self.prepare_response(
                     action,
@@ -578,23 +595,43 @@ mod tests {
 
     #[test]
     fn deserialize_dpm_data() {
-        let dpm_data = "[{\"DPM\":{\"sampledValue\":[{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L1\",\"unit\":\"V\",\"value\":\"233\"}],\"timestamp\":\"2026-08-02T17:46:24Z\"}}]";
-
+        // let dpm_data = "[{\"DPM\":{\"sampledValue\":[{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L1\",\"unit\":\"V\",\"value\":\"233\"}],\"timestamp\":\"2026-08-02T17:46:24Z\"}}]";
+        let dpm_data = "[{\"DPM\":{\"sampledValue\":[{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L1\",\"unit\":\"V\",\"value\":\"234\"},{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L2\",\"unit\":\"V\",\"value\":\"0\"},{\"context\":\"Sample.Clock\",\"format\":\"Raw\",\"location\":\"Inlet\",\"measurand\":\"Voltage\",\"phase\":\"L3\",\"unit\":\"V\",\"value\":\"0\"}],\"timestamp\":\"2026-08-02T14:51:15Z\"}}]";
         let dpms = serde_json::from_str::<Vec<Dpm>>(dpm_data).unwrap();
         assert_eq!(
             dpms,
             vec![Dpm {
                 data: DpmData {
-                    sampled_value: vec![SampledValue {
-                        context: "Sample.Clock".to_string(),
-                        format: "Raw".to_string(),
-                        location: "Inlet".to_string(),
-                        measurand: "Voltage".to_string(),
-                        phase: "L1".to_string(),
-                        unit: "V".to_string(),
-                        value: "233".to_string(),
-                    }],
-                    timestamp: "2026-08-02T17:46:24Z".to_string(),
+                    sampled_value: vec![
+                        SampledValue {
+                            context: "Sample.Clock".to_string(),
+                            format: "Raw".to_string(),
+                            location: "Inlet".to_string(),
+                            measurand: "Voltage".to_string(),
+                            phase: "L1".to_string(),
+                            unit: "V".to_string(),
+                            value: "234".to_string(),
+                        },
+                        SampledValue {
+                            context: "Sample.Clock".to_string(),
+                            format: "Raw".to_string(),
+                            location: "Inlet".to_string(),
+                            measurand: "Voltage".to_string(),
+                            phase: "L2".to_string(),
+                            unit: "V".to_string(),
+                            value: "0".to_string(),
+                        },
+                        SampledValue {
+                            context: "Sample.Clock".to_string(),
+                            format: "Raw".to_string(),
+                            location: "Inlet".to_string(),
+                            measurand: "Voltage".to_string(),
+                            phase: "L3".to_string(),
+                            unit: "V".to_string(),
+                            value: "0".to_string(),
+                        }
+                    ],
+                    timestamp: "2026-08-02T14:51:15Z".to_string(),
                     transaction_id: None,
                 },
             }]

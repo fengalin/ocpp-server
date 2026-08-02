@@ -119,7 +119,7 @@ pub struct ChargingSchedulePeriodBuild {
 }
 
 impl ChargingSchedulePeriodBuild {
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn new(start: NaiveDateTime, end: NaiveDateTime) -> Result<Self, ()> {
         if end < start {
             return Err(());
@@ -131,7 +131,7 @@ impl ChargingSchedulePeriodBuild {
         })
     }
 
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn with_duration(start: NaiveDateTime, duration: TimeDelta) -> Self {
         ChargingSchedulePeriodBuild {
             limit: DEFAULT_LIMIT,
@@ -140,7 +140,7 @@ impl ChargingSchedulePeriodBuild {
         }
     }
 
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn starting_ending_today(start_time: NaiveTime, end_time: NaiveTime) -> Result<Self, ()> {
         if end_time < start_time {
             return Err(());
@@ -153,7 +153,7 @@ impl ChargingSchedulePeriodBuild {
         })
     }
 
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn starting_today_with_duration(start_time: NaiveTime, duration: TimeDelta) -> Self {
         let today = Local::now().date_naive();
         let start = NaiveDateTime::new(today, start_time);
@@ -164,6 +164,7 @@ impl ChargingSchedulePeriodBuild {
         }
     }
 
+    #[allow(unused)]
     pub fn starting_ending_tomorrow(
         start_time: NaiveTime,
         end_time: NaiveTime,
@@ -179,6 +180,7 @@ impl ChargingSchedulePeriodBuild {
         })
     }
 
+    #[allow(unused)]
     pub fn starting_tomorrow_with_duration(start_time: NaiveTime, duration: TimeDelta) -> Self {
         let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
         let start = NaiveDateTime::new(tomorrow, start_time);
@@ -189,7 +191,7 @@ impl ChargingSchedulePeriodBuild {
         }
     }
 
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn starting_today_ending_tomorrow(start_time: NaiveTime, end_time: NaiveTime) -> Self {
         let today = Local::now().date_naive();
         let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
@@ -200,7 +202,7 @@ impl ChargingSchedulePeriodBuild {
         }
     }
 
-    #[expect(unused)]
+    #[allow(unused)]
     pub fn limit(mut self, limit: f32) -> Self {
         self.limit = limit;
         self
