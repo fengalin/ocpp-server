@@ -16,10 +16,14 @@ use ocpp_rs::{
 };
 use std::{
     collections::VecDeque,
+    fs,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
+
+mod charging_session;
+use charging_session::*;
 
 mod measurements;
 use measurements::*;
@@ -27,9 +31,11 @@ use measurements::*;
 mod schedule;
 use schedule::*;
 
+const SOC: Option<f32> = Some(0.20);
 const PORT: u16 = 9000;
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
+#[derive(Debug)]
 struct Connection {
     peer: SocketAddr,
     ws_stream: WebSocketStream<TcpStream>,
@@ -40,6 +46,7 @@ struct Connection {
     call_response_tracker: PendingCalls,
     call_queue: VecDeque<Action>,
     transaction_id: i32,
+    charging_session: Option<ChargingSession>,
 }
 
 impl Connection {
@@ -145,6 +152,7 @@ impl Connection {
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
             transaction_id: 0,
+            charging_session: None,
         }
     }
 
@@ -343,6 +351,8 @@ impl Connection {
                     action.timestamp.inner().with_timezone(&chrono::Local),
                     action.meter_start,
                 );
+                self.charging_session =
+                    Some(ChargingSession::new(self.transaction_id, &action, SOC));
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -365,6 +375,29 @@ impl Connection {
                     action.meter_stop,
                     action.reason
                 );
+                if let Some(ref mut charging_session) = self.charging_session {
+                    charging_session.stop(&action);
+
+                    match serde_json::to_string(&charging_session) {
+                        Ok(charging_session_ser) => {
+                            if let Err(err) = fs::write(
+                                format!(
+                                    "../logs/{}_charging_session.json",
+                                    charging_session.start_timestamp()
+                                ),
+                                charging_session_ser,
+                            ) {
+                                error!(
+                                    "{} failed to write charging session result: {err}",
+                                    self.peer
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!("{} failed to serialize charging session: {err}", self.peer);
+                        }
+                    }
+                }
                 self.prepare_response(
                     action,
                     call.unique_id,
