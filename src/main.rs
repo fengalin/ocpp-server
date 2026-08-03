@@ -1,4 +1,5 @@
 use anyhow::{Context, bail};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use log::*;
 use ocpp_rs::{
@@ -16,7 +17,6 @@ use ocpp_rs::{
 };
 use std::{
     collections::VecDeque,
-    fs,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 use tokio::net::{TcpListener, TcpStream};
@@ -31,7 +31,7 @@ use measurements::*;
 mod schedule;
 use schedule::*;
 
-const SOC: Option<f32> = Some(0.20);
+const SOC: Option<f64> = Some(0.36);
 const PORT: u16 = 9000;
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
@@ -45,7 +45,6 @@ struct Connection {
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
     call_queue: VecDeque<Action>,
-    transaction_id: i32,
     charging_session: Option<ChargingSession>,
 }
 
@@ -60,7 +59,7 @@ impl Connection {
         let set_charing_profile = ChargingProfileBuilder::new()
             .add(
                 ChargingSchedulePeriodBuild::starting_ending_today(
-                    NaiveTime::from_hms_opt(14, 20, 00).unwrap(),
+                    NaiveTime::from_hms_opt(14, 40, 00).unwrap(),
                     NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
                 )
                 .unwrap(),
@@ -76,13 +75,12 @@ impl Connection {
     }
 
     fn stop_transaction(&self) -> Option<call::RemoteStopTransaction> {
-        const TRANSACTION_ID: i32 = 0;
-        if TRANSACTION_ID == 0 {
+        const STOP_SESSION: bool = false;
+        if !STOP_SESSION {
             return None;
         }
-        Some(call::RemoteStopTransaction {
-            transaction_id: TRANSACTION_ID,
-        })
+        let transaction_id = self.charging_session.as_ref().map(|cs| cs.session_id())?;
+        Some(call::RemoteStopTransaction { transaction_id })
     }
 
     fn prepare_first_actions(&mut self, _connector_id: u32) {
@@ -151,8 +149,7 @@ impl Connection {
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
-            transaction_id: 0,
-            charging_session: None,
+            charging_session: ChargingSession::get_last_active(),
         }
     }
 
@@ -180,7 +177,6 @@ impl Connection {
 
         match call.payload {
             Action::StatusNotification(action) => {
-                debug!("{} >> incoming {action:?}", self.peer);
                 if action.connector_id != 0 {
                     if !matches!(action.error_code, ChargePointErrorCode::NoError) {
                         warn!(
@@ -203,6 +199,21 @@ impl Connection {
                                 .timestamp
                                 .map(|ts| ts.inner().with_timezone(&chrono::Local)),
                         );
+
+                        if action.status == ChargePointStatus::Available
+                            && let Some(mut cs) = self.charging_session.take()
+                        {
+                            warn!(
+                                "{} ## ending previous active session with id: {} due to connector status",
+                                self.peer,
+                                cs.session_id(),
+                            );
+                            cs.stop(
+                                Utc::now(),
+                                0,
+                                "Got connector available while session with still active",
+                            );
+                        }
                     }
                     if self.connector_id.is_none() {
                         self.connector_id = Some(action.connector_id);
@@ -237,10 +248,14 @@ impl Connection {
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::MeterValues(action) => {
+                let mut timestamp = None;
+                let mut energy = None;
+                let mut power = None;
                 let meter_val_selection: Vec<_> = action
                     .meter_value
                     .iter()
                     .map(|mv| {
+                        timestamp = Some(mv.timestamp.inner());
                         (
                             mv.timestamp.inner().with_timezone(&chrono::Local),
                             mv.sampled_value
@@ -259,16 +274,22 @@ impl Connection {
                                             },
                                             sv.unit.as_ref().unwrap()
                                         )),
-                                        Some(PowerActiveImport) => Some(format!(
-                                            "Active Power I: {} {:?}",
-                                            sv.value,
-                                            sv.unit.as_ref().unwrap()
-                                        )),
-                                        Some(EnergyActiveImportRegister) => Some(format!(
-                                            "Active Energy I: {} {:?}",
-                                            sv.value,
-                                            sv.unit.as_ref().unwrap()
-                                        )),
+                                        Some(PowerActiveImport) => {
+                                            power = sv.value.parse::<u64>().ok();
+                                            Some(format!(
+                                                "Active Power I: {} {:?}",
+                                                sv.value,
+                                                sv.unit.as_ref().unwrap()
+                                            ))
+                                        }
+                                        Some(EnergyActiveImportRegister) => {
+                                            energy = sv.value.parse::<u64>().ok();
+                                            Some(format!(
+                                                "Active Energy I: {} {:?}",
+                                                sv.value,
+                                                sv.unit.as_ref().unwrap()
+                                            ))
+                                        }
                                         Some(Voltage) if sv.phase == Some(Phase::L1) => {
                                             Some(format!(
                                                 "Voltage L1: {} {:?}",
@@ -293,9 +314,31 @@ impl Connection {
                     .collect();
 
                 info!(
-                    "{} >> incoming MeterValues {meter_val_selection:?}",
-                    self.peer
+                    "{} >> incoming MeterValues {meter_val_selection:?}, transaction id: {:?}",
+                    self.peer, action.transaction_id,
                 );
+                if let Some(((timestamp, energy), cs)) = Option::zip(
+                    Option::zip(timestamp, energy),
+                    self.charging_session.as_mut(),
+                ) {
+                    let session_id = cs.session_id();
+                    if let Some(transaction_id) = action.transaction_id {
+                        if session_id == transaction_id {
+                            cs.add_snapshot(timestamp, energy, power.unwrap_or_default());
+                        } else {
+                            warn!(
+                                "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
+                                self.peer
+                            );
+                        }
+                    } else {
+                        info!(
+                            "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
+                            self.peer
+                        );
+                        cs.add_snapshot(timestamp, energy, power.unwrap_or_default());
+                    }
+                }
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::DataTransfer(action) => {
@@ -353,16 +396,29 @@ impl Connection {
                 );
             }
             Action::StartTransaction(action) => {
-                self.transaction_id += 1;
+                if let Some(mut cs) = self.charging_session.take() {
+                    warn!(
+                        "{} ## new session ending previous active session with id: {}",
+                        self.peer,
+                        cs.session_id(),
+                    );
+                    cs.stop(
+                        Utc::now(),
+                        0,
+                        "Got start transaction while session with still active",
+                    );
+                }
+
+                let cs = ChargingSession::new(action.timestamp.inner(), action.meter_start, SOC);
+                let transaction_id = cs.session_id();
                 info!(
                     "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",
                     self.peer,
-                    self.transaction_id,
+                    transaction_id,
                     action.timestamp.inner().with_timezone(&chrono::Local),
                     action.meter_start,
                 );
-                self.charging_session =
-                    Some(ChargingSession::new(self.transaction_id, &action, SOC));
+                self.charging_session = Some(cs);
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -372,41 +428,49 @@ impl Connection {
                             parent_id_tag: None,
                             status: AuthorizationStatus::Accepted,
                         },
-                        transaction_id: self.transaction_id,
+                        transaction_id,
                     },
                 );
             }
             Action::StopTransaction(action) => {
-                info!(
-                    "{} ## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
-                    self.peer,
-                    self.transaction_id,
-                    action.timestamp.inner().with_timezone(&chrono::Local),
-                    action.meter_stop,
-                    action.reason
-                );
-                if let Some(ref mut charging_session) = self.charging_session {
-                    charging_session.stop(&action);
-
-                    match serde_json::to_string(&charging_session) {
-                        Ok(charging_session_ser) => {
-                            if let Err(err) = fs::write(
-                                format!(
-                                    "../logs/{}_charging_session.json",
-                                    charging_session.start_timestamp()
-                                ),
-                                charging_session_ser,
-                            ) {
-                                error!(
-                                    "{} failed to write charging session result: {err}",
-                                    self.peer
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            error!("{} failed to serialize charging session: {err}", self.peer);
-                        }
+                if let Some(mut cs) = self.charging_session.take() {
+                    let cur_session_id = cs.session_id();
+                    if cur_session_id == action.transaction_id {
+                        info!(
+                            "{} ## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
+                            self.peer,
+                            action.transaction_id,
+                            action.timestamp.inner().with_timezone(&chrono::Local),
+                            action.meter_stop,
+                            action.reason
+                        );
+                        cs.stop(
+                            action.timestamp.inner(),
+                            action.meter_stop,
+                            action
+                                .reason
+                                .map_or("UNKNOWN".to_string(), |r| format!("{r:?}")),
+                        )
+                    } else {
+                        warn!(
+                            "{} ## transaction with id: {} stopped (expected {cur_session_id}), timestamp: {}, meter stop: {}, reason: {:?}",
+                            self.peer,
+                            action.transaction_id,
+                            action.timestamp.inner().with_timezone(&chrono::Local),
+                            action.meter_stop,
+                            action.reason
+                        );
+                        cs.stop(Utc::now(), 0, "Got stop transaction for another session");
                     }
+                } else {
+                    warn!(
+                        "{} ## transaction with id: {} stopped (unexpected), timestamp: {}, meter stop: {}, reason: {:?}",
+                        self.peer,
+                        action.transaction_id,
+                        action.timestamp.inner().with_timezone(&chrono::Local),
+                        action.meter_stop,
+                        action.reason
+                    );
                 }
                 self.prepare_response(
                     action,
@@ -585,6 +649,8 @@ async fn accept_connection(peer: SocketAddr, stream: TcpStream) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    // make sure the DB is available
+    let _ = &*DATABASE;
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT);
     let listener = TcpListener::bind(addr)
