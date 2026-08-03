@@ -65,9 +65,7 @@ impl ChargingProfileBuilder {
             *last_end_utc = period.end.and_local_timezone(Local).unwrap().to_utc();
         }
 
-        let Some(last_end_utc) = last_end_utc else {
-            return None;
-        };
+        let last_end_utc = last_end_utc?;
 
         let last_end_start = last_end_utc - self.start_schedule_utc;
         if last_end_start.num_seconds() > 0 {

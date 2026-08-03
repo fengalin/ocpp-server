@@ -296,7 +296,7 @@ impl Connection {
                     .data
                     .iter()
                     .map(|d| {
-                        let Ok(dpms) = serde_json::from_str::<Vec<Dpm>>(&d) else {
+                        let Ok(dpms) = serde_json::from_str::<Vec<Dpm>>(d) else {
                             return vec![DataTransfer {
                                 timestamp: "N/A".to_string(),
                                 transaction_id: None,
@@ -528,10 +528,10 @@ impl Connection {
                 self.prepare_first_actions(connector_id);
             }
 
-            if let Some(action) = self.call_queue.pop_front() {
-                if let Err(err) = self.send_action(action).await {
-                    error!("{}: failed to send first action: {err}", self.peer);
-                }
+            if let Some(action) = self.call_queue.pop_front()
+                && let Err(err) = self.send_action(action).await
+            {
+                error!("{}: failed to send first action: {err}", self.peer);
             }
         }
     }
