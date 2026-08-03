@@ -264,44 +264,35 @@ impl Connection {
                                     use Measurand::*;
                                     match sv.measurand {
                                         Some(PowerOffered) => Some(format!(
-                                            "Power Offered: {} {:?}",
-                                            if let Ok(val) = sv.value.parse::<i32>()
-                                                && (val < 0 || val == i32::MAX)
-                                            {
-                                                "N/A"
-                                            } else {
-                                                sv.value.as_str()
-                                            },
-                                            sv.unit.as_ref().unwrap()
+                                            "Power Offered: {} kW",
+                                            sv.value
+                                                .parse::<u64>()
+                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
                                         )),
                                         Some(PowerActiveImport) => {
                                             power = sv.value.parse::<u64>().ok();
                                             Some(format!(
-                                                "Active Power I: {} {:?}",
-                                                sv.value,
-                                                sv.unit.as_ref().unwrap()
+                                                "Active Power I: {} kW",
+                                                sv.value
+                                                    .parse::<u64>()
+                                                    .map_or(f64::NAN, |v| v as f64 / 1_000.0)
                                             ))
                                         }
                                         Some(EnergyActiveImportRegister) => {
                                             energy = sv.value.parse::<u64>().ok();
                                             Some(format!(
-                                                "Active Energy I: {} {:?}",
-                                                sv.value,
-                                                sv.unit.as_ref().unwrap()
+                                                "Active Energy I: {} kWh",
+                                                sv.value
+                                                    .parse::<u64>()
+                                                    .map_or(f64::NAN, |v| v as f64 / 1_000.0)
                                             ))
                                         }
                                         Some(Voltage) if sv.phase == Some(Phase::L1) => {
-                                            Some(format!(
-                                                "Voltage L1: {} {:?}",
-                                                sv.value,
-                                                sv.unit.as_ref().unwrap()
-                                            ))
+                                            Some(format!("Voltage L1: {} V", sv.value))
                                         }
-                                        Some(Temperature) => Some(format!(
-                                            "Temperature: {} {:?}",
-                                            sv.value,
-                                            sv.unit.as_ref().unwrap()
-                                        )),
+                                        Some(Temperature) => {
+                                            Some(format!("Temperature: {} °C", sv.value))
+                                        }
                                         Some(Frequency) => {
                                             Some(format!("Frequency: {} Hz", sv.value))
                                         }
@@ -363,16 +354,20 @@ impl Connection {
                                     .iter()
                                     .filter_map(|sv| match sv.measurand.as_str() {
                                         "Power.Active.Import" => Some(format!(
-                                            "Active Power I: {} {:?}, ",
-                                            sv.value, sv.unit,
+                                            "Active Power I: {} kW, ",
+                                            sv.value
+                                                .parse::<u64>()
+                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
                                         )),
                                         "Energy.Active.Import.Register" => Some(format!(
-                                            "Active Energy I: {} {:?}, ",
-                                            sv.value, sv.unit,
+                                            "Active Energy I: {} kWh, ",
+                                            sv.value
+                                                .parse::<u64>()
+                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
                                         )),
-                                        "Voltage" if sv.phase.as_deref() == Some("L1") => Some(
-                                            format!("Voltage L1: {} {:?}, ", sv.value, sv.unit),
-                                        ),
+                                        "Voltage" if sv.phase.as_deref() == Some("L1") => {
+                                            Some(format!("Voltage L1: {} V, ", sv.value))
+                                        }
                                         _ => None,
                                     })
                                     .collect(),
