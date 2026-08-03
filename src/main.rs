@@ -176,7 +176,7 @@ impl Connection {
     }
 
     async fn handle_incoming_call(&mut self, call: Call) -> anyhow::Result<()> {
-        debug!("{} >> incoming {call:?}", self.peer);
+        trace!("{} >> incoming {call:?}", self.peer);
 
         match call.payload {
             Action::StatusNotification(action) => {
@@ -269,6 +269,13 @@ impl Connection {
                                             sv.value,
                                             sv.unit.as_ref().unwrap()
                                         )),
+                                        Some(Voltage) if sv.phase == Some(Phase::L1) => {
+                                            Some(format!(
+                                                "Voltage L1: {} {:?}",
+                                                sv.value,
+                                                sv.unit.as_ref().unwrap()
+                                            ))
+                                        }
                                         Some(Temperature) => Some(format!(
                                             "Temperature: {} {:?}",
                                             sv.value,
@@ -286,7 +293,7 @@ impl Connection {
                     .collect();
 
                 info!(
-                    "{} >> incoming MeterValues {meter_val_selection:#?}",
+                    "{} >> incoming MeterValues {meter_val_selection:?}",
                     self.peer
                 );
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
@@ -320,6 +327,9 @@ impl Connection {
                                             "Active Energy I: {} {:?}, ",
                                             sv.value, sv.unit,
                                         )),
+                                        "Voltage" if sv.phase.as_deref() == Some("L1") => Some(
+                                            format!("Voltage L1: {} {:?}, ", sv.value, sv.unit),
+                                        ),
                                         _ => None,
                                     })
                                     .collect(),
@@ -329,7 +339,7 @@ impl Connection {
                     .collect();
 
                 info!(
-                    "{} >> incoming Data Transfer {} {data_trans_selection:#?}",
+                    "{} >> incoming Data Transfer {} {data_trans_selection:?}",
                     self.peer,
                     action.message_id.as_ref().unwrap(),
                 );
@@ -419,11 +429,13 @@ impl Connection {
                     },
                 );
             }
-            _ => (),
+            _ => {
+                info!("{} >> incoming {call:?}", self.peer);
+            }
         };
 
         if let Some(pending_response) = self.pending_response.take() {
-            debug!("{} << sending response {pending_response:?}", self.peer);
+            trace!("{} << sending response {pending_response:?}", self.peer);
             match parse::serialize_message(&pending_response) {
                 Ok(response) => {
                     self.ws_stream
@@ -547,7 +559,7 @@ impl Connection {
                 warn!("{} >> msg bin: {payload:?}", self.peer);
             }
             ts::Message::Ping(payload) => {
-                debug!("{} >> ping", self.peer);
+                trace!("{} >> ping", self.peer);
                 self.ws_stream.send(ts::Message::Pong(payload)).await?;
             }
             ts::Message::Close(reason) => {
