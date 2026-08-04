@@ -139,9 +139,14 @@ impl ChargingSession {
         cs
     }
 
-    pub fn add_snapshot(&mut self, timestamp: DateTime<Utc>, energy: u64, power: u64) {
+    pub fn add_snapshot(
+        &mut self,
+        timestamp: DateTime<Utc>,
+        energy: u64,
+        power: u64,
+    ) -> Option<f64> {
         let db = DATABASE.lock().unwrap();
-        self.add_snapshot_priv(&db, timestamp, energy, power);
+        self.add_snapshot_priv(&db, timestamp, energy, power)
     }
 
     fn add_snapshot_priv(
@@ -150,7 +155,7 @@ impl ChargingSession {
         timestamp: DateTime<Utc>,
         energy: u64,
         power: u64,
-    ) {
+    ) -> Option<f64> {
         let energy_delta = energy.saturating_sub(self.initial_energy);
         let soc = if energy_delta > 0 {
             let soc = energy_delta as f64 / BATTERY_CAPACITY + self.initial_soc;
@@ -160,16 +165,16 @@ impl ChargingSession {
                 energy_delta as f64 / 1_000f64
             );
 
-            soc
+            Some(soc)
         } else {
-            0.0
+            None
         };
 
         self.snapshots.push(ChargingSessionSnapshot {
             timestamp: timestamp.with_timezone(&Local),
             energy,
             power,
-            soc,
+            soc: soc.unwrap_or_default(),
         });
 
         let res = db.execute(format!(
@@ -185,11 +190,14 @@ impl ChargingSession {
             );
         ",
             session_id = self.session_id,
+            soc = soc.unwrap_or_default(),
         ));
 
         if let Err(err) = res {
             log::warn!("could not insert charging session snapshot: {err}");
         };
+
+        soc
     }
 
     pub fn stop(&mut self, timestamp: DateTime<Utc>, energy: u64, reason: impl ToString) {

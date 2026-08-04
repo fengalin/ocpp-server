@@ -31,7 +31,8 @@ use measurements::*;
 mod schedule;
 use schedule::*;
 
-const SOC: Option<f64> = Some(0.36);
+const SOC: Option<f64> = Some(0.41);
+const SOC_LIMIT: Option<f64> = Some(0.46);
 const PORT: u16 = 9000;
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
@@ -59,7 +60,7 @@ impl Connection {
         let set_charing_profile = ChargingProfileBuilder::new()
             .add(
                 ChargingSchedulePeriodBuild::starting_ending_today(
-                    NaiveTime::from_hms_opt(14, 40, 00).unwrap(),
+                    NaiveTime::from_hms_opt(14, 12, 00).unwrap(),
                     NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
                 )
                 .unwrap(),
@@ -315,7 +316,17 @@ impl Connection {
                     let session_id = cs.session_id();
                     if let Some(transaction_id) = action.transaction_id {
                         if session_id == transaction_id {
-                            cs.add_snapshot(timestamp, energy, power.unwrap_or_default());
+                            if let Some(soc) =
+                                cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
+                                && let Some(soc_limit) = SOC_LIMIT
+                                && soc >= soc_limit
+                            {
+                                self.call_queue.push_back(Action::RemoteStopTransaction(
+                                    call::RemoteStopTransaction {
+                                        transaction_id: session_id,
+                                    },
+                                ));
+                            }
                         } else {
                             warn!(
                                 "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
@@ -327,7 +338,17 @@ impl Connection {
                             "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
                             self.peer
                         );
-                        cs.add_snapshot(timestamp, energy, power.unwrap_or_default());
+                        if let Some(soc) =
+                            cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
+                            && let Some(soc_limit) = SOC_LIMIT
+                            && soc >= soc_limit
+                        {
+                            self.call_queue.push_back(Action::RemoteStopTransaction(
+                                call::RemoteStopTransaction {
+                                    transaction_id: session_id,
+                                },
+                            ));
+                        }
                     }
                 }
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
