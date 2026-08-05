@@ -15,3 +15,10 @@ serde_json = { version = "^1", default-features = false, features = ["alloc", "a
 sqlite = "0.37.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 tokio-tungstenite = "0.30.0"
+
+[profile.release-slim]
+inherits = "release"
+strip = "symbols"
+lto = "fat"
+panic = "abort"
+codegen-units = 1
