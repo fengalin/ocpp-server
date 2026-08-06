@@ -664,7 +664,14 @@ async fn accept_connection(peer: SocketAddr, stream: TcpStream) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder()
+        .format_source_path(true)
+        .format_line_number(true)
+        .filter_level(log::LevelFilter::Info)
+        .parse_default_env()
+        .try_init()
+        .unwrap();
+
     // make sure the DB is available
     let _ = &*DATABASE;
 
