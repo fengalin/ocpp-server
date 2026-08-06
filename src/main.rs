@@ -599,7 +599,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn run_loop(&mut self) -> anyhow::Result<()> {
         loop {
             let Some(msg) = self.ws_stream.next().await else {
                 bail!("websocket terminated");
@@ -655,13 +655,6 @@ impl Connection {
     }
 }
 
-async fn accept_connection(peer: SocketAddr, stream: TcpStream) {
-    let mut connection = Connection::new(peer, accept_async(stream).await.expect("can accept"));
-    if let Err(err) = connection.start().await {
-        error!("{}: {err:#}", connection.peer);
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::builder()
@@ -685,7 +678,10 @@ async fn main() -> anyhow::Result<()> {
         let peer = stream.peer_addr().context("getting peer address")?;
         info!("peer address {peer}");
 
-        tokio::spawn(accept_connection(peer, stream));
+        let mut connection = Connection::new(peer, accept_async(stream).await.expect("can accept"));
+        if let Err(err) = connection.run_loop().await {
+            error!("{}: {err:#}", connection.peer);
+        }
     }
 
     Ok(())
