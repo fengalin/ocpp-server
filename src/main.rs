@@ -72,7 +72,7 @@ impl Connection {
         //     return None;
         // }
 
-        set_charing_profile
+        Some(set_charing_profile)
     }
 
     fn stop_transaction(&self) -> Option<call::RemoteStopTransaction> {

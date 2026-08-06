@@ -5,7 +5,11 @@ use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use log::debug;
 use ocpp_rs::{
     datetime::DateTimeWrapper,
-    v16::{call, data_types, enums::*},
+    v16::{
+        call,
+        data_types::{self, ChargingSchedulePeriod},
+        enums::*,
+    },
 };
 
 const DEFAULT_LIMIT: f32 = 7_400.0;
@@ -27,48 +31,114 @@ impl ChargingProfileBuilder {
         }
     }
 
+    // only intended at making tests predictable
+    #[cfg(test)]
+    fn with_start(schedule_start: NaiveDateTime) -> Self {
+        debug!("Schedule start {schedule_start}");
+        ChargingProfileBuilder {
+            start_schedule_utc: schedule_start.and_local_timezone(Local).unwrap().to_utc(),
+            periods: BTreeMap::new(),
+        }
+    }
+
     pub fn add(mut self, schedule_period: ChargingSchedulePeriodBuild) -> Self {
         self.periods.insert(schedule_period.start, schedule_period);
         self
     }
 
-    pub fn build(self) -> Option<call::SetChargingProfile> {
+    pub fn build_charging_schedule(self) -> Vec<ChargingSchedulePeriod> {
         let mut charging_schedule = vec![];
         let mut last_end_utc = None;
         for period in self.periods.values() {
             let start_utc = period.start.and_local_timezone(Local).unwrap().to_utc();
+            let end_utc = period.end.and_local_timezone(Local).unwrap().to_utc();
 
-            let last_end_utc = last_end_utc.get_or_insert(self.start_schedule_utc);
+            if last_end_utc.is_none() {
+                // first period
+                if start_utc >= self.start_schedule_utc {
+                    // first period starts in the future
+                    last_end_utc = Some(self.start_schedule_utc);
+                    // proceed as a regular period
+                } else {
+                    // first period starts in the past
+                    if end_utc > self.start_schedule_utc {
+                        // first period ends in the future
+                        debug!(
+                            "Adding truncated first schedule period: {period:?},\
+                            starting at {}",
+                            self.start_schedule_utc.with_timezone(&Local)
+                        );
+                        charging_schedule.push(data_types::ChargingSchedulePeriod {
+                            start_period: 0,
+                            limit: period.limit,
+                            number_phases: Some(DEFAULT_NB_OF_PHASES),
+                        });
+                        last_end_utc = Some(end_utc);
+                    } else {
+                        debug!("Skipping first schedule period entirely in the past: {period:?}");
+                    }
 
-            if start_utc > *last_end_utc {
-                // add a gap
-                let gap = *last_end_utc - self.start_schedule_utc;
-                debug!(
-                    "Adding schedule gap: {} seconds",
-                    (start_utc - *last_end_utc).num_seconds()
-                );
+                    continue;
+                }
+            }
+            // else not first period
+
+            let Some(ref mut last_end_utc) = last_end_utc else {
+                unreachable!("checked / assigned above");
+            };
+            if start_utc >= *last_end_utc {
+                if start_utc > *last_end_utc {
+                    // add a gap
+                    let gap = *last_end_utc - self.start_schedule_utc;
+                    debug!(
+                        "Adding schedule gap: {} seconds",
+                        (start_utc - *last_end_utc).num_seconds()
+                    );
+                    charging_schedule.push(data_types::ChargingSchedulePeriod {
+                        start_period: gap.num_seconds() as i32,
+                        limit: 0.0,
+                        number_phases: Some(DEFAULT_NB_OF_PHASES),
+                    })
+                }
+
+                let start_period = start_utc - self.start_schedule_utc;
+                debug!("Adding schedule period: {period:?}");
                 charging_schedule.push(data_types::ChargingSchedulePeriod {
-                    start_period: gap.num_seconds() as i32,
-                    limit: 0.0,
+                    start_period: start_period.num_seconds() as i32,
+                    limit: period.limit,
                     number_phases: Some(DEFAULT_NB_OF_PHASES),
-                })
+                });
+            } else if end_utc > *last_end_utc {
+                // this period is set to start before last period ends
+                // and it ends after last period's end
+                debug!(
+                    "Adding truncated schedule period: {period:?}, starting at {}",
+                    last_end_utc.with_timezone(&Local)
+                );
+                let last_end_period = *last_end_utc - self.start_schedule_utc;
+                charging_schedule.push(data_types::ChargingSchedulePeriod {
+                    start_period: last_end_period.num_seconds() as i32,
+                    limit: period.limit,
+                    number_phases: Some(DEFAULT_NB_OF_PHASES),
+                });
+            } else {
+                debug!(
+                    "Skipping schedule period: {period:?},\
+                        overlapping previous period",
+                );
             }
 
-            let start_period = start_utc - self.start_schedule_utc;
-            debug!("Adding schedule period: {period:?}");
-            charging_schedule.push(data_types::ChargingSchedulePeriod {
-                start_period: start_period.num_seconds() as i32,
-                limit: period.limit,
-                number_phases: Some(DEFAULT_NB_OF_PHASES),
-            });
-
-            *last_end_utc = period.end.and_local_timezone(Local).unwrap().to_utc();
+            if end_utc > *last_end_utc {
+                *last_end_utc = end_utc;
+            }
         }
 
-        let last_end_utc = last_end_utc?;
+        let last_end_utc = last_end_utc.unwrap_or(self.start_schedule_utc);
 
         let last_end_start = last_end_utc - self.start_schedule_utc;
-        if last_end_start.num_seconds() > 0 {
+        if last_end_start.num_seconds() > 0 || charging_schedule.is_empty() {
+            // add a zero limit to terminate the schedule
+            // or as a safety measure if the configuration would result in an empty schedule
             charging_schedule.push(data_types::ChargingSchedulePeriod {
                 start_period: last_end_start.num_seconds() as i32,
                 limit: 0.0,
@@ -77,15 +147,18 @@ impl ChargingProfileBuilder {
         }
 
         debug!("resulting ChargingSchedule\n{charging_schedule:#?}");
+        charging_schedule
+    }
 
-        Some(call::SetChargingProfile {
+    pub fn build(self) -> call::SetChargingProfile {
+        call::SetChargingProfile {
             connector_id: 0,
             cs_charging_profiles: data_types::ChargingProfile {
                 charging_profile_id: 0, // FIXME keep track of this
                 transaction_id: None,
                 stack_level: 0, // highest gets highest priority
                 charging_profile_purpose: ChargingProfilePurposeType::ChargePointMaxProfile,
-                // FIXME unsure whether this is supported by the charging point
+                // FIXME unsure whether this is considered by the charging point
                 charging_profile_kind: ChargingProfileKindType::Absolute,
                 // FIXME only weekly supported?
                 recurrency_kind: None,
@@ -101,11 +174,11 @@ impl ChargingProfileBuilder {
                     // when requesting the schedule
                     start_schedule: Some(data_types::DateTimeWrapper::new(self.start_schedule_utc)),
                     charging_rate_unit: ChargingRateUnitType::W,
-                    charging_schedule_period: charging_schedule,
+                    charging_schedule_period: self.build_charging_schedule(),
                     min_charging_rate: None,
                 },
             },
-        })
+        }
     }
 }
 
@@ -279,4 +352,328 @@ pub fn build_set_charging_profile(
     })
 }
 
-// FIXME add tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init() {
+        use std::sync::Once;
+        static LOGGER: Once = Once::new();
+        LOGGER.call_once(|| {
+            env_logger::builder()
+                .format_source_path(true)
+                .format_line_number(true)
+                .try_init()
+                .unwrap();
+        });
+    }
+
+    #[test]
+    pub fn disjointed_in_the_future() {
+        init();
+
+        let start_schedule = NaiveDateTime::new(
+            Local::now().date_naive(),
+            NaiveTime::from_hms_opt(12, 00, 00).unwrap(),
+        );
+
+        let period1_start_delta = TimeDelta::hours(1);
+        let period1_start = start_schedule.time() + period1_start_delta;
+        let period1_duration = TimeDelta::hours(2);
+        let period1_end = period1_start + period1_duration;
+        let period1_limit = 5.0;
+
+        let period2_start_delta = TimeDelta::hours(6);
+        let period2_start = start_schedule.time() + period2_start_delta;
+        let period2_duration = TimeDelta::hours(3);
+        let period2_end = period2_start + period2_duration;
+
+        let charging_schedule_today_hours = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_ending_today(period1_start, period1_end)
+                    .unwrap()
+                    .limit(period1_limit),
+            )
+            .add(
+                ChargingSchedulePeriodBuild::starting_ending_today(period2_start, period2_end)
+                    .unwrap(),
+            )
+            .build_charging_schedule();
+
+        let charging_schedule_today_duration = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_today_with_duration(
+                    period1_start,
+                    period1_duration,
+                )
+                .limit(period1_limit),
+            )
+            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+                period2_start,
+                period2_duration,
+            ))
+            .build_charging_schedule();
+
+        assert_eq!(
+            charging_schedule_today_hours,
+            charging_schedule_today_duration
+        );
+
+        assert_eq!(
+            charging_schedule_today_hours,
+            vec![
+                ChargingSchedulePeriod {
+                    start_period: 0,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period1_start_delta.num_seconds() as _,
+                    limit: period1_limit,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period1_start_delta + period1_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period2_start_delta.num_seconds() as _,
+                    limit: DEFAULT_LIMIT,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period2_start_delta + period2_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    pub fn disjointed_first_starting_in_the_past() {
+        init();
+
+        let start_schedule = NaiveDateTime::new(
+            Local::now().date_naive(),
+            NaiveTime::from_hms_opt(12, 00, 00).unwrap(),
+        );
+
+        let period1_start_delta = TimeDelta::hours(1);
+        let period1_start = start_schedule.time() - period1_start_delta;
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5.0;
+
+        let period2_start_delta = TimeDelta::hours(6);
+        let period2_start = start_schedule.time() + period2_start_delta;
+        let period2_duration = TimeDelta::hours(3);
+
+        let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_today_with_duration(
+                    period1_start,
+                    period1_duration,
+                )
+                .limit(period1_limit),
+            )
+            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+                period2_start,
+                period2_duration,
+            ))
+            .build_charging_schedule();
+
+        assert_eq!(
+            charging_schedule,
+            vec![
+                ChargingSchedulePeriod {
+                    start_period: 0,
+                    limit: period1_limit,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period1_duration - period1_start_delta).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period2_start_delta.num_seconds() as _,
+                    limit: DEFAULT_LIMIT,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period2_start_delta + period2_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    pub fn disjointed_first_entirely_in_the_past() {
+        init();
+
+        let start_schedule = NaiveDateTime::new(
+            Local::now().date_naive(),
+            NaiveTime::from_hms_opt(12, 00, 00).unwrap(),
+        );
+
+        let period1_start_delta = TimeDelta::hours(3);
+        let period1_start = start_schedule.time() - period1_start_delta;
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5.0;
+
+        let period2_start_delta = TimeDelta::hours(6);
+        let period2_start = start_schedule.time() + period2_start_delta;
+        let period2_duration = TimeDelta::hours(3);
+
+        let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_today_with_duration(
+                    period1_start,
+                    period1_duration,
+                )
+                .limit(period1_limit),
+            )
+            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+                period2_start,
+                period2_duration,
+            ))
+            .build_charging_schedule();
+
+        assert_eq!(
+            charging_schedule,
+            vec![
+                ChargingSchedulePeriod {
+                    start_period: 0,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period2_start_delta.num_seconds() as _,
+                    limit: DEFAULT_LIMIT,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period2_start_delta + period2_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    pub fn second_partially_overlapping_first() {
+        init();
+
+        let start_schedule = NaiveDateTime::new(
+            Local::now().date_naive(),
+            NaiveTime::from_hms_opt(12, 00, 00).unwrap(),
+        );
+
+        let period1_start_delta = TimeDelta::hours(1);
+        let period1_start = start_schedule.time() + period1_start_delta;
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5.0;
+
+        let period2_start_delta = TimeDelta::hours(2);
+        let period2_start = start_schedule.time() + period2_start_delta;
+        let period2_duration = TimeDelta::hours(3);
+
+        let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_today_with_duration(
+                    period1_start,
+                    period1_duration,
+                )
+                .limit(period1_limit),
+            )
+            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+                period2_start,
+                period2_duration,
+            ))
+            .build_charging_schedule();
+
+        assert_eq!(
+            charging_schedule,
+            vec![
+                ChargingSchedulePeriod {
+                    start_period: 0,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period1_start_delta.num_seconds() as _,
+                    limit: period1_limit,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period1_start_delta + period1_duration).num_seconds() as _,
+                    limit: DEFAULT_LIMIT,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period2_start_delta + period2_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    pub fn second_overlapping_first() {
+        init();
+
+        let start_schedule = NaiveDateTime::new(
+            Local::now().date_naive(),
+            NaiveTime::from_hms_opt(12, 00, 00).unwrap(),
+        );
+
+        let period1_start_delta = TimeDelta::hours(1);
+        let period1_start = start_schedule.time() + period1_start_delta;
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5.0;
+
+        let period2_start_delta = TimeDelta::hours(2);
+        let period2_start = start_schedule.time() + period2_start_delta;
+        let period2_duration = TimeDelta::minutes(30);
+
+        let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
+            .add(
+                ChargingSchedulePeriodBuild::starting_today_with_duration(
+                    period1_start,
+                    period1_duration,
+                )
+                .limit(period1_limit),
+            )
+            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+                period2_start,
+                period2_duration,
+            ))
+            .build_charging_schedule();
+
+        assert_eq!(
+            charging_schedule,
+            vec![
+                ChargingSchedulePeriod {
+                    start_period: 0,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: period1_start_delta.num_seconds() as _,
+                    limit: period1_limit,
+                    number_phases: Some(1),
+                },
+                ChargingSchedulePeriod {
+                    start_period: (period1_start_delta + period1_duration).num_seconds() as _,
+                    limit: 0.0,
+                    number_phases: Some(1),
+                },
+            ],
+        );
+    }
+}
