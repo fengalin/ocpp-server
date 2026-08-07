@@ -4,7 +4,7 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard},
 };
 
-use crate::{ACTIVE_CHARGING_SESSION_STATE, ChargingSession, ChargingSessionSnapshot};
+use crate::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 
 const SQLITE_PATH: &str = "../charging_sessions.sqlite";
 static DATABASE: LazyLock<Mutex<sqlite::Connection>> = LazyLock::new(|| {
@@ -49,9 +49,10 @@ impl<'a> Database<'a> {
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
                     )
-                    AND state == '{ACTIVE_CHARGING_SESSION_STATE}'
+                    AND state == '{}'
                 )
-            "
+            ",
+                ChargingSessionState::Active,
             ))
             .unwrap();
 
@@ -77,7 +78,7 @@ impl<'a> Database<'a> {
                     session_id,
                     energy,
                     soc,
-                    ACTIVE_CHARGING_SESSION_STATE,
+                    ChargingSessionState::Active,
                 )
             });
 
@@ -91,7 +92,8 @@ impl<'a> Database<'a> {
         let mut statement = self
             .0
             .prepare(format!(
-                "INSERT INTO charging_session (state) VALUES ('{ACTIVE_CHARGING_SESSION_STATE}') RETURNING rowid;"
+                "INSERT INTO charging_session (state) VALUES ('{}') RETURNING rowid;",
+                ChargingSessionState::Active
             ))
             .unwrap();
         match statement.next() {
@@ -104,7 +106,7 @@ impl<'a> Database<'a> {
         statement.read::<i64, _>("id").expect("charging session id") as _
     }
 
-    pub fn stop_charging_session(&self, session_id: i32, reason: &str) {
+    pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
         let res = self.0.execute(format!(
             "UPDATE charging_session SET state = '{reason}' WHERE id = {session_id}"
         ));

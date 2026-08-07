@@ -1,8 +1,9 @@
 use chrono::{DateTime, Local, Utc};
+use ocpp_rs::v16::enums;
+use std::{fmt, str};
 
 use crate::Database;
 
-pub const ACTIVE_CHARGING_SESSION_STATE: &str = "ACTIVE";
 const BATTERY_CAPACITY: f64 = 48_100.0;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -19,7 +20,7 @@ pub struct ChargingSession {
     initial_energy: u64,
     initial_soc: Option<f64>,
     snapshots: Vec<ChargingSessionSnapshot>,
-    stop_reason: String,
+    state: ChargingSessionState,
 }
 
 impl ChargingSession {
@@ -33,26 +34,38 @@ impl ChargingSession {
             initial_energy: energy,
             initial_soc: soc,
             snapshots: vec![],
-            stop_reason: ACTIVE_CHARGING_SESSION_STATE.to_string(),
+            state: ChargingSessionState::Active,
         };
         this.add_snapshot_priv(&db, timestamp, energy, 0);
 
         this
     }
 
-    pub fn from_database(session_id: i32, energy: u64, soc: Option<f64>, state: &str) -> Self {
+    pub fn from_database(
+        session_id: i32,
+        energy: u64,
+        soc: Option<f64>,
+        state: ChargingSessionState,
+    ) -> Self {
         ChargingSession {
             session_id,
             initial_energy: energy,
             initial_soc: soc,
             snapshots: vec![],
-            // FIXME mismatch
-            stop_reason: state.to_string(),
+            state,
         }
     }
 
     pub fn session_id(&self) -> i32 {
         self.session_id
+    }
+
+    pub fn state(&self) -> &ChargingSessionState {
+        &self.state
+    }
+
+    pub fn set_state(&mut self, state: ChargingSessionState) {
+        self.state = state;
     }
 
     pub fn add_snapshot(
@@ -114,14 +127,95 @@ impl ChargingSession {
         });
     }
 
-    pub fn stop(&mut self, timestamp: DateTime<Utc>, energy: u64, reason: impl ToString) {
+    pub fn stop(
+        &mut self,
+        timestamp: DateTime<Utc>,
+        energy: u64,
+        reason: impl Into<ChargingSessionState>,
+    ) {
         let db = Database::get();
 
         self.add_snapshot_priv(&db, timestamp, energy, 0);
-        let reason = reason.to_string();
-
+        let reason = reason.into();
         db.stop_charging_session(self.session_id, &reason);
-        self.stop_reason = reason;
+        self.state = reason;
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub enum ChargingSessionState {
+    Active,
+    StoppedByServer,
+    SuspendedByEvse,
+    SuspendedByEv,
+    StoppedByUser,
+    Reboot,
+    UnlockCommandFromServer,
+    Error(String),
+}
+
+impl ChargingSessionState {
+    pub fn is_active(&self) -> bool {
+        matches!(self, ChargingSessionState::Active)
+    }
+}
+
+impl fmt::Display for ChargingSessionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ChargingSessionState::*;
+        f.write_str(match self {
+            Active => "active",
+            StoppedByServer => "stopped by server",
+            SuspendedByEvse => "suspended by EVSE",
+            SuspendedByEv => "suspended by EV",
+            StoppedByUser => "stopped by User",
+            Reboot => "reboot",
+            UnlockCommandFromServer => "unlock command from server",
+            Error(err) => {
+                return write!(f, "error: {err}");
+            }
+        })
+    }
+}
+
+impl str::FromStr for ChargingSessionState {
+    // use ! when stable
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ChargingSessionState::*;
+        Ok(match s {
+            "active" => Active,
+            "stopped by server" => StoppedByServer,
+            "suspended by EVSE" => SuspendedByEvse,
+            "suspended by EV" => SuspendedByEv,
+            "stop by user" => StoppedByUser,
+            "reboot" => Reboot,
+            "unlock command from server" => UnlockCommandFromServer,
+            other => Error(other.to_string()),
+        })
+    }
+}
+
+impl From<Option<enums::Reason>> for ChargingSessionState {
+    fn from(reason: Option<enums::Reason>) -> Self {
+        use ChargingSessionState::*;
+        let Some(reason) = reason else {
+            return Error("stopped for unknown reason".to_string());
+        };
+        use enums::Reason::*;
+        match reason {
+            Local => StoppedByUser,
+            Remote => StoppedByUser,
+            DeAuthorized => Error("de-authorized".to_string()),
+            EmergencyStop => Error("emergency stop".to_string()),
+            EVDisconnected => Error("EV disconnected".to_string()),
+            HardReset => Error("hard reset".to_string()),
+            SoftReset => Error("soft reset".to_string()),
+            PowerLoss => Error("power loss".to_string()),
+            UnlockCommand => UnlockCommandFromServer,
+            enums::Reason::Reboot => ChargingSessionState::Reboot,
+            Other => Error("other".to_string()),
+        }
     }
 }
 
@@ -160,7 +254,11 @@ mod tests {
             Some(&cs),
         );
 
-        cs.stop(Utc::now(), initial_energy + 25, "SuspendedEV");
+        cs.stop(
+            Utc::now(),
+            initial_energy + 25,
+            ChargingSessionState::SuspendedByEv,
+        );
         assert_eq!(
             Database::get().get_last_active_charging_session().as_ref(),
             None,

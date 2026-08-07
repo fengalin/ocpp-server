@@ -206,6 +206,7 @@ impl Connection {
 
                         if action.status == ChargePointStatus::Available
                             && let Some(mut cs) = self.charging_session.take()
+                            && cs.state().is_active()
                         {
                             warn!(
                                 "{} ## ending previous active session with id: {} due to connector status",
@@ -215,7 +216,10 @@ impl Connection {
                             cs.stop(
                                 Utc::now(),
                                 0,
-                                "Got connector available while session with still active",
+                                ChargingSessionState::Error(
+                                    "Got connector available while session with still active"
+                                        .to_string(),
+                                ),
                             );
                         }
                     }
@@ -323,7 +327,9 @@ impl Connection {
                                 cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
                                 && let Some(soc_limit) = SOC_LIMIT
                                 && soc >= soc_limit
+                                && cs.state().is_active()
                             {
+                                cs.set_state(ChargingSessionState::StoppedByServer);
                                 self.call_queue.push_back(Action::RemoteStopTransaction(
                                     call::RemoteStopTransaction {
                                         transaction_id: session_id,
@@ -345,7 +351,9 @@ impl Connection {
                             cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
                             && let Some(soc_limit) = SOC_LIMIT
                             && soc >= soc_limit
+                            && cs.state().is_active()
                         {
+                            cs.set_state(ChargingSessionState::StoppedByServer);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction {
                                     transaction_id: session_id,
@@ -415,7 +423,9 @@ impl Connection {
                 );
             }
             Action::StartTransaction(action) => {
-                if let Some(mut cs) = self.charging_session.take() {
+                if let Some(mut cs) = self.charging_session.take()
+                    && cs.state().is_active()
+                {
                     warn!(
                         "{} ## new session ending previous active session with id: {}",
                         self.peer,
@@ -424,7 +434,9 @@ impl Connection {
                     cs.stop(
                         Utc::now(),
                         0,
-                        "Got start transaction while session with still active",
+                        ChargingSessionState::Error(
+                            "Got start transaction while session with still active".to_string(),
+                        ),
                     );
                 }
 
@@ -463,13 +475,7 @@ impl Connection {
                             action.meter_stop,
                             action.reason
                         );
-                        cs.stop(
-                            action.timestamp.inner(),
-                            action.meter_stop,
-                            action
-                                .reason
-                                .map_or("UNKNOWN".to_string(), |r| format!("{r:?}")),
-                        )
+                        cs.stop(action.timestamp.inner(), action.meter_stop, action.reason)
                     } else {
                         warn!(
                             "{} ## transaction with id: {} stopped (expected {cur_session_id}), timestamp: {}, meter stop: {}, reason: {:?}",
@@ -479,7 +485,13 @@ impl Connection {
                             action.meter_stop,
                             action.reason
                         );
-                        cs.stop(Utc::now(), 0, "Got stop transaction for another session");
+                        cs.stop(
+                            Utc::now(),
+                            0,
+                            ChargingSessionState::Error(
+                                "Got stop transaction for another session".to_string(),
+                            ),
+                        );
                     }
                 } else {
                     warn!(
