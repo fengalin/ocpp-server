@@ -22,8 +22,11 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
+mod database;
+use database::Database;
+
 mod charging_session;
-use charging_session::*;
+pub use charging_session::*;
 
 mod measurements;
 use measurements::*;
@@ -150,7 +153,7 @@ impl Connection {
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
-            charging_session: ChargingSession::get_last_active(),
+            charging_session: Database::get().get_last_active_charging_session(),
         }
     }
 
@@ -666,7 +669,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     // make sure the DB is available
-    let _ = &*DATABASE;
+    let _ = Database::get();
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT);
     let listener = TcpListener::bind(addr)
