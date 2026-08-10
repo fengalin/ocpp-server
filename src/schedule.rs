@@ -15,14 +15,21 @@ use ocpp_rs::{
 const DEFAULT_LIMIT: f32 = 7_400.0;
 const DEFAULT_NB_OF_PHASES: i32 = 1;
 
+pub struct ChargingProfile;
+impl ChargingProfile {
+    pub fn builder() -> ChargingProfileBuilder {
+        ChargingProfileBuilder::default()
+    }
+}
+
 #[derive(Debug)]
 pub struct ChargingProfileBuilder {
     start_schedule_utc: DateTime<Utc>,
-    periods: BTreeMap<NaiveDateTime, ChargingSchedulePeriodBuild>,
+    periods: BTreeMap<NaiveDateTime, ChargingSchedulePeriodBuilder>,
 }
 
-impl ChargingProfileBuilder {
-    pub fn new() -> Self {
+impl Default for ChargingProfileBuilder {
+    fn default() -> Self {
         let schedule_start = Local::now();
         debug!("Schedule start {schedule_start}");
         ChargingProfileBuilder {
@@ -30,7 +37,9 @@ impl ChargingProfileBuilder {
             periods: BTreeMap::new(),
         }
     }
+}
 
+impl ChargingProfileBuilder {
     // only intended at making tests predictable
     #[cfg(test)]
     fn with_start(schedule_start: NaiveDateTime) -> Self {
@@ -41,7 +50,7 @@ impl ChargingProfileBuilder {
         }
     }
 
-    pub fn add(mut self, schedule_period: ChargingSchedulePeriodBuild) -> Self {
+    pub fn add_period(mut self, schedule_period: ChargingSchedulePeriodBuilder) -> Self {
         self.periods.insert(schedule_period.start, schedule_period);
         self
     }
@@ -182,20 +191,29 @@ impl ChargingProfileBuilder {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ChargingScheduleError {
+    #[error("end {} is earlier than start {}", .end, .start)]
+    EndEarlierThanStart { start: String, end: String },
+}
+
 #[derive(Debug)]
-pub struct ChargingSchedulePeriodBuild {
+pub struct ChargingSchedulePeriodBuilder {
     start: NaiveDateTime,
     end: NaiveDateTime,
     limit: f32,
 }
 
-impl ChargingSchedulePeriodBuild {
+impl ChargingSchedulePeriodBuilder {
     #[allow(unused)]
-    pub fn new(start: NaiveDateTime, end: NaiveDateTime) -> Result<Self, ()> {
+    pub fn new(start: NaiveDateTime, end: NaiveDateTime) -> Result<Self, ChargingScheduleError> {
         if end < start {
-            return Err(());
+            return Err(ChargingScheduleError::EndEarlierThanStart {
+                start: start.to_string(),
+                end: end.to_string(),
+            });
         }
-        Ok(ChargingSchedulePeriodBuild {
+        Ok(ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start,
             end,
@@ -204,7 +222,7 @@ impl ChargingSchedulePeriodBuild {
 
     #[allow(unused)]
     pub fn with_duration(start: NaiveDateTime, duration: TimeDelta) -> Self {
-        ChargingSchedulePeriodBuild {
+        ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start,
             end: start + duration,
@@ -212,12 +230,18 @@ impl ChargingSchedulePeriodBuild {
     }
 
     #[allow(unused)]
-    pub fn starting_ending_today(start_time: NaiveTime, end_time: NaiveTime) -> Result<Self, ()> {
+    pub fn starting_ending_today(
+        start_time: NaiveTime,
+        end_time: NaiveTime,
+    ) -> Result<Self, ChargingScheduleError> {
         if end_time < start_time {
-            return Err(());
+            return Err(ChargingScheduleError::EndEarlierThanStart {
+                start: start_time.to_string(),
+                end: end_time.to_string(),
+            });
         }
         let today = Local::now().date_naive();
-        Ok(ChargingSchedulePeriodBuild {
+        Ok(ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start: NaiveDateTime::new(today, start_time),
             end: NaiveDateTime::new(today, end_time),
@@ -228,7 +252,7 @@ impl ChargingSchedulePeriodBuild {
     pub fn starting_today_with_duration(start_time: NaiveTime, duration: TimeDelta) -> Self {
         let today = Local::now().date_naive();
         let start = NaiveDateTime::new(today, start_time);
-        ChargingSchedulePeriodBuild {
+        ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start,
             end: start + duration,
@@ -239,12 +263,15 @@ impl ChargingSchedulePeriodBuild {
     pub fn starting_ending_tomorrow(
         start_time: NaiveTime,
         end_time: NaiveTime,
-    ) -> Result<Self, ()> {
+    ) -> Result<Self, ChargingScheduleError> {
         if end_time < start_time {
-            return Err(());
+            return Err(ChargingScheduleError::EndEarlierThanStart {
+                start: start_time.to_string(),
+                end: end_time.to_string(),
+            });
         }
         let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
-        Ok(ChargingSchedulePeriodBuild {
+        Ok(ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start: NaiveDateTime::new(tomorrow, start_time),
             end: NaiveDateTime::new(tomorrow, end_time),
@@ -255,7 +282,7 @@ impl ChargingSchedulePeriodBuild {
     pub fn starting_tomorrow_with_duration(start_time: NaiveTime, duration: TimeDelta) -> Self {
         let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
         let start = NaiveDateTime::new(tomorrow, start_time);
-        ChargingSchedulePeriodBuild {
+        ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start,
             end: start + duration,
@@ -266,7 +293,7 @@ impl ChargingSchedulePeriodBuild {
     pub fn starting_today_ending_tomorrow(start_time: NaiveTime, end_time: NaiveTime) -> Self {
         let today = Local::now().date_naive();
         let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
-        ChargingSchedulePeriodBuild {
+        ChargingSchedulePeriodBuilder {
             limit: DEFAULT_LIMIT,
             start: NaiveDateTime::new(today, start_time),
             end: NaiveDateTime::new(tomorrow, end_time),
@@ -389,26 +416,26 @@ mod tests {
         let period2_end = period2_start + period2_duration;
 
         let charging_schedule_today_hours = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_ending_today(period1_start, period1_end)
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_ending_today(period1_start, period1_end)
                     .unwrap()
                     .limit(period1_limit),
             )
-            .add(
-                ChargingSchedulePeriodBuild::starting_ending_today(period2_start, period2_end)
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_ending_today(period2_start, period2_end)
                     .unwrap(),
             )
             .build_charging_schedule();
 
         let charging_schedule_today_duration = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_today_with_duration(
                     period1_start,
                     period1_duration,
                 )
                 .limit(period1_limit),
             )
-            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(ChargingSchedulePeriodBuilder::starting_today_with_duration(
                 period2_start,
                 period2_duration,
             ))
@@ -470,14 +497,14 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_today_with_duration(
                     period1_start,
                     period1_duration,
                 )
                 .limit(period1_limit),
             )
-            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(ChargingSchedulePeriodBuilder::starting_today_with_duration(
                 period2_start,
                 period2_duration,
             ))
@@ -529,14 +556,14 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_today_with_duration(
                     period1_start,
                     period1_duration,
                 )
                 .limit(period1_limit),
             )
-            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(ChargingSchedulePeriodBuilder::starting_today_with_duration(
                 period2_start,
                 period2_duration,
             ))
@@ -583,14 +610,14 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_today_with_duration(
                     period1_start,
                     period1_duration,
                 )
                 .limit(period1_limit),
             )
-            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(ChargingSchedulePeriodBuilder::starting_today_with_duration(
                 period2_start,
                 period2_duration,
             ))
@@ -642,14 +669,14 @@ mod tests {
         let period2_duration = TimeDelta::minutes(30);
 
         let charging_schedule = ChargingProfileBuilder::with_start(start_schedule)
-            .add(
-                ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_today_with_duration(
                     period1_start,
                     period1_duration,
                 )
                 .limit(period1_limit),
             )
-            .add(ChargingSchedulePeriodBuild::starting_today_with_duration(
+            .add_period(ChargingSchedulePeriodBuilder::starting_today_with_duration(
                 period2_start,
                 period2_duration,
             ))

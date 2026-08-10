@@ -46,9 +46,9 @@ impl Connection {
         }
 
         use chrono::NaiveTime;
-        let set_charing_profile = ChargingProfileBuilder::new()
-            .add(
-                ChargingSchedulePeriodBuild::starting_ending_today(
+        let set_charing_profile = ChargingProfile::builder()
+            .add_period(
+                ChargingSchedulePeriodBuilder::starting_ending_today(
                     NaiveTime::from_hms_opt(14, 12, 00).unwrap(),
                     NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
                 )
