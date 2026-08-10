@@ -1,6 +1,6 @@
 use anyhow::{Context, bail};
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use futures::{future::FusedFuture, prelude::*};
 use log::*;
 use ocpp_rs::{
     datetime::DateTimeWrapper,
@@ -604,33 +604,50 @@ impl Connection {
         &self.peer
     }
 
-    pub async fn run_loop(&mut self) -> anyhow::Result<()> {
+    pub async fn run_loop(
+        &mut self,
+        mut ctrl_c: std::pin::Pin<&mut impl FusedFuture<Output = Result<(), std::io::Error>>>,
+    ) -> anyhow::Result<()> {
         loop {
-            let Some(msg) = self.ws_stream.next().await else {
-                bail!("websocket terminated");
-            };
+            futures::select_biased! {
+                _ = ctrl_c => {
+                    warn!("shutting down due to SIGINT");
+                    self.ws_stream.close(None).await.context("closing websocket")?;
+                    let recv_res = self.ws_stream.next().await;
+                    info!("client replied {recv_res:?}");
+                    return Ok(());
+                }
+                recv_res = self.ws_stream.next() => {
+                    let Some(msg) = recv_res else {
+                        bail!("websocket terminated");
+                    };
 
-            let msg = msg.inspect_err(|err| match err {
-                ts::Error::ConnectionClosed | ts::Error::Protocol(_) | ts::Error::Utf8(_) => (),
-                other => error!("Error processing connection: {other}"),
-            })?;
+                    let msg = msg.inspect_err(|err| match err {
+                        ts::Error::ConnectionClosed | ts::Error::Protocol(_) | ts::Error::Utf8(_) => (),
+                        other => error!("Error processing connection: {other}"),
+                    })?;
 
-            self.handle_incoming_ws_message(msg)
-                .await
-                .context("handling incoming message")?;
+                    self.handle_incoming_ws_message(msg)
+                        .await
+                        .context("handling incoming message")?;
 
-            if !self.prepared_first_actions
-                && let Some(connector_id) = self.connector_id
-            {
-                self.prepare_first_actions(connector_id);
-            }
+                    if !self.prepared_first_actions
+                        && let Some(connector_id) = self.connector_id
+                    {
+                        self.prepare_first_actions(connector_id);
+                    }
 
-            if let Some(action) = self.call_queue.pop_front()
-                && let Err(err) = self.send_action(action).await
-            {
-                error!("{}: failed to send first action: {err}", self.peer);
+                    if let Some(action) = self.call_queue.pop_front()
+                        && let Err(err) = self.send_action(action).await
+                    {
+                        error!("{}: failed to send first action: {err}", self.peer);
+                    }
+                }
+                complete => break,
             }
         }
+
+        Ok(())
     }
 
     async fn handle_incoming_ws_message(&mut self, msg: ts::Message) -> anyhow::Result<()> {

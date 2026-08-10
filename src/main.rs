@@ -1,4 +1,5 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
+use futures::{pin_mut, prelude::*};
 use log::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::net::TcpListener;
@@ -31,18 +32,37 @@ async fn main() -> anyhow::Result<()> {
     let _ = Database::get();
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT);
+
+    let ctrl_c = tokio::signal::ctrl_c().fuse();
+    pin_mut!(ctrl_c);
+
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bindind to {addr}"))?;
+    let accept_stream = listener.accept().fuse();
+    pin_mut!(accept_stream);
+
     info!("Listening on: {addr}");
 
-    while let Ok((stream, _)) = listener.accept().await {
-        let peer = stream.peer_addr().context("getting peer address")?;
-        info!("peer address {peer}");
+    loop {
+        futures::select_biased! {
+            _ = ctrl_c => {
+                warn!("shutting down due to SIGINT");
+                break;
+            }
+            accept_res = accept_stream => {
+                let Ok((stream, _)) = accept_res else {
+                    bail!("TCP listener terminated");
+                };
+                let peer = stream.peer_addr().context("getting peer address")?;
+                info!("peer address {peer}");
 
-        let mut connection = Connection::new(peer, accept_async(stream).await.expect("can accept"));
-        if let Err(err) = connection.run_loop().await {
-            error!("{}: {err:#}", connection.peer());
+                let mut connection = Connection::new(peer, accept_async(stream).await.expect("can accept"));
+                if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
+                    error!("{}: {err:#}", connection.peer());
+                }
+            }
+            complete => break,
         }
     }
 
