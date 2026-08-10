@@ -29,7 +29,6 @@ pub struct DpmData {
 }
 
 #[derive(Debug)]
-#[expect(unused)]
 pub struct DataTransfer {
     pub timestamp: String,
     pub transaction_id: Option<i32>,
