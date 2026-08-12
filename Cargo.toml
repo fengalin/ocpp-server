@@ -10,7 +10,7 @@ env_logger = "0.11.11"
 futures = "0.3.33"
 log = "0.4.33"
 ocpp_rs = "0.4.1"
-rusqlite = "0.40.2"
+rusqlite = { version = "0.40.2", features = ["chrono"] }
 serde = { version = "^1", features = ["derive", "alloc"], default-features = false }
 serde_json = { version = "^1", default-features = false, features = ["alloc", "arbitrary_precision"] }
 thiserror = "2.0.20"

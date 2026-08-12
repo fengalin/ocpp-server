@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 use rusqlite::{Connection, named_params};
 use std::{
     fs,
@@ -69,20 +69,14 @@ impl<'a> Database<'a> {
             .next()
             .context("getting last active charging session row")?
         {
-            let timestamp = row.get_unwrap::<_, String>("timestamp");
+            let timestamp = row.get_unwrap::<_, DateTime<Local>>("timestamp");
             let energy = row.get_unwrap::<_, i64>("energy") as u64;
             let power = row.get_unwrap::<_, i64>("power") as u64;
             let soc = row.get_unwrap::<_, Option<f64>>("soc");
 
             let cs = cs.get_or_insert_with(|| {
                 let session_id = row.get_unwrap::<_, i64>("sessionid") as i32;
-                log::info!(
-                    "## found active session: {session_id}, timestamp: {}",
-                    timestamp
-                        .parse::<DateTime::<Utc>>()
-                        .unwrap()
-                        .with_timezone(&Local),
-                );
+                log::info!("## found active session: {session_id}, timestamp: {timestamp}");
 
                 ChargingSession::from_database(
                     session_id,
@@ -92,7 +86,7 @@ impl<'a> Database<'a> {
                 )
             });
 
-            cs.add_snapshot_from_database(&timestamp, energy, power, soc);
+            cs.add_snapshot_from_database(timestamp, energy, power, soc);
         }
 
         Ok(cs)
@@ -143,7 +137,7 @@ impl<'a> Database<'a> {
             );
         ",
             named_params![
-                ":timestamp": snapshot.timestamp.to_utc().to_string(),
+                ":timestamp": snapshot.timestamp,
                 ":session_id": session_id,
                 ":energy": snapshot.energy as i64,
                 ":power": snapshot.power as i64,

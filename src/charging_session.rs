@@ -111,16 +111,13 @@ impl ChargingSession {
 
     pub fn add_snapshot_from_database(
         &mut self,
-        timestamp: &str,
+        timestamp: DateTime<Local>,
         energy: u64,
         power: u64,
         soc: Option<f64>,
     ) {
         self.snapshots.push(ChargingSessionSnapshot {
-            timestamp: timestamp
-                .parse::<DateTime<Utc>>()
-                .unwrap()
-                .with_timezone(&Local),
+            timestamp,
             energy,
             power,
             soc,
