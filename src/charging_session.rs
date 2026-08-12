@@ -2,9 +2,7 @@ use chrono::{DateTime, Local, Utc};
 use ocpp_rs::v16::enums;
 use std::{fmt, str};
 
-use crate::Database;
-
-const BATTERY_CAPACITY: f64 = 48_100.0;
+use crate::{Battery, Database};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct ChargingSessionSnapshot {
@@ -18,21 +16,23 @@ pub struct ChargingSessionSnapshot {
 pub struct ChargingSession {
     session_id: i32,
     initial_energy: u64,
+    battery_capacity: f64,
     initial_soc: Option<f64>,
     snapshots: Vec<ChargingSessionSnapshot>,
     state: ChargingSessionState,
 }
 
 impl ChargingSession {
-    pub fn new(timestamp: DateTime<Utc>, energy: u64, soc: Option<f64>) -> Self {
+    pub fn new(timestamp: DateTime<Utc>, energy: u64, battery: Battery) -> Self {
         let db = Database::get();
 
-        let session_id = db.add_new_charging_session();
+        let session_id = db.add_new_charging_session(battery.capacity);
 
         let mut this = ChargingSession {
             session_id,
             initial_energy: energy,
-            initial_soc: soc,
+            battery_capacity: battery.capacity,
+            initial_soc: battery.initial_soc,
             snapshots: vec![],
             state: ChargingSessionState::Active,
         };
@@ -44,12 +44,14 @@ impl ChargingSession {
     pub fn from_database(
         session_id: i32,
         energy: u64,
+        battery_capacity: f64,
         soc: Option<f64>,
         state: ChargingSessionState,
     ) -> Self {
         ChargingSession {
             session_id,
             initial_energy: energy,
+            battery_capacity,
             initial_soc: soc,
             snapshots: vec![],
             state,
@@ -86,7 +88,7 @@ impl ChargingSession {
     ) -> Option<f64> {
         let energy_delta = energy.saturating_sub(self.initial_energy);
         let soc = self.initial_soc.map(|initial_soc| {
-            let soc = energy_delta as f64 / BATTERY_CAPACITY + initial_soc;
+            let soc = energy_delta as f64 / self.battery_capacity + initial_soc;
             log::info!(
                 "## session: {}, SoC: {soc}, energy {} kWh",
                 self.session_id,
@@ -246,13 +248,23 @@ mod tests {
     fn session_regular() {
         let start_time = Utc::now();
         let initial_energy = 100;
-        let initial_soc = 0.3;
 
-        let mut cs = ChargingSession::new(start_time, initial_energy, Some(initial_soc));
+        let battery = Battery {
+            capacity: 48_100.0,
+            initial_soc: Some(0.3),
+            soc_limit: None,
+        };
+        let mut cs = ChargingSession::new(start_time, initial_energy, battery);
         println!("inserted charging session with id: {}", cs.session_id());
 
-        cs.add_snapshot(Utc::now(), initial_energy + 10, 10);
-        cs.add_snapshot(Utc::now(), initial_energy + 20, 10);
+        assert_eq!(
+            cs.add_snapshot(Utc::now(), initial_energy + 10, 10),
+            Some(battery.initial_soc.unwrap() + 10.0f64 / battery.capacity),
+        );
+        assert_eq!(
+            cs.add_snapshot(Utc::now(), initial_energy + 20, 10),
+            Some(battery.initial_soc.unwrap() + 20.0f64 / battery.capacity),
+        );
         assert_eq!(
             Database::get()
                 .get_last_active_charging_session()
@@ -277,11 +289,19 @@ mod tests {
         let start_time = Utc::now();
         let initial_energy = 100;
 
-        let mut cs = ChargingSession::new(start_time, initial_energy, None);
+        let mut cs = ChargingSession::new(
+            start_time,
+            initial_energy,
+            Battery {
+                capacity: 48_100.0,
+                initial_soc: None,
+                soc_limit: None,
+            },
+        );
         println!("inserted charging session with id: {}", cs.session_id());
 
-        cs.add_snapshot(Utc::now(), initial_energy + 10, 10);
-        cs.add_snapshot(Utc::now(), initial_energy + 20, 10);
+        assert_eq!(cs.add_snapshot(Utc::now(), initial_energy + 10, 10), None);
+        assert_eq!(cs.add_snapshot(Utc::now(), initial_energy + 20, 10), None);
         assert_eq!(
             Database::get()
                 .get_last_active_charging_session()

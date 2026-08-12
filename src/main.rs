@@ -1,9 +1,13 @@
 use anyhow::{Context, bail};
+use clap::Parser;
 use futures::{pin_mut, prelude::*};
 use log::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
+
+mod args;
+use args::{Args, Battery, ChargingPlan};
 
 mod connection;
 use connection::Connection;
@@ -16,10 +20,10 @@ pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSes
 pub mod measurements;
 pub mod schedule;
 
-const PORT: u16 = 9000;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     env_logger::builder()
         .format_source_path(true)
         .format_line_number(true)
@@ -28,10 +32,14 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .unwrap();
 
+    let battery = Battery::from(&args);
+    info!("Specs: {battery:#?}");
+    info!("Charging plan: {:?}", args.charging_plan);
+
     // make sure the DB is available
     let _ = Database::get();
 
-    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT);
+    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
     let ctrl_c = tokio::signal::ctrl_c().fuse();
     pin_mut!(ctrl_c);
@@ -62,7 +70,8 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("peer address {peer}");
 
-                let mut connection = Connection::new(peer, ws_stream, active_charging_session);
+                let mut connection = Connection::new(peer, ws_stream, battery,
+                    args.charging_plan, active_charging_session);
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
                     error!("{}: {err:#}", connection.peer());
                 }

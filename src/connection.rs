@@ -19,10 +19,10 @@ use std::{collections::VecDeque, net::SocketAddr};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
-use crate::{ChargingSession, ChargingSessionState, measurements::*, schedule::*};
+use crate::{
+    Battery, ChargingPlan, ChargingSession, ChargingSessionState, measurements::*, schedule::*,
+};
 
-const SOC: Option<f64> = Some(0.41);
-const SOC_LIMIT: Option<f64> = Some(0.46);
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
 #[derive(Debug)]
@@ -30,6 +30,8 @@ pub struct Connection {
     peer: SocketAddr,
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
+    battery: Battery,
+    charging_plan: Option<ChargingPlan>,
     prepared_first_actions: bool,
     send_action_id: usize,
     pending_response: Option<Message>,
@@ -39,31 +41,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn define_schedule(&self) -> Option<call::SetChargingProfile> {
-        const SET_PROFILE: bool = false;
-        if !SET_PROFILE {
-            return None;
-        }
-
-        use chrono::NaiveTime;
-        let set_charing_profile = ChargingProfile::builder()
-            .add_period(
-                ChargingSchedulePeriodBuilder::starting_ending_today(
-                    NaiveTime::from_hms_opt(14, 12, 00).unwrap(),
-                    NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
-                )
-                .unwrap(),
-            )
-            .build();
-
-        // if let Some(ref set_charging_profile) = set_charing_profile {
-        //     info!("{} {set_charging_profile:#?}", self.peer);
-        //     return None;
-        // }
-
-        Some(set_charing_profile)
-    }
-
     fn stop_transaction(&self) -> Option<call::RemoteStopTransaction> {
         const STOP_SESSION: bool = false;
         if !STOP_SESSION {
@@ -79,16 +56,61 @@ impl Connection {
                 .push_back(Action::RemoteStopTransaction(stop_transaction));
         }
 
-        if let Some(set_charging_profile) = self.define_schedule() {
+        if let Some(charging_plan) = self.charging_plan {
+            use ChargingPlan::*;
+            use chrono::NaiveTime;
+            let set_charging_profile = match charging_plan {
+                OffPeakPeriodToday => Some(
+                    ChargingProfile::builder()
+                        .add_period(
+                            ChargingSchedulePeriodBuilder::starting_ending_today(
+                                NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                                NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .add_period(
+                            ChargingSchedulePeriodBuilder::starting_ending_today(
+                                NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                                NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .build(),
+                ),
+                OffPeakPeriodTomorrow => Some(
+                    ChargingProfile::builder()
+                        .add_period(
+                            ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
+                                NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                                NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .add_period(
+                            ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
+                                NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                                NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .build(),
+                ),
+                NoLimit => None,
+            };
+
             self.call_queue
-                .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
+                .push_front(Action::ClearChargingProfile(call::ClearChargingProfile {
                     id: None,
                     connector_id: None,
                     charging_profile_purpose: None,
                     stack_level: None,
                 }));
-            self.call_queue
-                .push_back(Action::SetChargingProfile(set_charging_profile));
+
+            if let Some(set_charging_profile) = set_charging_profile {
+                self.call_queue
+                    .push_front(Action::SetChargingProfile(set_charging_profile));
+            }
         }
 
         // self.call_queue
@@ -116,11 +138,10 @@ impl Connection {
         //         connector_id: 1,
         //     }));
 
-        // const ESOL_SERVER_ADDRESS: &str = "wss://ocpp.cpms.esolutionscharging.com/ocpp";
         // self.call_queue
         //     .push_back(Action::ChangeConfiguration(call::ChangeConfiguration {
         //         key: "CS_URL".to_string(),
-        //         value: ESOL_SERVER_ADDRESS.to_string(),
+        //         value: "ws://192.168.1.16:9000".to_string(),
         //     }));
         // self.call_queue.push_back(Action::Reset(call::Reset {
         //     reset_type: ResetType::Soft,
@@ -132,12 +153,16 @@ impl Connection {
     pub fn new(
         peer: SocketAddr,
         ws_stream: WebSocketStream<TcpStream>,
+        battery: Battery,
+        charging_plan: Option<ChargingPlan>,
         last_active_charging_session: Option<ChargingSession>,
     ) -> Self {
         Connection {
             peer,
             ws_stream,
             connector_id: None,
+            battery,
+            charging_plan,
             prepared_first_actions: false,
             send_action_id: 0,
             pending_response: None,
@@ -315,7 +340,7 @@ impl Connection {
                         if session_id == transaction_id {
                             if let Some(soc) =
                                 cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
-                                && let Some(soc_limit) = SOC_LIMIT
+                                && let Some(soc_limit) = self.battery.soc_limit
                                 && soc >= soc_limit
                                 && cs.state().is_active()
                             {
@@ -339,7 +364,7 @@ impl Connection {
                         );
                         if let Some(soc) =
                             cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
-                            && let Some(soc_limit) = SOC_LIMIT
+                            && let Some(soc_limit) = self.battery.soc_limit
                             && soc >= soc_limit
                             && cs.state().is_active()
                         {
@@ -430,7 +455,11 @@ impl Connection {
                     );
                 }
 
-                let cs = ChargingSession::new(action.timestamp.inner(), action.meter_start, SOC);
+                let cs = ChargingSession::new(
+                    action.timestamp.inner(),
+                    action.meter_start,
+                    self.battery,
+                );
                 let transaction_id = cs.session_id();
                 info!(
                     "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",

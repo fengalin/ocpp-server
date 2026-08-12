@@ -1,6 +1,6 @@
 use anyhow::Context;
 use chrono::{DateTime, Local};
-use rusqlite::{Connection, named_params};
+use rusqlite::{Connection, OptionalExtension, named_params};
 use std::{
     fs,
     sync::{LazyLock, Mutex, MutexGuard},
@@ -18,7 +18,8 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
             BEGIN;
             CREATE TABLE charging_session (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                state STRING
+                state STRING,
+                battery_capacity FLOAT
             );
             CREATE TABLE charging_session_snapshot (
                 timestamp STRING,
@@ -44,25 +45,43 @@ impl<'a> Database<'a> {
     }
 
     pub fn get_last_active_charging_session(&self) -> anyhow::Result<Option<ChargingSession>> {
-        let mut stmt = self
+        let Some((session_id, battery_capacity)) = self
             .0
-            .prepare(&format!(
-                "
-                SELECT * FROM charging_session_snapshot
-                WHERE sessionid IN (
-                    SELECT id FROM charging_session
+            .query_row::<(i32, f64), _, _>(
+                &format!(
+                    "SELECT id, battery_capacity FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
                     )
-                    AND state == '{}'
-                )
+                    AND state == '{}';",
+                    ChargingSessionState::Active
+                ),
+                [],
+                |row| {
+                    let session_id = row.get(0)?;
+                    let battery_capacity = row.get(1)?;
+                    Ok((session_id, battery_capacity))
+                },
+            )
+            .optional()
+            .context("querying last active charging session")?
+        else {
+            log::info!("no active charging sessions");
+            return Ok(None);
+        };
+
+        let mut stmt = self
+            .0
+            .prepare(
+                "
+                SELECT * FROM charging_session_snapshot
+                WHERE sessionid == ?1;
             ",
-                ChargingSessionState::Active,
-            ))
+            )
             .unwrap();
         let mut rows = stmt
-            .query([])
-            .context("getting last active charging session")?;
+            .query([session_id])
+            .context("getting last active charging session snapshots")?;
 
         let mut cs = None;
         while let Some(row) = rows
@@ -81,6 +100,7 @@ impl<'a> Database<'a> {
                 ChargingSession::from_database(
                     session_id,
                     energy,
+                    battery_capacity,
                     soc,
                     ChargingSessionState::Active,
                 )
@@ -92,14 +112,16 @@ impl<'a> Database<'a> {
         Ok(cs)
     }
 
-    pub fn add_new_charging_session(&self) -> i32 {
+    pub fn add_new_charging_session(&self, battery_capacity: f64) -> i32 {
         self.0
             .query_one::<i32, _, _>(
-                &format!(
-                    "INSERT INTO charging_session (state) VALUES ('{}') RETURNING rowid;",
-                    ChargingSessionState::Active
-                ),
-                [],
+                "INSERT INTO charging_session (state, battery_capacity)
+                    VALUES (:state, :battery_capacity)
+                    RETURNING rowid;",
+                named_params![
+                    ":state": ChargingSessionState::Active.to_string(),
+                    ":battery_capacity": battery_capacity,
+                ],
                 |row| row.get(0),
             )
             .unwrap()
