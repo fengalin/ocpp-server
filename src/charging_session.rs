@@ -90,7 +90,7 @@ impl ChargingSession {
             log::info!(
                 "## session: {}, SoC: {soc}, energy {} kWh",
                 self.session_id,
-                energy_delta as f64 / 1_000f64
+                energy_delta as f64 / 1_000.0
             );
 
             soc
@@ -237,12 +237,19 @@ mod tests {
 
     #[test]
     #[ignore = "backup the database before running this test"]
-    fn regular_session() {
+    fn charging_session() {
         init();
 
+        // run the tests sequentially so get_last_active_charging_session
+        // returns what it is supposed to return
+        session_regular();
+        session_uknown_initial_soc();
+    }
+
+    fn session_regular() {
         let start_time = Utc::now();
         let initial_energy = 100;
-        let initial_soc = 30.0f64;
+        let initial_soc = 0.3;
 
         let mut cs = ChargingSession::new(start_time, initial_energy, Some(initial_soc));
         println!("inserted charging session with id: {}", cs.session_id());
@@ -250,7 +257,10 @@ mod tests {
         cs.add_snapshot(Utc::now(), initial_energy + 10, 10);
         cs.add_snapshot(Utc::now(), initial_energy + 20, 10);
         assert_eq!(
-            Database::get().get_last_active_charging_session().as_ref(),
+            Database::get()
+                .get_last_active_charging_session()
+                .unwrap()
+                .as_ref(),
             Some(&cs),
         );
 
@@ -260,7 +270,36 @@ mod tests {
             ChargingSessionState::SuspendedByEv,
         );
         assert_eq!(
-            Database::get().get_last_active_charging_session().as_ref(),
+            Database::get().get_last_active_charging_session().unwrap(),
+            None,
+        );
+        println!("charging session: {cs:?}");
+    }
+
+    fn session_uknown_initial_soc() {
+        let start_time = Utc::now();
+        let initial_energy = 100;
+
+        let mut cs = ChargingSession::new(start_time, initial_energy, None);
+        println!("inserted charging session with id: {}", cs.session_id());
+
+        cs.add_snapshot(Utc::now(), initial_energy + 10, 10);
+        cs.add_snapshot(Utc::now(), initial_energy + 20, 10);
+        assert_eq!(
+            Database::get()
+                .get_last_active_charging_session()
+                .unwrap()
+                .as_ref(),
+            Some(&cs),
+        );
+
+        cs.stop(
+            Utc::now(),
+            initial_energy + 25,
+            ChargingSessionState::SuspendedByEv,
+        );
+        assert_eq!(
+            Database::get().get_last_active_charging_session().unwrap(),
             None,
         );
         println!("charging session: {cs:?}");

@@ -1,4 +1,6 @@
+use anyhow::Context;
 use chrono::{DateTime, Local, Utc};
+use rusqlite::{Connection, named_params};
 use std::{
     fs,
     sync::{LazyLock, Mutex, MutexGuard},
@@ -6,13 +8,14 @@ use std::{
 
 use crate::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 
-const SQLITE_PATH: &str = "../charging_sessions.sqlite";
-static DATABASE: LazyLock<Mutex<sqlite::Connection>> = LazyLock::new(|| {
+const SQLITE_PATH: &str = "./charging_sessions.sqlite";
+static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
     let existed = fs::exists(SQLITE_PATH).expect("valid path");
-    let db = sqlite::open(SQLITE_PATH).expect("be able to create the db");
+    let db = Connection::open(SQLITE_PATH).expect("be able to create the db");
 
     if !existed {
-        let query = "
+        db.execute_batch("
+            BEGIN;
             CREATE TABLE charging_session (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 state STRING
@@ -25,25 +28,27 @@ static DATABASE: LazyLock<Mutex<sqlite::Connection>> = LazyLock::new(|| {
                 soc FLOAT,
                 FOREIGN KEY (sessionid) REFERENCES charging_session(id)
             );
-        ";
-        db.execute(query).unwrap();
+            CREATE INDEX charging_session_snapshot_session_id ON charging_session_snapshot (sessionid);
+            COMMIT;
+        ").unwrap();
     }
 
     Mutex::new(db)
 });
 
-pub struct Database<'a>(MutexGuard<'a, sqlite::Connection>);
+pub struct Database<'a>(MutexGuard<'a, Connection>);
 
 impl<'a> Database<'a> {
     pub fn get() -> Self {
         Database(DATABASE.lock().unwrap())
     }
 
-    pub fn get_last_active_charging_session(&self) -> Option<ChargingSession> {
-        let mut statement = self
+    pub fn get_last_active_charging_session(&self) -> anyhow::Result<Option<ChargingSession>> {
+        let mut stmt = self
             .0
-            .prepare(format!(
-                "SELECT * FROM charging_session_snapshot
+            .prepare(&format!(
+                "
+                SELECT * FROM charging_session_snapshot
                 WHERE sessionid IN (
                     SELECT id FROM charging_session
                     WHERE id IN (
@@ -55,17 +60,22 @@ impl<'a> Database<'a> {
                 ChargingSessionState::Active,
             ))
             .unwrap();
+        let mut rows = stmt
+            .query([])
+            .context("getting last active charging session")?;
 
         let mut cs = None;
-        while let Ok(sqlite::State::Row) = statement.next() {
-            let timestamp = statement.read::<String, _>("timestamp").unwrap();
-            let energy = statement.read::<i64, _>("energy").unwrap() as u64;
-            let power = statement.read::<i64, _>("power").unwrap() as u64;
-            let soc = statement.read::<f64, _>("soc").unwrap();
-            let soc = (soc > 0.0).then_some(soc);
+        while let Some(row) = rows
+            .next()
+            .context("getting last active charging session row")?
+        {
+            let timestamp = row.get_unwrap::<_, String>("timestamp");
+            let energy = row.get_unwrap::<_, i64>("energy") as u64;
+            let power = row.get_unwrap::<_, i64>("power") as u64;
+            let soc = row.get_unwrap::<_, Option<f64>>("soc");
 
             let cs = cs.get_or_insert_with(|| {
-                let session_id = statement.read::<i64, _>("sessionid").unwrap() as i32;
+                let session_id = row.get_unwrap::<_, i64>("sessionid") as i32;
                 log::info!(
                     "## found active session: {session_id}, timestamp: {}",
                     timestamp
@@ -85,34 +95,33 @@ impl<'a> Database<'a> {
             cs.add_snapshot_from_database(&timestamp, energy, power, soc);
         }
 
-        cs
+        Ok(cs)
     }
 
     pub fn add_new_charging_session(&self) -> i32 {
-        let mut statement = self
-            .0
-            .prepare(format!(
-                "INSERT INTO charging_session (state) VALUES ('{}') RETURNING rowid;",
-                ChargingSessionState::Active
-            ))
-            .unwrap();
-        match statement.next() {
-            Ok(sqlite::State::Row) => (),
-            other => {
-                panic!("failed to insert charging session: {other:?}");
-            }
-        };
-
-        statement.read::<i64, _>("id").expect("charging session id") as _
+        self.0
+            .query_one::<i32, _, _>(
+                &format!(
+                    "INSERT INTO charging_session (state) VALUES ('{}') RETURNING rowid;",
+                    ChargingSessionState::Active
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
-        let res = self.0.execute(format!(
-            "UPDATE charging_session SET state = '{reason}' WHERE id = {session_id}"
-        ));
+        let res = self.0.execute(
+            "UPDATE charging_session SET state = :state WHERE id = :session_id;",
+            named_params![
+                ":state": reason.to_string(),
+                ":session_id": session_id,
+            ],
+        );
 
-        if res.is_err() {
-            log::warn!("could not terminate charging session");
+        if let Err(err) = res {
+            log::error!("could not terminate charging session: {err}");
         };
     }
 
@@ -121,26 +130,29 @@ impl<'a> Database<'a> {
         session_id: i32,
         snapshot: &ChargingSessionSnapshot,
     ) {
-        let res = self.0.execute(format!(
+        let res = self.0.execute(
             "
             INSERT INTO charging_session_snapshot
             (timestamp, sessionid, energy, power, soc)
             VALUES (
-                '{timestamp}',
-                {session_id},
-                {energy},
-                {power},
-                {soc}
+                :timestamp,
+                :session_id,
+                :energy,
+                :power,
+                :soc
             );
         ",
-            timestamp = snapshot.timestamp,
-            energy = snapshot.energy,
-            power = snapshot.power,
-            soc = snapshot.soc.unwrap_or(-1.0),
-        ));
+            named_params![
+                ":timestamp": snapshot.timestamp.to_utc().to_string(),
+                ":session_id": session_id,
+                ":energy": snapshot.energy as i64,
+                ":power": snapshot.power as i64,
+                ":soc": snapshot.soc,
+            ],
+        );
 
         if let Err(err) = res {
-            log::warn!("could not insert charging session snapshot: {err}");
+            log::error!("could not insert charging session snapshot: {err}");
         };
     }
 }

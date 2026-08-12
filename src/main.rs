@@ -55,9 +55,14 @@ async fn main() -> anyhow::Result<()> {
                     bail!("TCP listener terminated");
                 };
                 let peer = stream.peer_addr().context("getting peer address")?;
+                let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
+
+                let active_charging_session = Database::get().get_last_active_charging_session()
+                    .context("getting last active charging session")?;
+
                 info!("peer address {peer}");
 
-                let mut connection = Connection::new(peer, accept_async(stream).await.expect("can accept"));
+                let mut connection = Connection::new(peer, ws_stream, active_charging_session);
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
                     error!("{}: {err:#}", connection.peer());
                 }

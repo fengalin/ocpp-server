@@ -19,7 +19,7 @@ use std::{collections::VecDeque, net::SocketAddr};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
-use crate::{ChargingSession, ChargingSessionState, Database, measurements::*, schedule::*};
+use crate::{ChargingSession, ChargingSessionState, measurements::*, schedule::*};
 
 const SOC: Option<f64> = Some(0.41);
 const SOC_LIMIT: Option<f64> = Some(0.46);
@@ -129,7 +129,11 @@ impl Connection {
         self.prepared_first_actions = true;
     }
 
-    pub fn new(peer: SocketAddr, ws_stream: WebSocketStream<TcpStream>) -> Self {
+    pub fn new(
+        peer: SocketAddr,
+        ws_stream: WebSocketStream<TcpStream>,
+        last_active_charging_session: Option<ChargingSession>,
+    ) -> Self {
         Connection {
             peer,
             ws_stream,
@@ -139,7 +143,7 @@ impl Connection {
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
-            charging_session: Database::get().get_last_active_charging_session(),
+            charging_session: last_active_charging_session,
         }
     }
 
