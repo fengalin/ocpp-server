@@ -11,8 +11,8 @@ pub struct Args {
     #[clap(long, help = "initial State of Charge (%)")]
     pub initial_soc: Option<u8>,
 
-    #[clap(long, help = "State of Charge limit (%)")]
-    pub soc_limit: Option<u8>,
+    #[clap(long, help = "State of Charge upper limit (%)")]
+    pub soc_cap: Option<u8>,
 
     #[clap(
         long,
@@ -21,19 +21,19 @@ pub struct Args {
     pub charging_plan: Option<ChargingPlan>,
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct Battery {
+#[derive(Copy, Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct Bms {
     pub capacity: f64,
     pub initial_soc: Option<f64>,
-    pub soc_limit: Option<f64>,
+    pub soc_cap: Option<f64>,
 }
 
-impl From<&Args> for Battery {
+impl From<&Args> for Bms {
     fn from(args: &Args) -> Self {
-        Battery {
+        Bms {
             capacity: args.battery_capacity as f64,
             initial_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
-            soc_limit: args.soc_limit.map(|soc| soc as f64 / 100.0),
+            soc_cap: args.soc_cap.map(|soc| soc as f64 / 100.0),
         }
     }
 }

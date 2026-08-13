@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
 mod args;
-use args::{Args, Battery, ChargingPlan};
+use args::{Args, Bms, ChargingPlan};
 
 mod connection;
 use connection::Connection;
@@ -16,7 +16,9 @@ mod database;
 use database::Database;
 
 pub mod charging_session;
-pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
+pub use charging_session::{
+    ChargingSession, ChargingSessionSnapshot, ChargingSessionState, SocProgress,
+};
 pub mod measurements;
 pub mod schedule;
 
@@ -32,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .unwrap();
 
-    let battery = Battery::from(&args);
+    let battery = Bms::from(&args);
     info!("Specs: {battery:#?}");
     info!("Charging plan: {:?}", args.charging_plan);
 

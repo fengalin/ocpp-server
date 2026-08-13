@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, Utc};
 use ocpp_rs::v16::enums;
 use std::{fmt, str};
 
-use crate::{Battery, Database};
+use crate::{Bms, Database};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct ChargingSessionSnapshot {
@@ -16,23 +16,21 @@ pub struct ChargingSessionSnapshot {
 pub struct ChargingSession {
     session_id: i32,
     initial_energy: u64,
-    battery_capacity: f64,
-    initial_soc: Option<f64>,
+    bms: Bms,
     snapshots: Vec<ChargingSessionSnapshot>,
     state: ChargingSessionState,
 }
 
 impl ChargingSession {
-    pub fn new(timestamp: DateTime<Utc>, energy: u64, battery: Battery) -> Self {
+    pub fn new(timestamp: DateTime<Utc>, energy: u64, bms: Bms) -> Self {
         let db = Database::get();
 
-        let session_id = db.add_new_charging_session(battery.capacity);
+        let session_id = db.add_new_charging_session(bms);
 
         let mut this = ChargingSession {
             session_id,
             initial_energy: energy,
-            battery_capacity: battery.capacity,
-            initial_soc: battery.initial_soc,
+            bms,
             snapshots: vec![],
             state: ChargingSessionState::Active,
         };
@@ -44,15 +42,13 @@ impl ChargingSession {
     pub fn from_database(
         session_id: i32,
         energy: u64,
-        battery_capacity: f64,
-        soc: Option<f64>,
+        bms: Bms,
         state: ChargingSessionState,
     ) -> Self {
         ChargingSession {
             session_id,
             initial_energy: energy,
-            battery_capacity,
-            initial_soc: soc,
+            bms,
             snapshots: vec![],
             state,
         }
@@ -75,7 +71,7 @@ impl ChargingSession {
         timestamp: DateTime<Utc>,
         energy: u64,
         power: u64,
-    ) -> Option<f64> {
+    ) -> SocProgress {
         self.add_snapshot_priv(&Database::get(), timestamp, energy, power)
     }
 
@@ -85,10 +81,10 @@ impl ChargingSession {
         timestamp: DateTime<Utc>,
         energy: u64,
         power: u64,
-    ) -> Option<f64> {
+    ) -> SocProgress {
         let energy_delta = energy.saturating_sub(self.initial_energy);
-        let soc = self.initial_soc.map(|initial_soc| {
-            let soc = energy_delta as f64 / self.battery_capacity + initial_soc;
+        let soc = self.bms.initial_soc.map(|initial_soc| {
+            let soc = energy_delta as f64 / self.bms.capacity + initial_soc;
             log::info!(
                 "## session: {}, SoC: {soc}, energy {} kWh",
                 self.session_id,
@@ -108,7 +104,19 @@ impl ChargingSession {
         db.add_charging_session_snapshot(self.session_id, &snapshot);
         self.snapshots.push(snapshot);
 
-        soc
+        let Some(soc) = soc else {
+            return SocProgress::Unknown;
+        };
+
+        let Some(soc_cap) = self.bms.soc_cap else {
+            return SocProgress::Uncapped(soc);
+        };
+
+        if soc >= soc_cap {
+            return SocProgress::CapReached { soc, cap: soc_cap };
+        }
+
+        SocProgress::CapNotReached { soc, cap: soc_cap }
     }
 
     pub fn add_snapshot_from_database(
@@ -141,10 +149,18 @@ impl ChargingSession {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub enum SocProgress {
+    Unknown,
+    Uncapped(f64),
+    CapNotReached { soc: f64, cap: f64 },
+    CapReached { soc: f64, cap: f64 },
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub enum ChargingSessionState {
     Active,
-    StoppedByServer,
+    SocCapReached,
     SuspendedByEvse,
     SuspendedByEv,
     StoppedByUser,
@@ -164,7 +180,7 @@ impl fmt::Display for ChargingSessionState {
         use ChargingSessionState::*;
         f.write_str(match self {
             Active => "active",
-            StoppedByServer => "stopped by server",
+            SocCapReached => "SoC cap reached",
             SuspendedByEvse => "suspended by EVSE",
             SuspendedByEv => "suspended by EV",
             StoppedByUser => "stopped by User",
@@ -184,7 +200,7 @@ impl str::FromStr for ChargingSessionState {
         use ChargingSessionState::*;
         Ok(match s {
             "active" => Active,
-            "stopped by server" => StoppedByServer,
+            "SoC cap reached" => SocCapReached,
             "suspended by EVSE" => SuspendedByEvse,
             "suspended by EV" => SuspendedByEv,
             "stop by user" => StoppedByUser,
@@ -248,22 +264,32 @@ mod tests {
     fn session_regular() {
         let start_time = Utc::now();
         let initial_energy = 100;
+        let battery_capacity = 48_100f64;
+        let initial_soc = 0.3f64;
+        let max_added_energy = 25u64;
+        let soc_cap = initial_soc + max_added_energy as f64 / battery_capacity;
 
-        let battery = Battery {
-            capacity: 48_100.0,
-            initial_soc: Some(0.3),
-            soc_limit: None,
+        let battery = Bms {
+            capacity: battery_capacity,
+            initial_soc: Some(initial_soc),
+            soc_cap: Some(soc_cap),
         };
         let mut cs = ChargingSession::new(start_time, initial_energy, battery);
         println!("inserted charging session with id: {}", cs.session_id());
 
         assert_eq!(
             cs.add_snapshot(Utc::now(), initial_energy + 10, 10),
-            Some(battery.initial_soc.unwrap() + 10.0f64 / battery.capacity),
+            SocProgress::CapNotReached {
+                soc: battery.initial_soc.unwrap() + 10f64 / battery.capacity,
+                cap: soc_cap,
+            },
         );
         assert_eq!(
             cs.add_snapshot(Utc::now(), initial_energy + 20, 10),
-            Some(battery.initial_soc.unwrap() + 20.0f64 / battery.capacity),
+            SocProgress::CapNotReached {
+                soc: battery.initial_soc.unwrap() + 20f64 / battery.capacity,
+                cap: soc_cap,
+            },
         );
         assert_eq!(
             Database::get()
@@ -273,10 +299,17 @@ mod tests {
             Some(&cs),
         );
 
+        assert_eq!(
+            cs.add_snapshot(Utc::now(), initial_energy + max_added_energy, 10),
+            SocProgress::CapReached {
+                soc: battery.initial_soc.unwrap() + max_added_energy as f64 / battery.capacity,
+                cap: soc_cap,
+            },
+        );
         cs.stop(
             Utc::now(),
-            initial_energy + 25,
-            ChargingSessionState::SuspendedByEv,
+            initial_energy + max_added_energy,
+            ChargingSessionState::SocCapReached,
         );
         assert_eq!(
             Database::get().get_last_active_charging_session().unwrap(),
@@ -292,16 +325,22 @@ mod tests {
         let mut cs = ChargingSession::new(
             start_time,
             initial_energy,
-            Battery {
+            Bms {
                 capacity: 48_100.0,
                 initial_soc: None,
-                soc_limit: None,
+                soc_cap: None,
             },
         );
         println!("inserted charging session with id: {}", cs.session_id());
 
-        assert_eq!(cs.add_snapshot(Utc::now(), initial_energy + 10, 10), None);
-        assert_eq!(cs.add_snapshot(Utc::now(), initial_energy + 20, 10), None);
+        assert_eq!(
+            cs.add_snapshot(Utc::now(), initial_energy + 10, 10),
+            SocProgress::Unknown
+        );
+        assert_eq!(
+            cs.add_snapshot(Utc::now(), initial_energy + 20, 10),
+            SocProgress::Unknown
+        );
         assert_eq!(
             Database::get()
                 .get_last_active_charging_session()

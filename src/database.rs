@@ -6,7 +6,7 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard},
 };
 
-use crate::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
+use crate::{Bms, ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 
 const SQLITE_PATH: &str = "./charging_sessions.sqlite";
 static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
@@ -19,7 +19,8 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
             CREATE TABLE charging_session (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 state STRING,
-                battery_capacity FLOAT
+                battery_capacity FLOAT,
+                soc_cap FLOAT
             );
             CREATE TABLE charging_session_snapshot (
                 timestamp STRING,
@@ -45,11 +46,11 @@ impl<'a> Database<'a> {
     }
 
     pub fn get_last_active_charging_session(&self) -> anyhow::Result<Option<ChargingSession>> {
-        let Some((session_id, battery_capacity)) = self
+        let Some((session_id, battery_capacity, soc_cap)) = self
             .0
-            .query_row::<(i32, f64), _, _>(
+            .query_row::<(i32, f64, Option<f64>), _, _>(
                 &format!(
-                    "SELECT id, battery_capacity FROM charging_session
+                    "SELECT id, battery_capacity, soc_cap FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
                     )
@@ -60,7 +61,8 @@ impl<'a> Database<'a> {
                 |row| {
                     let session_id = row.get(0)?;
                     let battery_capacity = row.get(1)?;
-                    Ok((session_id, battery_capacity))
+                    let soc_cap = row.get(2)?;
+                    Ok((session_id, battery_capacity, soc_cap))
                 },
             )
             .optional()
@@ -100,8 +102,11 @@ impl<'a> Database<'a> {
                 ChargingSession::from_database(
                     session_id,
                     energy,
-                    battery_capacity,
-                    soc,
+                    Bms {
+                        capacity: battery_capacity,
+                        initial_soc: soc,
+                        soc_cap,
+                    },
                     ChargingSessionState::Active,
                 )
             });
@@ -112,15 +117,16 @@ impl<'a> Database<'a> {
         Ok(cs)
     }
 
-    pub fn add_new_charging_session(&self, battery_capacity: f64) -> i32 {
+    pub fn add_new_charging_session(&self, bms: Bms) -> i32 {
         self.0
             .query_one::<i32, _, _>(
-                "INSERT INTO charging_session (state, battery_capacity)
-                    VALUES (:state, :battery_capacity)
+                "INSERT INTO charging_session (state, battery_capacity, soc_cap)
+                    VALUES (:state, :battery_capacity, :soc_cap)
                     RETURNING rowid;",
                 named_params![
                     ":state": ChargingSessionState::Active.to_string(),
-                    ":battery_capacity": battery_capacity,
+                    ":battery_capacity": bms.capacity,
+                    ":soc_cap": bms.soc_cap,
                 ],
                 |row| row.get(0),
             )

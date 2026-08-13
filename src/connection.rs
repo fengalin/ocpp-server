@@ -20,7 +20,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
-    Battery, ChargingPlan, ChargingSession, ChargingSessionState, measurements::*, schedule::*,
+    Bms, ChargingPlan, ChargingSession, ChargingSessionState, SocProgress, measurements::*,
+    schedule::*,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -30,7 +31,7 @@ pub struct Connection {
     peer: SocketAddr,
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
-    battery: Battery,
+    bms: Bms,
     charging_plan: Option<ChargingPlan>,
     prepared_first_actions: bool,
     send_action_id: usize,
@@ -153,7 +154,7 @@ impl Connection {
     pub fn new(
         peer: SocketAddr,
         ws_stream: WebSocketStream<TcpStream>,
-        battery: Battery,
+        bms: Bms,
         charging_plan: Option<ChargingPlan>,
         last_active_charging_session: Option<ChargingSession>,
     ) -> Self {
@@ -161,7 +162,7 @@ impl Connection {
             peer,
             ws_stream,
             connector_id: None,
-            battery,
+            bms,
             charging_plan,
             prepared_first_actions: false,
             send_action_id: 0,
@@ -338,13 +339,15 @@ impl Connection {
                     let session_id = cs.session_id();
                     if let Some(transaction_id) = action.transaction_id {
                         if session_id == transaction_id {
-                            if let Some(soc) =
+                            if let SocProgress::CapReached { soc, cap } =
                                 cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
-                                && let Some(soc_limit) = self.battery.soc_limit
-                                && soc >= soc_limit
                                 && cs.state().is_active()
                             {
-                                cs.set_state(ChargingSessionState::StoppedByServer);
+                                info!(
+                                    "{} >> Stopping session {session_id}: SoC {soc} reached cap {cap}",
+                                    self.peer
+                                );
+                                cs.set_state(ChargingSessionState::SocCapReached);
                                 self.call_queue.push_back(Action::RemoteStopTransaction(
                                     call::RemoteStopTransaction {
                                         transaction_id: session_id,
@@ -362,13 +365,15 @@ impl Connection {
                             "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
                             self.peer
                         );
-                        if let Some(soc) =
+                        if let SocProgress::CapReached { soc, cap } =
                             cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
-                            && let Some(soc_limit) = self.battery.soc_limit
-                            && soc >= soc_limit
                             && cs.state().is_active()
                         {
-                            cs.set_state(ChargingSessionState::StoppedByServer);
+                            info!(
+                                "{} >> Stopping session {session_id}: SoC {soc} reached cap {cap}",
+                                self.peer
+                            );
+                            cs.set_state(ChargingSessionState::SocCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction {
                                     transaction_id: session_id,
@@ -455,11 +460,8 @@ impl Connection {
                     );
                 }
 
-                let cs = ChargingSession::new(
-                    action.timestamp.inner(),
-                    action.meter_start,
-                    self.battery,
-                );
+                let cs =
+                    ChargingSession::new(action.timestamp.inner(), action.meter_start, self.bms);
                 let transaction_id = cs.session_id();
                 info!(
                     "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",
