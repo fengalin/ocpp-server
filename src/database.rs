@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use std::{
     fs,
@@ -27,6 +27,8 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 sessionid INTEGER,
                 energy INTEGER,
                 power INTEGER,
+                l1_voltage INTEGER,
+                temperature INTEGER,
                 soc FLOAT,
                 FOREIGN KEY (sessionid) REFERENCES charging_session(id)
             );
@@ -90,9 +92,15 @@ impl<'a> Database<'a> {
             .next()
             .context("getting last active charging session row")?
         {
-            let timestamp = row.get_unwrap::<_, DateTime<Local>>("timestamp");
+            let timestamp = row.get_unwrap::<_, DateTime<Utc>>("timestamp");
             let energy = row.get_unwrap::<_, i64>("energy") as u64;
-            let power = row.get_unwrap::<_, i64>("power") as u64;
+            let power = row.get_unwrap::<_, Option<i64>>("power").map(|p| p as u64);
+            let l1_voltage = row
+                .get_unwrap::<_, Option<i64>>("l1_voltage")
+                .map(|v| v as u64);
+            let temperature = row
+                .get_unwrap::<_, Option<i64>>("temperature")
+                .map(|p| p as u64);
             let soc = row.get_unwrap::<_, Option<f64>>("soc");
 
             let cs = cs.get_or_insert_with(|| {
@@ -111,7 +119,14 @@ impl<'a> Database<'a> {
                 )
             });
 
-            cs.add_snapshot_from_database(timestamp, energy, power, soc);
+            cs.add_snapshot_from_database(
+                ChargingSessionSnapshot::builder(timestamp, energy)
+                    .power(power)
+                    .l1_voltage(l1_voltage)
+                    .temperature(temperature)
+                    .soc(soc)
+                    .build(),
+            );
         }
 
         Ok(cs)
@@ -155,12 +170,14 @@ impl<'a> Database<'a> {
         let res = self.0.execute(
             "
             INSERT INTO charging_session_snapshot
-            (timestamp, sessionid, energy, power, soc)
+            (timestamp, sessionid, energy, power, l1_voltage, temperature, soc)
             VALUES (
                 :timestamp,
                 :session_id,
                 :energy,
                 :power,
+                :l1_voltage,
+                :temperature,
                 :soc
             );
         ",
@@ -168,7 +185,9 @@ impl<'a> Database<'a> {
                 ":timestamp": snapshot.timestamp,
                 ":session_id": session_id,
                 ":energy": snapshot.energy as i64,
-                ":power": snapshot.power as i64,
+                ":power": snapshot.power.map(|p| p as i64),
+                ":l1_voltage": snapshot.l1_voltage.map(|v| v as i64),
+                ":temperature": snapshot.temperature.map(|t| t as i64),
                 ":soc": snapshot.soc,
             ],
         );

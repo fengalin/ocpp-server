@@ -20,8 +20,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
-    Bms, ChargingPlan, ChargingSession, ChargingSessionState, SocProgress, measurements::*,
-    schedule::*,
+    Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState, SocProgress,
+    measurements::*, schedule::*,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -275,6 +275,8 @@ impl Connection {
                 let mut timestamp = None;
                 let mut energy = None;
                 let mut power = None;
+                let mut l1_voltage = None;
+                let mut temperature = None;
                 let meter_val_selection: Vec<_> = action
                     .meter_value
                     .iter()
@@ -312,9 +314,11 @@ impl Connection {
                                             ))
                                         }
                                         Some(Voltage) if sv.phase == Some(Phase::L1) => {
+                                            l1_voltage = sv.value.parse::<u64>().ok();
                                             Some(format!("Voltage L1: {} V", sv.value))
                                         }
                                         Some(Temperature) => {
+                                            temperature = sv.value.parse::<u64>().ok();
                                             Some(format!("Temperature: {} °C", sv.value))
                                         }
                                         Some(Frequency) => {
@@ -336,11 +340,15 @@ impl Connection {
                     Option::zip(timestamp, energy),
                     self.charging_session.as_mut(),
                 ) {
+                    let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
+                        .power(power)
+                        .l1_voltage(l1_voltage)
+                        .temperature(temperature)
+                        .build();
                     let session_id = cs.session_id();
                     if let Some(transaction_id) = action.transaction_id {
                         if session_id == transaction_id {
-                            if let SocProgress::CapReached { soc, cap } =
-                                cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
+                            if let SocProgress::CapReached { soc, cap } = cs.add_snapshot(snapshot)
                                 && cs.state().is_active()
                             {
                                 info!(
@@ -365,8 +373,7 @@ impl Connection {
                             "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
                             self.peer
                         );
-                        if let SocProgress::CapReached { soc, cap } =
-                            cs.add_snapshot(timestamp, energy, power.unwrap_or_default())
+                        if let SocProgress::CapReached { soc, cap } = cs.add_snapshot(snapshot)
                             && cs.state().is_active()
                         {
                             info!(
@@ -461,7 +468,7 @@ impl Connection {
                 }
 
                 let cs =
-                    ChargingSession::new(action.timestamp.inner(), action.meter_start, self.bms);
+                    ChargingSession::new(self.bms, action.timestamp.inner(), action.meter_start);
                 let transaction_id = cs.session_id();
                 info!(
                     "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",
