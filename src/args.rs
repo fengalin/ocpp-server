@@ -21,16 +21,9 @@ pub struct Args {
     pub charging_plan: Option<ChargingPlan>,
 }
 
-#[derive(Copy, Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
-pub struct Bms {
-    pub capacity: f64,
-    pub initial_soc: Option<f64>,
-    pub soc_cap: Option<f64>,
-}
-
-impl From<&Args> for Bms {
+impl From<&Args> for crate::Bms {
     fn from(args: &Args) -> Self {
-        Bms {
+        crate::Bms {
             capacity: args.battery_capacity as f64,
             initial_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
             soc_cap: args.soc_cap.map(|soc| soc as f64 / 100.0),

@@ -7,7 +7,10 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
 mod args;
-use args::{Args, Bms, ChargingPlan};
+use args::{Args, ChargingPlan};
+
+mod bms;
+use bms::{Bms, SocProgress};
 
 mod connection;
 use connection::Connection;
@@ -16,9 +19,7 @@ mod database;
 use database::Database;
 
 pub mod charging_session;
-pub use charging_session::{
-    ChargingSession, ChargingSessionSnapshot, ChargingSessionState, SocProgress,
-};
+pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 pub mod measurements;
 pub mod schedule;
 

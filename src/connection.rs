@@ -20,7 +20,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
-    Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState, SocProgress,
+    Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState,
     measurements::*, schedule::*,
 };
 
@@ -345,14 +345,13 @@ impl Connection {
                         .l1_voltage(l1_voltage)
                         .temperature(temperature)
                         .build();
+                    let soc_progress = cs.add_snapshot(snapshot);
                     let session_id = cs.session_id();
                     if let Some(transaction_id) = action.transaction_id {
                         if session_id == transaction_id {
-                            if let SocProgress::CapReached { soc, cap } = cs.add_snapshot(snapshot)
-                                && cs.state().is_active()
-                            {
+                            if soc_progress.is_complete() && cs.state().is_active() {
                                 info!(
-                                    "{} >> Stopping session {session_id}: SoC {soc} reached cap {cap}",
+                                    "{} >> Stopping session {session_id}: {soc_progress}",
                                     self.peer
                                 );
                                 cs.set_state(ChargingSessionState::SocCapReached);
@@ -373,11 +372,9 @@ impl Connection {
                             "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
                             self.peer
                         );
-                        if let SocProgress::CapReached { soc, cap } = cs.add_snapshot(snapshot)
-                            && cs.state().is_active()
-                        {
+                        if soc_progress.is_complete() && cs.state().is_active() {
                             info!(
-                                "{} >> Stopping session {session_id}: SoC {soc} reached cap {cap}",
+                                "{} >> Stopping session {session_id}: {soc_progress}",
                                 self.peer
                             );
                             cs.set_state(ChargingSessionState::SocCapReached);
