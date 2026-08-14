@@ -439,6 +439,7 @@ impl ChargingPlan {
                 assert!(available_power > 0.0);
                 // FIXME would also need a ponderation in case of variations due to DPM
                 let duration_s = energy_to_add / available_power * 60.0 * 60.0;
+                let energy_needed = duration_s * DEFAULT_LIMIT / 60.0 / 60.0;
                 // FIXME add extra duration as we get closer to 100% SoC
 
                 let now = Local::now();
@@ -447,8 +448,16 @@ impl ChargingPlan {
                 let mut start;
                 let duration = TimeDelta::seconds(duration_s as _);
                 info!(
-                    "energy to add: {energy_to_add:.1} Wh, duration {} mn",
-                    duration.num_minutes()
+                    "preparing schedule for SoC {:.0} % -> {:.0} %\n\
+                    \tenergy to add: {:.1} kWh\n\
+                    \tenergy needed: {:.1} kWh (loss {:.1} %)\n\
+                    \tduration {} mn",
+                    bms.initial_soc.unwrap_or_default() * 100.0,
+                    bms.soc_cap.expect("defined at this stage") * 100.0,
+                    energy_to_add / 1_000.0,
+                    energy_needed / 1_000.0,
+                    (1.0 - (energy_to_add / energy_needed)) * 100.0,
+                    duration.num_minutes(),
                 );
                 // compute in local time in order to avoid difference due to dst
                 loop {

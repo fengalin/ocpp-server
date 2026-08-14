@@ -41,10 +41,12 @@ async fn main() -> anyhow::Result<()> {
 
     let charging_plan = Option::<ChargingPlan>::try_from(&args)
         .inspect(|cp| {
-            info!("Charging plan: {cp:?}");
-            // FIXME display schedule
-            if let Some(cp) = cp {
-                let _ = cp.to_set_charging_profile(&bms);
+            if !args.run {
+                info!("Charging plan: {cp:?}");
+                // FIXME display plan only
+                if let Some(cp) = cp {
+                    let _ = cp.to_set_charging_profile(&bms);
+                }
             }
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
