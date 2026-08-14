@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, bail};
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
-use log::debug;
+use log::{debug, info, warn};
 use ocpp_rs::{
     datetime::DateTimeWrapper,
     v16::{
@@ -12,7 +12,7 @@ use ocpp_rs::{
     },
 };
 
-const DEFAULT_LIMIT: f32 = 7_400.0;
+const DEFAULT_LIMIT: f64 = 7_400.0;
 const DEFAULT_NB_OF_PHASES: i32 = 1;
 
 pub struct ChargingProfile;
@@ -79,7 +79,7 @@ impl ChargingProfileBuilder {
                         );
                         charging_schedule.push(data_types::ChargingSchedulePeriod {
                             start_period: 0,
-                            limit: period.limit,
+                            limit: period.limit as _,
                             number_phases: Some(DEFAULT_NB_OF_PHASES),
                         });
                         last_end_utc = Some(end_utc);
@@ -114,7 +114,7 @@ impl ChargingProfileBuilder {
                 debug!("Adding schedule period: {period:?}");
                 charging_schedule.push(data_types::ChargingSchedulePeriod {
                     start_period: start_period.num_seconds() as i32,
-                    limit: period.limit,
+                    limit: period.limit as _,
                     number_phases: Some(DEFAULT_NB_OF_PHASES),
                 });
             } else if end_utc > *last_end_utc {
@@ -127,7 +127,7 @@ impl ChargingProfileBuilder {
                 let last_end_period = *last_end_utc - self.start_schedule_utc;
                 charging_schedule.push(data_types::ChargingSchedulePeriod {
                     start_period: last_end_period.num_seconds() as i32,
-                    limit: period.limit,
+                    limit: period.limit as _,
                     number_phases: Some(DEFAULT_NB_OF_PHASES),
                 });
             } else {
@@ -201,7 +201,7 @@ pub enum ChargingScheduleError {
 pub struct ChargingSchedulePeriodBuilder {
     start: NaiveDateTime,
     end: NaiveDateTime,
-    limit: f32,
+    limit: f64,
 }
 
 impl ChargingSchedulePeriodBuilder {
@@ -301,7 +301,7 @@ impl ChargingSchedulePeriodBuilder {
     }
 
     #[allow(unused)]
-    pub fn limit(mut self, limit: f32) -> Self {
+    pub fn limit(mut self, limit: f64) -> Self {
         self.limit = limit;
         self
     }
@@ -377,6 +377,112 @@ pub fn build_set_charging_profile(
             },
         },
     })
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ChargingPlan {
+    OffPeakToday,
+    OffPeakTomorrow,
+    // FIXME add power limit
+    ReachSocCapBefore { end_time: NaiveTime },
+    NoLimit,
+}
+
+impl ChargingPlan {
+    // FIXME signature + add an intermediate function to access the schedule
+    // without building the call
+    pub fn to_set_charging_profile(&self, bms: &crate::Bms) -> Option<call::SetChargingProfile> {
+        // FIXME make off peak period configurable
+        use ChargingPlan::*;
+        match self {
+            OffPeakToday => Some(
+                ChargingProfile::builder()
+                    .add_period(
+                        ChargingSchedulePeriodBuilder::starting_ending_today(
+                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                            NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .add_period(
+                        ChargingSchedulePeriodBuilder::starting_ending_today(
+                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                            NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .build(),
+            ),
+            OffPeakTomorrow => Some(
+                ChargingProfile::builder()
+                    .add_period(
+                        ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
+                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                            NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .add_period(
+                        ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
+                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                            NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .build(),
+            ),
+            ReachSocCapBefore { end_time } => {
+                let energy_to_add = bms.get_energy_to_add();
+                // FIXME use power limit from args
+                let available_power = DEFAULT_LIMIT - bms.constant_power_loss as f64;
+                // FIXME check in args
+                assert!(available_power > 0.0);
+                // FIXME would also need a ponderation in case of variations due to DPM
+                let duration_s = energy_to_add / available_power * 60.0 * 60.0;
+                // FIXME add extra duration as we get closer to 100% SoC
+
+                let now = Local::now();
+                let today = now.date_naive();
+                let mut start_day = today;
+                let mut start;
+                let duration = TimeDelta::seconds(duration_s as _);
+                info!(
+                    "energy to add: {energy_to_add:.1} Wh, duration {} mn",
+                    duration.num_minutes()
+                );
+                // compute in local time in order to avoid difference due to dst
+                loop {
+                    start = (NaiveDateTime::new(start_day, *end_time) - duration)
+                        .and_local_timezone(Local)
+                        .unwrap();
+
+                    if start > now + TimeDelta::minutes(2) {
+                        // FIXME added a safety margin, needs more thinking + const / conf
+                        break;
+                    }
+                    // charging would have needed to start earlier => select next day
+                    start_day += TimeDelta::days(1);
+                }
+                if start_day != today {
+                    warn!("charging schedule can't start today");
+                }
+
+                info!("charging schedule: {start} to {}", start + duration);
+
+                // FIXME add a charging plan to span off teak periods
+
+                Some(
+                    ChargingProfile::builder()
+                        .add_period(ChargingSchedulePeriodBuilder::with_duration(
+                            start.naive_local(),
+                            duration,
+                        ))
+                        .build(),
+                )
+            }
+            NoLimit => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -456,7 +562,7 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period1_start_delta.num_seconds() as _,
-                    limit: period1_limit,
+                    limit: period1_limit as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -466,7 +572,7 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period2_start_delta.num_seconds() as _,
-                    limit: DEFAULT_LIMIT,
+                    limit: DEFAULT_LIMIT as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -515,7 +621,7 @@ mod tests {
             vec![
                 ChargingSchedulePeriod {
                     start_period: 0,
-                    limit: period1_limit,
+                    limit: period1_limit as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -525,7 +631,7 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period2_start_delta.num_seconds() as _,
-                    limit: DEFAULT_LIMIT,
+                    limit: DEFAULT_LIMIT as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -579,7 +685,7 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period2_start_delta.num_seconds() as _,
-                    limit: DEFAULT_LIMIT,
+                    limit: DEFAULT_LIMIT as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -633,12 +739,12 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period1_start_delta.num_seconds() as _,
-                    limit: period1_limit,
+                    limit: period1_limit as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
                     start_period: (period1_start_delta + period1_duration).num_seconds() as _,
-                    limit: DEFAULT_LIMIT,
+                    limit: DEFAULT_LIMIT as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {
@@ -692,7 +798,7 @@ mod tests {
                 },
                 ChargingSchedulePeriod {
                     start_period: period1_start_delta.num_seconds() as _,
-                    limit: period1_limit,
+                    limit: period1_limit as _,
                     number_phases: Some(1),
                 },
                 ChargingSchedulePeriod {

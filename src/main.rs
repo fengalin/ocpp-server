@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
 mod args;
-use args::{Args, ChargingPlan};
+use args::Args;
 
 mod bms;
 use bms::{Bms, SocProgress};
@@ -22,6 +22,7 @@ pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 pub mod measurements;
 pub mod schedule;
+pub use schedule::ChargingPlan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,12 +36,22 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .unwrap();
 
-    let battery = Bms::from(&args);
-    info!("Specs: {battery:#?}");
-    info!("Charging plan: {:?}", args.charging_plan);
+    let bms = Bms::from(&args);
+    info!("Specs: {bms:#?}");
+
+    let charging_plan = Option::<ChargingPlan>::try_from(&args)
+        .inspect(|cp| {
+            info!("Charging plan: {cp:?}");
+            // FIXME display schedule
+            if let Some(cp) = cp {
+                let _ = cp.to_set_charging_profile(&bms);
+            }
+        })
+        .inspect_err(|err| error!("Charging plan: {err}"))?;
 
     // make sure the DB is available
     let _ = Database::get();
+    // FIXME retrieve and dislay last active session if !args.run
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
@@ -50,10 +61,15 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bindind to {addr}"))?;
+    info!("Listening on: {addr}");
+
+    if !args.run {
+        warn!("Quitting now!\nUse --run to actually run the server");
+        return Ok(());
+    }
+
     let accept_stream = listener.accept().fuse();
     pin_mut!(accept_stream);
-
-    info!("Listening on: {addr}");
 
     loop {
         futures::select_biased! {
@@ -73,8 +89,8 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("peer address {peer}");
 
-                let mut connection = Connection::new(peer, ws_stream, battery,
-                    args.charging_plan, active_charging_session);
+                let mut connection = Connection::new(peer, ws_stream, bms,
+                    charging_plan, active_charging_session);
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
                     error!("{}: {err:#}", connection.peer());
                 }

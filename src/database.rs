@@ -112,6 +112,8 @@ impl<'a> Database<'a> {
                     energy,
                     Bms {
                         capacity: battery_capacity,
+                        // FIXME
+                        constant_power_loss: 400,
                         initial_soc: soc,
                         soc_cap,
                     },

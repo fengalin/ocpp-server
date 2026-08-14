@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Copy, Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct Bms {
     pub capacity: f64,
+    pub constant_power_loss: u16,
     pub initial_soc: Option<f64>,
     pub soc_cap: Option<f64>,
 }
@@ -35,6 +36,18 @@ impl Bms {
                 None => SocProgress::RelativeUncapped(added_soc),
             }
         }
+    }
+
+    /// Computes the raw energy to add, not including constant power loss.
+    pub fn get_energy_to_add(&self) -> f64 {
+        let soc_cap = self.soc_cap.expect("checked by args");
+        let soc_to_add = soc_cap - self.initial_soc.unwrap_or_default();
+        // FIXME check soc_cap > initial_soc in args & find an elegant way
+        // to show it is guaranteed
+        assert!(soc_cap <= 1.0);
+        assert!(soc_to_add >= 0.0);
+
+        self.capacity * soc_to_add
     }
 }
 

@@ -263,6 +263,7 @@ mod tests {
 
         let bms = Bms {
             capacity: battery_capacity,
+            constant_power_loss: 400,
             initial_soc: Some(initial_soc),
             soc_cap: Some(soc_cap),
         };
@@ -344,6 +345,7 @@ mod tests {
 
         let bms = Bms {
             capacity: battery_capacity,
+            constant_power_loss: 400,
             initial_soc: None,
             soc_cap: Some(soc_cap),
         };
@@ -422,6 +424,7 @@ mod tests {
 
         let bms = Bms {
             capacity: 48_100.0,
+            constant_power_loss: 400,
             initial_soc: None,
             soc_cap: None,
         };

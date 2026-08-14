@@ -21,7 +21,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
     Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState,
-    measurements::*, schedule::*,
+    measurements::*,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -57,60 +57,18 @@ impl Connection {
                 .push_back(Action::RemoteStopTransaction(stop_transaction));
         }
 
-        if let Some(charging_plan) = self.charging_plan {
-            use ChargingPlan::*;
-            use chrono::NaiveTime;
-            let set_charging_profile = match charging_plan {
-                OffPeakPeriodToday => Some(
-                    ChargingProfile::builder()
-                        .add_period(
-                            ChargingSchedulePeriodBuilder::starting_ending_today(
-                                NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
-                                NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
-                            )
-                            .unwrap(),
-                        )
-                        .add_period(
-                            ChargingSchedulePeriodBuilder::starting_ending_today(
-                                NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
-                                NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
-                            )
-                            .unwrap(),
-                        )
-                        .build(),
-                ),
-                OffPeakPeriodTomorrow => Some(
-                    ChargingProfile::builder()
-                        .add_period(
-                            ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
-                                NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
-                                NaiveTime::from_hms_opt(6, 58, 00).unwrap(),
-                            )
-                            .unwrap(),
-                        )
-                        .add_period(
-                            ChargingSchedulePeriodBuilder::starting_ending_tomorrow(
-                                NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
-                                NaiveTime::from_hms_opt(16, 28, 00).unwrap(),
-                            )
-                            .unwrap(),
-                        )
-                        .build(),
-                ),
-                NoLimit => None,
-            };
-
+        if let Some(ref charging_plan) = self.charging_plan {
             self.call_queue
-                .push_front(Action::ClearChargingProfile(call::ClearChargingProfile {
+                .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
                     id: None,
                     connector_id: None,
                     charging_profile_purpose: None,
                     stack_level: None,
                 }));
 
-            if let Some(set_charging_profile) = set_charging_profile {
+            if let Some(set_charging_profile) = charging_plan.to_set_charging_profile(&self.bms) {
                 self.call_queue
-                    .push_front(Action::SetChargingProfile(set_charging_profile));
+                    .push_back(Action::SetChargingProfile(set_charging_profile));
             }
         }
 
