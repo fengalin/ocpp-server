@@ -109,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
                 let mut connection = Connection::new(peer, ws_stream, bms,
                     charging_plan, active_charging_session);
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
+                    // FIXME when connection is lost due to a reboot,
+                    // (Connection reset without closing handshake)
+                    // the charging point doesn't seem to be able to connect again
                     error!("{}: {err:#}", connection.peer());
                 }
             }

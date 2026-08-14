@@ -72,15 +72,12 @@ impl Connection {
             }
         }
 
-        // self.call_queue
-        //     .push_back(Action::GetCompositeSchedule(call::GetCompositeSchedule {
-        //         connector_id: _connector_id,
-        //         duration: 7 * 24 * 60 * 60,
-        //         charging_rate_unit: None,
-        //     }));
+        // self.call_queue.push_back(Action::Reset(call::Reset {
+        //     reset_type: ResetType::Soft,
+        // }));
 
-        // let availability_type = AvailabilityType::Inoperative;
-        // // let availability_type = AvailabilityType::Operative;
+        // // let availability_type = AvailabilityType::Inoperative;
+        // let availability_type = AvailabilityType::Operative;
         // self.call_queue
         //     .push_back(Action::ChangeAvailability(call::ChangeAvailability {
         //         connector_id: _connector_id,
@@ -178,14 +175,23 @@ impl Connection {
                                 .map(|ts| ts.inner().with_timezone(&chrono::Local)),
                         );
 
-                        if action.status == ChargePointStatus::Available
-                            && let Some(mut cs) = self.charging_session.take()
+                        if matches!(
+                            action.status,
+                            ChargePointStatus::Available | ChargePointStatus::Finishing
+                        ) && let Some(mut cs) = self.charging_session.take()
                             && cs.state().is_active()
                         {
+                            // when the transaction was stopped by the server
+                            // (SoC cap was reached), the status is Finishing.
+                            // The only way to get it back to a status which
+                            // would allow starting a new session is by unplugging
+                            // the EV first or by rebooting the charging point.
                             warn!(
-                                "{} ## ending previous active session with id: {} due to connector status",
+                                "{} ## ending previous active session with id: {} \
+                                due to connector status: {:?}",
                                 self.peer,
                                 cs.session_id(),
+                                action.status,
                             );
                             cs.stop(
                                 Utc::now(),
@@ -196,6 +202,12 @@ impl Connection {
                                 ),
                             );
                         }
+                        // Note:
+                        // * when the connector status is SuspendedEVSE,
+                        //   the end of a charging schedule period was reached,
+                        //   the active session is effectively reused on the next
+                        //   charging schedule period.
+                        // FIXME adapt according to other statuses
                     }
                     if self.connector_id.is_none() {
                         self.connector_id = Some(action.connector_id);
