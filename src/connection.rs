@@ -298,26 +298,30 @@ impl Connection {
                     Option::zip(timestamp, energy),
                     self.charging_session.as_mut(),
                 ) {
-                    let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
-                        .power(power)
-                        .l1_voltage(l1_voltage)
-                        .temperature(temperature)
-                        .build();
-                    let soc_progress = cs.add_snapshot(snapshot);
-                    let session_id = cs.session_id();
                     if let Some(transaction_id) = action.transaction_id {
+                        let session_id = cs.session_id();
                         if session_id == transaction_id {
-                            if soc_progress.is_complete() && cs.state().is_active() {
-                                info!(
-                                    "{} >> Stopping session {session_id}: {soc_progress}",
-                                    self.peer
-                                );
-                                cs.set_state(ChargingSessionState::SocCapReached);
-                                self.call_queue.push_back(Action::RemoteStopTransaction(
-                                    call::RemoteStopTransaction {
-                                        transaction_id: session_id,
-                                    },
-                                ));
+                            if energy > cs.last_energy() {
+                                let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
+                                    .power(power)
+                                    .l1_voltage(l1_voltage)
+                                    .temperature(temperature)
+                                    .build();
+                                let soc_progress = cs.add_snapshot(snapshot);
+                                if soc_progress.is_complete() && cs.state().is_active() {
+                                    info!(
+                                        "{} >> Stopping session {session_id}: {soc_progress}",
+                                        self.peer
+                                    );
+                                    cs.set_state(ChargingSessionState::SocCapReached);
+                                    self.call_queue.push_back(Action::RemoteStopTransaction(
+                                        call::RemoteStopTransaction {
+                                            transaction_id: session_id,
+                                        },
+                                    ));
+                                } else {
+                                    info!("{} ## session {session_id}: {soc_progress}", self.peer);
+                                }
                             }
                         } else {
                             warn!(
@@ -325,24 +329,9 @@ impl Connection {
                                 self.peer
                             );
                         }
-                    } else {
-                        info!(
-                            "{} >> MeterValues didn't specify transaction id, adding to session {session_id}",
-                            self.peer
-                        );
-                        if soc_progress.is_complete() && cs.state().is_active() {
-                            info!(
-                                "{} >> Stopping session {session_id}: {soc_progress}",
-                                self.peer
-                            );
-                            cs.set_state(ChargingSessionState::SocCapReached);
-                            self.call_queue.push_back(Action::RemoteStopTransaction(
-                                call::RemoteStopTransaction {
-                                    transaction_id: session_id,
-                                },
-                            ));
-                        }
                     }
+                    // else charging point didn't specify transaction id
+                    // which seems to indicate the session is not in progress
                 }
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }

@@ -146,6 +146,13 @@ impl ChargingSession {
         db.stop_charging_session(self.session_id, &reason);
         self.state = reason;
     }
+
+    pub fn last_energy(&self) -> u64 {
+        self.snapshots
+            .last()
+            .expect("at least one snapshot at this stage")
+            .energy
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
