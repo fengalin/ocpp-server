@@ -102,6 +102,10 @@ impl ChargingSession {
         self.session_id
     }
 
+    pub fn bms(&self) -> &Bms {
+        &self.bms
+    }
+
     pub fn state(&self) -> &ChargingSessionState {
         &self.state
     }
@@ -152,6 +156,13 @@ impl ChargingSession {
             .last()
             .expect("at least one snapshot at this stage")
             .energy
+    }
+
+    pub fn last_soc(&self) -> Option<f64> {
+        self.snapshots
+            .last()
+            .expect("at least one snapshot at this stage")
+            .soc
     }
 }
 
@@ -311,7 +322,7 @@ mod tests {
         assert_eq!(
             Some(&cs),
             Database::get()
-                .get_last_active_charging_session()
+                .get_last_active_charging_session(None)
                 .unwrap()
                 .as_ref()
         );
@@ -337,7 +348,9 @@ mod tests {
             ChargingSessionState::SocCapReached,
         );
         assert_eq!(
-            Database::get().get_last_active_charging_session().unwrap(),
+            Database::get()
+                .get_last_active_charging_session(None)
+                .unwrap(),
             None,
         );
         println!("charging session: {cs:?}");
@@ -393,7 +406,7 @@ mod tests {
         assert_eq!(
             Some(&cs),
             Database::get()
-                .get_last_active_charging_session()
+                .get_last_active_charging_session(None)
                 .unwrap()
                 .as_ref()
         );
@@ -419,7 +432,9 @@ mod tests {
             ChargingSessionState::SocCapReached,
         );
         assert_eq!(
-            Database::get().get_last_active_charging_session().unwrap(),
+            Database::get()
+                .get_last_active_charging_session(None)
+                .unwrap(),
             None,
         );
         println!("charging session: {cs:?}");
@@ -461,7 +476,7 @@ mod tests {
         assert_eq!(
             Some(&cs),
             Database::get()
-                .get_last_active_charging_session()
+                .get_last_active_charging_session(None)
                 .unwrap()
                 .as_ref(),
         );
@@ -473,7 +488,9 @@ mod tests {
         );
         assert_eq!(
             None,
-            Database::get().get_last_active_charging_session().unwrap(),
+            Database::get()
+                .get_last_active_charging_session(None)
+                .unwrap(),
         );
         println!("charging session: {cs:?}");
     }

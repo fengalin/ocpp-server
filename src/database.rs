@@ -47,8 +47,11 @@ impl<'a> Database<'a> {
         Database(DATABASE.lock().unwrap())
     }
 
-    pub fn get_last_active_charging_session(&self) -> anyhow::Result<Option<ChargingSession>> {
-        let Some((session_id, battery_capacity, soc_cap)) = self
+    pub fn get_last_active_charging_session<'b>(
+        &self,
+        bms: impl Into<Option<&'b Bms>>,
+    ) -> anyhow::Result<Option<ChargingSession>> {
+        let Some((session_id, battery_capacity, mut soc_cap)) = self
             .0
             .query_row::<(i32, f64, Option<f64>), _, _>(
                 &format!(
@@ -70,9 +73,28 @@ impl<'a> Database<'a> {
             .optional()
             .context("querying last active charging session")?
         else {
-            log::info!("no active charging sessions");
             return Ok(None);
         };
+
+        if let Some((db_soc_cap, new_soc_cap)) =
+            Option::zip(soc_cap, bms.into().and_then(|bms| bms.soc_cap))
+            && db_soc_cap != new_soc_cap
+        {
+            // if the soc_cap was updated in this invocation,
+            // prefer the new value to the one kept with the session
+            soc_cap = Some(new_soc_cap);
+            let res = self.0.execute(
+                "UPDATE charging_session SET soc_cap = :soc_cap WHERE id = :session_id;",
+                named_params![
+                    ":soc_cap": soc_cap,
+                    ":session_id": session_id,
+                ],
+            );
+
+            if let Err(err) = res {
+                log::error!("could not update soc_cap for active charging session: {err}");
+            };
+        }
 
         let mut stmt = self
             .0

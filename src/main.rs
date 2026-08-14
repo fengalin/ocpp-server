@@ -50,8 +50,25 @@ async fn main() -> anyhow::Result<()> {
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
     // make sure the DB is available
-    let _ = Database::get();
-    // FIXME retrieve and dislay last active session if !args.run
+    {
+        let db = Database::get();
+        match db.get_last_active_charging_session(None) {
+            Ok(Some(sess)) => {
+                info!(
+                    "found active session:\n\
+                        \tid: {}, soc cap: {:?}, last soc: {:?}
+                        ",
+                    sess.session_id(),
+                    sess.bms().soc_cap,
+                    sess.last_soc()
+                );
+            }
+            Ok(None) => info!("no active charging session"),
+            Err(err) => {
+                error!("failed to query last active session: {err}");
+            }
+        }
+    }
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
@@ -84,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 let peer = stream.peer_addr().context("getting peer address")?;
                 let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
 
-                let active_charging_session = Database::get().get_last_active_charging_session()
+                let active_charging_session = Database::get().get_last_active_charging_session(&bms)
                     .context("getting last active charging session")?;
 
                 info!("peer address {peer}");
