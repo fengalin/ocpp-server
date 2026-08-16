@@ -21,7 +21,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
     Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState,
-    measurements::*,
+    measurements::*, schedule,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -66,9 +66,10 @@ impl Connection {
                     stack_level: None,
                 }));
 
-            if let Some(set_charging_profile) = charging_plan.to_set_charging_profile(&self.bms) {
-                self.call_queue
-                    .push_back(Action::SetChargingProfile(set_charging_profile));
+            if let Some(charging_schedule) = charging_plan.to_charging_schedule(&self.bms) {
+                self.call_queue.push_back(Action::SetChargingProfile(
+                    schedule::SetChargingProfile::builder(charging_schedule).build(),
+                ));
             }
         }
 

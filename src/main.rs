@@ -43,9 +43,8 @@ async fn main() -> anyhow::Result<()> {
         .inspect(|cp| {
             if !args.run {
                 info!("Charging plan: {cp:?}");
-                // FIXME display plan only
                 if let Some(cp) = cp {
-                    let _ = cp.to_set_charging_profile(&bms);
+                    let _ = cp.to_charging_schedule(&bms);
                 }
             }
         })
