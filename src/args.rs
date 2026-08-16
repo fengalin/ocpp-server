@@ -88,7 +88,11 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                 if let Some(ref end_time) = args.end_time {
                     match end_time.parse::<NaiveTime>() {
                         Ok(end_time) => {
-                            return Ok(Some(crate::ChargingPlan::ReachSocCapBefore { end_time }));
+                            if err_msg.is_empty() {
+                                return Ok(Some(crate::ChargingPlan::ReachSocCapBefore {
+                                    end_time,
+                                }));
+                            }
                         }
                         Err(err) => {
                             if !err_msg.is_empty() {
