@@ -56,7 +56,7 @@ impl ChargingSessionSnapshotBuilder {
 pub struct ChargingSession {
     session_id: i32,
     initial_energy: u64,
-    bms: Bms,
+    bms: Option<Bms>,
     snapshots: Vec<ChargingSessionSnapshot>,
     state: ChargingSessionState,
 }
@@ -65,28 +65,82 @@ impl ChargingSession {
     pub fn new(bms: Bms, timestamp: DateTime<Utc>, energy: u64) -> Self {
         let db = Database::get();
 
-        let session_id = db.add_new_charging_session(bms);
+        let session_id =
+            db.add_new_charging_session(ChargingSessionState::Active, Some(&bms), None);
 
         let mut this = ChargingSession {
             session_id,
             initial_energy: energy,
-            bms,
+            bms: Some(bms),
             snapshots: vec![],
             state: ChargingSessionState::Active,
         };
         let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
             .soc(bms.initial_soc)
             .build();
-        db.add_charging_session_snapshot(this.session_id, &snapshot);
+        db.add_charging_session_snapshot(session_id, &snapshot);
         this.snapshots.push(snapshot);
 
         this
     }
 
+    /// Builds a ChargingSession in the specified state
+    ///
+    /// This is useful for cases where we missed the transaction start.
+    pub fn with_state(
+        state: impl Into<ChargingSessionState>,
+        initial_energy: u64,
+        bms: Bms,
+        transaction_id: impl Into<Option<i32>>,
+        timestamp: impl Into<Option<DateTime<Utc>>>,
+    ) -> Self {
+        let db = Database::get();
+
+        let state = state.into();
+        let session_id =
+            db.add_new_charging_session(state.clone(), Some(&bms), transaction_id.into());
+
+        let mut this = ChargingSession {
+            session_id,
+            initial_energy,
+            bms: Some(bms),
+            snapshots: vec![],
+            state,
+        };
+        let snapshot = ChargingSessionSnapshot::builder(
+            timestamp.into().unwrap_or_else(Utc::now),
+            initial_energy,
+        )
+        .build();
+        db.add_charging_session_snapshot(session_id, &snapshot);
+        this.snapshots.push(snapshot);
+
+        this
+    }
+
+    /// Persists an unknown ChargingSession reported as stopped
+    ///
+    /// This allows retrieving the last known stop energy later.
+    pub fn save_missing_stopped_session(
+        timestamp: Option<DateTime<Utc>>,
+        reason: impl Into<ChargingSessionState>,
+        stop_energy: u64,
+        transaction_id: Option<i32>,
+    ) {
+        let db = Database::get();
+
+        let state = reason.into();
+        let session_id = db.add_new_charging_session(state.clone(), None, transaction_id);
+        let snapshot =
+            ChargingSessionSnapshot::builder(timestamp.unwrap_or_else(Utc::now), stop_energy)
+                .build();
+        db.add_charging_session_snapshot(session_id, &snapshot);
+    }
+
     pub fn from_database(
         session_id: i32,
         energy: u64,
-        bms: Bms,
+        bms: Option<Bms>,
         state: ChargingSessionState,
     ) -> Self {
         ChargingSession {
@@ -102,15 +156,25 @@ impl ChargingSession {
         self.session_id
     }
 
-    pub fn bms(&self) -> &Bms {
-        &self.bms
+    pub fn bms(&self) -> Option<&Bms> {
+        self.bms.as_ref()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.state.is_complete()
     }
 
     pub fn state(&self) -> &ChargingSessionState {
         &self.state
     }
 
-    pub fn set_state(&mut self, state: ChargingSessionState) {
+    pub fn set_state(&mut self, state: impl Into<ChargingSessionState>) {
+        let state = state.into();
+        if self.state == state {
+            return;
+        }
+
+        Database::get().set_charging_session_state(self.session_id, &state);
         self.state = state;
     }
 
@@ -124,9 +188,11 @@ impl ChargingSession {
         mut snapshot: ChargingSessionSnapshot,
     ) -> SocProgress {
         let added_energy = snapshot.energy.saturating_sub(self.initial_energy);
-        let soc_progress = self.bms.get_current_soc(added_energy);
+        let soc_progress = self.bms.map_or(SocProgress::Unknown, |bms| {
+            bms.get_current_soc(added_energy)
+        });
 
-        snapshot.soc = Some(soc_progress.soc());
+        snapshot.soc = soc_progress.soc();
         db.add_charging_session_snapshot(self.session_id, &snapshot);
         self.snapshots.push(snapshot);
 
@@ -175,12 +241,19 @@ pub enum ChargingSessionState {
     StoppedByUser,
     Reboot,
     UnlockCommandFromServer,
+    Unknown,
     Error(String),
 }
 
 impl ChargingSessionState {
-    pub fn is_active(&self) -> bool {
-        matches!(self, ChargingSessionState::Active)
+    pub fn is_complete(&self) -> bool {
+        use ChargingSessionState::*;
+        // FIXME unsure about:
+        // * SuspendedByEv (probably same as SuspendedByEvse)
+        matches!(
+            self,
+            SocCapReached | StoppedByUser | Reboot | UnlockCommandFromServer | Error(_)
+        )
     }
 }
 
@@ -188,15 +261,16 @@ impl fmt::Display for ChargingSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ChargingSessionState::*;
         f.write_str(match self {
-            Active => "active",
-            SocCapReached => "SoC cap reached",
-            SuspendedByEvse => "suspended by EVSE",
-            SuspendedByEv => "suspended by EV",
-            StoppedByUser => "stopped by User",
-            Reboot => "reboot",
-            UnlockCommandFromServer => "unlock command from server",
+            Active => "Active",
+            SocCapReached => "SocCapReached",
+            SuspendedByEvse => "SuspendedByEvse",
+            SuspendedByEv => "SuspendedByEv",
+            StoppedByUser => "StoppedByUser",
+            Reboot => "Reboot",
+            UnlockCommandFromServer => "UnlockCommandFromServer",
+            Unknown => "Unknown",
             Error(err) => {
-                return write!(f, "error: {err}");
+                return write!(f, "Error: {err}");
             }
         })
     }
@@ -208,15 +282,32 @@ impl str::FromStr for ChargingSessionState {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use ChargingSessionState::*;
         Ok(match s {
-            "active" => Active,
-            "SoC cap reached" => SocCapReached,
-            "suspended by EVSE" => SuspendedByEvse,
-            "suspended by EV" => SuspendedByEv,
-            "stop by user" => StoppedByUser,
-            "reboot" => Reboot,
-            "unlock command from server" => UnlockCommandFromServer,
+            "Active" => Active,
+            "SocCapReached" => SocCapReached,
+            "SuspendedByEvse" => SuspendedByEvse,
+            "SuspendedByEv" => SuspendedByEv,
+            "StoppedByUser" => StoppedByUser,
+            "Reboot" => Reboot,
+            "UnlockCommandFromServer" => UnlockCommandFromServer,
             other => Error(other.to_string()),
         })
+    }
+}
+
+impl From<enums::ChargePointStatus> for ChargingSessionState {
+    fn from(cp_status: enums::ChargePointStatus) -> Self {
+        use ChargingSessionState::*;
+        use enums::ChargePointStatus::*;
+        match cp_status {
+            Charging | Preparing => Active,
+            SuspendedEVSE => SuspendedByEvse,
+            SuspendedEV => SuspendedByEv,
+            Finishing => SocCapReached,
+            Unavailable => Error("Unavailable".to_string()),
+            Faulted => Error("Faulted".to_string()),
+            Available => panic!("should not be called in this state"),
+            Reserved => unimplemented!(),
+        }
     }
 }
 
@@ -267,8 +358,8 @@ mod tests {
         // run the tests sequentially so get_last_active_charging_session
         // returns what it is supposed to return
         session_regular();
-        session_uknown_initial_soc();
-        session_uknown_initial_soc_no_cap();
+        session_unknown_initial_soc();
+        session_unknown_initial_soc_no_cap();
     }
 
     fn session_regular() {
@@ -319,13 +410,9 @@ mod tests {
             soc_progress,
         );
 
-        assert_eq!(
-            Some(&cs),
-            Database::get()
-                .get_last_active_charging_session(None)
-                .unwrap()
-                .as_ref()
-        );
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
+        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(Utc::now(), initial_energy + max_added_energy)
@@ -347,16 +434,18 @@ mod tests {
             initial_energy + max_added_energy,
             ChargingSessionState::SocCapReached,
         );
+
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(
-            Database::get()
-                .get_last_active_charging_session(None)
-                .unwrap(),
-            None,
+            &ChargingSessionState::SocCapReached,
+            last_session.unwrap().state()
         );
+
         println!("charging session: {cs:?}");
     }
 
-    fn session_uknown_initial_soc() {
+    fn session_unknown_initial_soc() {
         let start_time = Utc::now();
         let initial_energy = 100;
         let battery_capacity = 48_100f64;
@@ -403,13 +492,9 @@ mod tests {
             soc_progress,
         );
 
-        assert_eq!(
-            Some(&cs),
-            Database::get()
-                .get_last_active_charging_session(None)
-                .unwrap()
-                .as_ref()
-        );
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
+        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(Utc::now(), initial_energy + max_added_energy)
@@ -431,16 +516,18 @@ mod tests {
             initial_energy + max_added_energy,
             ChargingSessionState::SocCapReached,
         );
+
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(
-            Database::get()
-                .get_last_active_charging_session(None)
-                .unwrap(),
-            None,
+            &ChargingSessionState::SocCapReached,
+            last_session.unwrap().state()
         );
+
         println!("charging session: {cs:?}");
     }
 
-    fn session_uknown_initial_soc_no_cap() {
+    fn session_unknown_initial_soc_no_cap() {
         let start_time = Utc::now();
         let initial_energy = 100;
 
@@ -473,10 +560,15 @@ mod tests {
                     .build()
             ),
         );
+
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
+        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
+
         assert_eq!(
             Some(&cs),
             Database::get()
-                .get_last_active_charging_session(None)
+                .get_last_charging_session(None)
                 .unwrap()
                 .as_ref(),
         );
@@ -486,12 +578,14 @@ mod tests {
             initial_energy + 25,
             ChargingSessionState::SuspendedByEv,
         );
+
+        let last_session = Database::get().get_last_charging_session(None).unwrap();
+        assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(
-            None,
-            Database::get()
-                .get_last_active_charging_session(None)
-                .unwrap(),
+            &ChargingSessionState::SuspendedByEv,
+            last_session.unwrap().state()
         );
+
         println!("charging session: {cs:?}");
     }
 }

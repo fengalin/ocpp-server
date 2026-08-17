@@ -53,6 +53,7 @@ impl Bms {
 
 #[derive(Debug, Copy, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub enum SocProgress {
+    Unknown,
     AbsoluteUncapped(f64),
     AbsoluteCapNotReached { soc: f64, cap: f64 },
     AbsoluteCapReached { soc: f64, cap: f64 },
@@ -67,16 +68,17 @@ impl SocProgress {
         matches!(self, AbsoluteCapReached { .. } | RelativeCapReached { .. })
     }
 
-    pub fn soc(&self) -> f64 {
+    pub fn soc(&self) -> Option<f64> {
         use SocProgress::*;
-        match self {
+        Some(match self {
+            Unknown => return None,
             AbsoluteUncapped(soc) => *soc,
             AbsoluteCapNotReached { soc, .. } => *soc,
             AbsoluteCapReached { soc, .. } => *soc,
             RelativeUncapped(added_soc) => *added_soc,
             RelativeCapNotReached { added_soc, .. } => *added_soc,
             RelativeCapReached { added_soc, .. } => *added_soc,
-        }
+        })
     }
 }
 
@@ -84,6 +86,7 @@ impl fmt::Display for SocProgress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use SocProgress::*;
         match self {
+            Unknown => f.write_str("unknown SoC"),
             AbsoluteUncapped(soc) => write!(f, "SoC {:.1} % uncapped", 100.0 * soc),
             AbsoluteCapNotReached { soc, cap } => {
                 write!(f, "SoC {:.1} % / {:.1} %", 100.0 * soc, 100.0 * cap)

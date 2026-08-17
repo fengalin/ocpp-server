@@ -20,7 +20,8 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 state STRING,
                 battery_capacity FLOAT,
-                soc_cap FLOAT
+                soc_cap FLOAT,
+                transaction_id INTEGER
             );
             CREATE TABLE charging_session_snapshot (
                 timestamp STRING,
@@ -47,31 +48,28 @@ impl<'a> Database<'a> {
         Database(DATABASE.lock().unwrap())
     }
 
-    pub fn get_last_active_charging_session<'b>(
+    pub fn get_last_charging_session<'b>(
         &self,
         bms: impl Into<Option<&'b Bms>>,
     ) -> anyhow::Result<Option<ChargingSession>> {
-        let Some((session_id, battery_capacity, mut soc_cap)) = self
+        let Some((session_id, state, battery_capacity, mut soc_cap)) = self
             .0
-            .query_row::<(i32, f64, Option<f64>), _, _>(
-                &format!(
-                    "SELECT id, battery_capacity, soc_cap FROM charging_session
+            .query_row::<(i32, String, Option<f64>, Option<f64>), _, _>(
+                "SELECT id, state, battery_capacity, soc_cap FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
-                    )
-                    AND state == '{}';",
-                    ChargingSessionState::Active
-                ),
+                    )",
                 [],
                 |row| {
                     let session_id = row.get(0)?;
-                    let battery_capacity = row.get(1)?;
-                    let soc_cap = row.get(2)?;
-                    Ok((session_id, battery_capacity, soc_cap))
+                    let state = row.get(1)?;
+                    let battery_capacity = row.get(2)?;
+                    let soc_cap = row.get(3)?;
+                    Ok((session_id, state, battery_capacity, soc_cap))
                 },
             )
             .optional()
-            .context("querying last active charging session")?
+            .context("querying last charging session")?
         else {
             return Ok(None);
         };
@@ -107,13 +105,10 @@ impl<'a> Database<'a> {
             .unwrap();
         let mut rows = stmt
             .query([session_id])
-            .context("getting last active charging session snapshots")?;
+            .context("getting last charging session snapshots")?;
 
         let mut cs = None;
-        while let Some(row) = rows
-            .next()
-            .context("getting last active charging session row")?
-        {
+        while let Some(row) = rows.next().context("getting last charging session row")? {
             let timestamp = row.get_unwrap::<_, DateTime<Utc>>("timestamp");
             let energy = row.get_unwrap::<_, i64>("energy") as u64;
             let power = row.get_unwrap::<_, Option<i64>>("power").map(|p| p as u64);
@@ -127,19 +122,20 @@ impl<'a> Database<'a> {
 
             let cs = cs.get_or_insert_with(|| {
                 let session_id = row.get_unwrap::<_, i64>("sessionid") as i32;
-                log::info!("## found active session: {session_id}, timestamp: {timestamp}");
+
+                let bms = battery_capacity.map(|capacity| Bms {
+                    capacity,
+                    // FIXME
+                    constant_power_loss: 400,
+                    initial_soc: soc,
+                    soc_cap,
+                });
 
                 ChargingSession::from_database(
                     session_id,
                     energy,
-                    Bms {
-                        capacity: battery_capacity,
-                        // FIXME
-                        constant_power_loss: 400,
-                        initial_soc: soc,
-                        soc_cap,
-                    },
-                    ChargingSessionState::Active,
+                    bms,
+                    state.parse().expect("infallible"),
                 )
             });
 
@@ -156,27 +152,33 @@ impl<'a> Database<'a> {
         Ok(cs)
     }
 
-    pub fn add_new_charging_session(&self, bms: Bms) -> i32 {
+    pub fn add_new_charging_session(
+        &self,
+        state: ChargingSessionState,
+        bms: Option<&Bms>,
+        transaction_id: Option<i32>,
+    ) -> i32 {
         self.0
             .query_one::<i32, _, _>(
-                "INSERT INTO charging_session (state, battery_capacity, soc_cap)
-                    VALUES (:state, :battery_capacity, :soc_cap)
+                "INSERT INTO charging_session (state, battery_capacity, soc_cap, transaction_id)
+                    VALUES (:state, :battery_capacity, :soc_cap, :transaction_id)
                     RETURNING rowid;",
                 named_params![
-                    ":state": ChargingSessionState::Active.to_string(),
-                    ":battery_capacity": bms.capacity,
-                    ":soc_cap": bms.soc_cap,
+                    ":state": state.to_string(),
+                    ":battery_capacity": bms.map(|bms| bms.capacity),
+                    ":soc_cap": bms.and_then(|bms| bms.soc_cap),
+                    ":transaction_id": transaction_id.map(|tid| tid as i64),
                 ],
                 |row| row.get(0),
             )
             .unwrap()
     }
 
-    pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
+    pub fn set_charging_session_state(&self, session_id: i32, state: &ChargingSessionState) {
         let res = self.0.execute(
             "UPDATE charging_session SET state = :state WHERE id = :session_id;",
             named_params![
-                ":state": reason.to_string(),
+                ":state": state.to_string(),
                 ":session_id": session_id,
             ],
         );
@@ -184,6 +186,10 @@ impl<'a> Database<'a> {
         if let Err(err) = res {
             log::error!("could not terminate charging session: {err}");
         };
+    }
+
+    pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
+        self.set_charging_session_state(session_id, reason);
     }
 
     pub fn add_charging_session_snapshot(

@@ -32,6 +32,7 @@ pub struct Connection {
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
     bms: Bms,
+    last_known_stop_energy: Option<u64>,
     charging_plan: Option<ChargingPlan>,
     prepared_first_actions: bool,
     send_action_id: usize,
@@ -112,20 +113,30 @@ impl Connection {
         ws_stream: WebSocketStream<TcpStream>,
         bms: Bms,
         charging_plan: Option<ChargingPlan>,
-        last_active_charging_session: Option<ChargingSession>,
+        mut last_charging_session: Option<ChargingSession>,
     ) -> Self {
+        let last_known_stop_energy = match last_charging_session {
+            Some(ref cs) if cs.is_complete() => {
+                let last_known_stop_energy = cs.last_energy();
+                last_charging_session = None;
+                Some(last_known_stop_energy)
+            }
+            _ => None,
+        };
+
         Connection {
             peer,
             ws_stream,
             connector_id: None,
             bms,
+            last_known_stop_energy,
             charging_plan,
             prepared_first_actions: false,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
-            charging_session: last_active_charging_session,
+            charging_session: last_charging_session,
         }
     }
 
@@ -176,39 +187,65 @@ impl Connection {
                                 .map(|ts| ts.inner().with_timezone(&chrono::Local)),
                         );
 
-                        if matches!(
-                            action.status,
-                            ChargePointStatus::Available | ChargePointStatus::Finishing
-                        ) && let Some(mut cs) = self.charging_session.take()
-                            && cs.state().is_active()
-                        {
-                            // when the transaction was stopped by the server
-                            // (SoC cap was reached), the status is Finishing.
-                            // The only way to get it back to a status which
-                            // would allow starting a new session is by unplugging
-                            // the EV first or by rebooting the charging point.
-                            warn!(
-                                "{} ## ending previous active session with id: {} \
-                                due to connector status: {:?}",
-                                self.peer,
-                                cs.session_id(),
-                                action.status,
-                            );
-                            cs.stop(
-                                Utc::now(),
-                                0,
-                                ChargingSessionState::Error(
-                                    "Got connector available while session with still active"
-                                        .to_string(),
-                                ),
-                            );
+                        match action.status {
+                            ChargePointStatus::Available | ChargePointStatus::Finishing => {
+                                if let Some(mut cs) = self.charging_session.take()
+                                    && !cs.is_complete()
+                                {
+                                    // when the transaction was stopped by the server
+                                    // (SoC cap was reached), the status is Finishing.
+                                    // The only way to get it back to a status which
+                                    // would allow starting a new session is by unplugging
+                                    // the EV first or by rebooting the charging point.
+                                    warn!(
+                                        "{} ## ending previous active session with id: {} \
+                                        due to connector status: {:?}",
+                                        self.peer,
+                                        cs.session_id(),
+                                        action.status,
+                                    );
+                                    cs.stop(
+                                        Utc::now(),
+                                        0,
+                                        ChargingSessionState::Error(
+                                            "Got connector available while session with still active"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                            ChargePointStatus::Charging
+                            | ChargePointStatus::SuspendedEVSE
+                            | ChargePointStatus::Preparing => {
+                                // the EV is not charging due to EVSE not providing
+                                // energy (e.g. charging period with power limit set to 0)
+                                // however, the session can still be restarted
+                                if let Some(cs) = self.charging_session.as_mut() {
+                                    // we can't ensure this is the same transaction
+                                    // and can only hope we got at least one MeterValue
+                                    // with the transaction id before getting this
+                                    // StatusNotification
+                                    cs.set_state(action.status.clone());
+                                } else {
+                                    // missed the transaction start
+                                    warn!("{} ## adding missed charging session", self.peer);
+                                    self.check_bms_on_missed_session();
+
+                                    self.charging_session = Some(ChargingSession::with_state(
+                                        action.status.clone(),
+                                        self.last_known_stop_energy.unwrap_or_default(),
+                                        self.bms,
+                                        None,
+                                        action.timestamp.map(|ts| ts.inner()),
+                                    ));
+                                }
+                            }
+                            ChargePointStatus::SuspendedEV => {
+                                // FIXME reached 100% => not restarting the session?
+                            }
+                            ChargePointStatus::Faulted => error!("faulted"),
+                            _ => (),
                         }
-                        // Note:
-                        // * when the connector status is SuspendedEVSE,
-                        //   the end of a charging schedule period was reached,
-                        //   the active session is effectively reused on the next
-                        //   charging schedule period.
-                        // FIXME adapt according to other statuses
                     }
                     if self.connector_id.is_none() {
                         self.connector_id = Some(action.connector_id);
@@ -310,18 +347,27 @@ impl Connection {
                 if let Some(((timestamp, energy), cs)) = Option::zip(
                     Option::zip(timestamp, energy),
                     self.charging_session.as_mut(),
-                ) {
-                    if let Some(transaction_id) = action.transaction_id {
-                        let session_id = cs.session_id();
-                        if session_id == transaction_id {
-                            if energy > cs.last_energy() {
-                                let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
-                                    .power(power)
-                                    .l1_voltage(l1_voltage)
-                                    .temperature(temperature)
-                                    .build();
+                ) && let Some(transaction_id) = action.transaction_id
+                {
+                    let session_id = cs.session_id();
+                    if session_id == transaction_id {
+                        if energy > cs.last_energy() {
+                            let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
+                                .power(power)
+                                .l1_voltage(l1_voltage)
+                                .temperature(temperature)
+                                .build();
+                            if self.last_known_stop_energy.is_none()
+                                || self.last_known_stop_energy == Some(0)
+                            {
+                                info!(
+                                    "{} ## session {session_id}: current {:.3} kWh (SoC can not be determined)",
+                                    self.peer,
+                                    energy as f64 / 1_000f64
+                                );
+                            } else {
                                 let soc_progress = cs.add_snapshot(snapshot);
-                                if soc_progress.is_complete() && cs.state().is_active() {
+                                if soc_progress.is_complete() && !cs.is_complete() {
                                     info!(
                                         "{} >> Stopping session {session_id}: {soc_progress}",
                                         self.peer
@@ -336,15 +382,34 @@ impl Connection {
                                     info!("{} ## session {session_id}: {soc_progress}", self.peer);
                                 }
                             }
-                        } else {
-                            warn!(
-                                "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
-                                self.peer
-                            );
                         }
+                    } else {
+                        warn!(
+                            "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
+                            self.peer
+                        );
                     }
-                    // else charging point didn't specify transaction id
-                    // which seems to indicate the session is not in progress
+                } else if let Some(energy) = energy {
+                    if let Some(transaction_id) = action.transaction_id {
+                        warn!(
+                            "{} ## adding missed charging session with transaction id {transaction_id},\
+                            last known stop energy: {:.3}",
+                            self.peer,
+                            self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
+                        );
+                        self.check_bms_on_missed_session();
+
+                        self.charging_session = Some(ChargingSession::with_state(
+                            ChargingSessionState::Unknown,
+                            self.last_known_stop_energy.unwrap_or_default(),
+                            self.bms,
+                            transaction_id,
+                            None,
+                        ));
+                    } else {
+                        // no known session in progress
+                        self.update_last_known_stop_energy(energy);
+                    }
                 }
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
@@ -408,12 +473,13 @@ impl Connection {
             }
             Action::StartTransaction(action) => {
                 if let Some(mut cs) = self.charging_session.take()
-                    && cs.state().is_active()
+                    && !cs.state().is_complete()
                 {
                     warn!(
-                        "{} ## new session ending previous active session with id: {}",
+                        "{} ## new session ending previous session with id: {}, state: {}",
                         self.peer,
                         cs.session_id(),
+                        cs.state(),
                     );
                     cs.stop(
                         Utc::now(),
@@ -487,7 +553,14 @@ impl Connection {
                         action.meter_stop,
                         action.reason
                     );
+                    ChargingSession::save_missing_stopped_session(
+                        Some(action.timestamp.inner()),
+                        action.reason,
+                        action.meter_stop,
+                        Some(action.transaction_id),
+                    );
                 }
+                self.update_last_known_stop_energy(action.meter_stop);
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -530,6 +603,59 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    fn update_last_known_stop_energy(&mut self, meter_energy: u64) {
+        match self.last_known_stop_energy {
+            Some(last) if last == meter_energy => (),
+            Some(ref mut last) if *last < meter_energy => {
+                if self.charging_session.is_none() {
+                    // only log when no charging session is in progress
+                    info!(
+                        "{} ## updating last known stop energy: {:.3} kWh, \
+                        previous: {:.3} kWh",
+                        self.peer,
+                        meter_energy as f64 / 1_000f64,
+                        *last as f64 / 1_000f64
+                    );
+                }
+                *last = meter_energy;
+            }
+            None => {
+                info!(
+                    "{} ## setting last known stop energy: {:.3} kWh",
+                    self.peer,
+                    meter_energy as f64 / 1_000f64,
+                );
+                self.last_known_stop_energy = Some(meter_energy);
+            }
+            Some(last) => {
+                info!(
+                    "{} ## ignoring last meter energy: {:.3} kWh, \
+                    lower than last known stop energy: {:.3} kWh",
+                    self.peer,
+                    meter_energy as f64 / 1_000f64,
+                    last as f64 / 1_000f64
+                );
+            }
+        }
+    }
+
+    fn check_bms_on_missed_session(&self) {
+        if self.bms.soc_cap.is_some() {
+            if self.last_known_stop_energy.is_none() || self.last_known_stop_energy == Some(0) {
+                warn!(
+                    "{} ## last stop energy is unknown => \
+                    SoC & SoC cap will not have the expected effect",
+                    self.peer
+                );
+            } else {
+                warn!(
+                    "{} ## ensure the SoC & SoC cap are set as expected",
+                    self.peer
+                );
+            }
+        }
     }
 
     fn prepare_response<A: Response + std::fmt::Debug>(

@@ -53,18 +53,19 @@ async fn main() -> anyhow::Result<()> {
     // make sure the DB is available
     {
         let db = Database::get();
-        match db.get_last_active_charging_session(None) {
+        match db.get_last_charging_session(None) {
             Ok(Some(sess)) => {
                 info!(
-                    "found active session:\n\
-                        \tid: {}, soc cap: {:?}, last soc: {:?}
+                    "last known session:\n\
+                        \tid: {}, state: {}, soc cap: {:?}, last soc: {:?}
                         ",
                     sess.session_id(),
-                    sess.bms().soc_cap,
+                    sess.state(),
+                    sess.bms().map(|bms| bms.soc_cap),
                     sess.last_soc()
                 );
             }
-            Ok(None) => info!("no active charging session"),
+            Ok(None) => info!("no known charging session"),
             Err(err) => {
                 error!("failed to query last active session: {err}");
             }
@@ -102,13 +103,13 @@ async fn main() -> anyhow::Result<()> {
                 let peer = stream.peer_addr().context("getting peer address")?;
                 let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
 
-                let active_charging_session = Database::get().get_last_active_charging_session(&bms)
-                    .context("getting last active charging session")?;
+                let charging_session = Database::get().get_last_charging_session(&bms)
+                    .context("getting last charging session")?;
 
                 info!("peer address {peer}");
 
                 let mut connection = Connection::new(peer, ws_stream, bms,
-                    charging_plan, active_charging_session);
+                    charging_plan, charging_session);
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
                     // FIXME when connection is lost due to a reboot,
                     // (Connection reset without closing handshake)
