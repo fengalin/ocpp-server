@@ -8,13 +8,6 @@ pub struct Args {
     #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
     pub ocpp_port: u16,
 
-    #[clap(
-        long,
-        help = "actually run the server, \
-        otherwise just performs checks & print initial configuration"
-    )]
-    pub run: bool,
-
     #[clap(long, help = "battery capacity (Wh)", default_value_t = 48_100)]
     pub battery_capacity: u32,
 
@@ -42,6 +35,46 @@ pub struct Args {
         help = "Charging plan end time - required for reach-soc-cap-before ('HH:MM')"
     )]
     pub end_time: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    #[clap(about = "Run the server")]
+    Run,
+    #[clap(about = "Stop the active session")]
+    StopSession,
+    #[clap(about = "Reset the EVSE once connected")]
+    Reset,
+}
+
+impl Command {
+    pub fn is_run(self) -> bool {
+        self == Command::Run
+    }
+    pub fn is_stop_session(self) -> bool {
+        self == Command::StopSession
+    }
+    pub fn is_reset(self) -> bool {
+        self == Command::Reset
+    }
+}
+
+impl Args {
+    pub fn is_dry_run(&self) -> bool {
+        self.command.is_none()
+    }
+    pub fn is_run(&self) -> bool {
+        self.command.is_some_and(|c| c.is_run())
+    }
+    pub fn is_stop_session(&self) -> bool {
+        self.command.is_some_and(|c| c.is_stop_session())
+    }
+    pub fn is_reset(&self) -> bool {
+        self.command.is_some_and(|c| c.is_reset())
+    }
 }
 
 impl From<&Args> for crate::Bms {

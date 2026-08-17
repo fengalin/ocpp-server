@@ -20,8 +20,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
-    Bms, ChargingPlan, ChargingSession, ChargingSessionSnapshot, ChargingSessionState,
-    measurements::*, schedule,
+    Bms, ChargingPlan, ChargingSchedule, ChargingSession, ChargingSessionSnapshot,
+    ChargingSessionState, args, measurements::*, schedule,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -33,8 +33,6 @@ pub struct Connection {
     connector_id: Option<u32>,
     bms: Bms,
     last_known_stop_energy: Option<u64>,
-    charging_plan: Option<ChargingPlan>,
-    prepared_first_actions: bool,
     send_action_id: usize,
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
@@ -43,101 +41,104 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn stop_transaction(&self) -> Option<call::RemoteStopTransaction> {
-        const STOP_SESSION: bool = false;
-        if !STOP_SESSION {
-            return None;
-        }
-        let transaction_id = self.charging_session.as_ref().map(|cs| cs.session_id())?;
-        Some(call::RemoteStopTransaction { transaction_id })
-    }
-
-    fn prepare_first_actions(&mut self, _connector_id: u32) {
-        if let Some(stop_transaction) = self.stop_transaction() {
-            self.call_queue
-                .push_back(Action::RemoteStopTransaction(stop_transaction));
-        }
-
-        if let Some(ref charging_plan) = self.charging_plan {
-            self.call_queue
-                .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
-                    id: None,
-                    connector_id: None,
-                    charging_profile_purpose: None,
-                    stack_level: None,
-                }));
-
-            if let Some(charging_schedule) = charging_plan.to_charging_schedule(&self.bms) {
-                self.call_queue.push_back(Action::SetChargingProfile(
-                    schedule::SetChargingProfile::builder(charging_schedule).build(),
-                ));
-            }
-        }
-
-        // self.call_queue.push_back(Action::Reset(call::Reset {
-        //     reset_type: ResetType::Soft,
-        // }));
-
-        // // let availability_type = AvailabilityType::Inoperative;
-        // let availability_type = AvailabilityType::Operative;
-        // self.call_queue
-        //     .push_back(Action::ChangeAvailability(call::ChangeAvailability {
-        //         connector_id: _connector_id,
-        //         availability_type,
-        //     }));
-
-        // self.call_queue
-        //     .push_back(Action::GetConfiguration(call::GetConfiguration {
-        //         key: None,
-        //     }));
-
-        // self.call_queue
-        //     .push_back(Action::UnlockConnector(call::UnlockConnector {
-        //         connector_id: 1,
-        //     }));
-
-        // self.call_queue
-        //     .push_back(Action::ChangeConfiguration(call::ChangeConfiguration {
-        //         key: "CS_URL".to_string(),
-        //         value: "ws://192.168.1.16:9000".to_string(),
-        //     }));
-        // self.call_queue.push_back(Action::Reset(call::Reset {
-        //     reset_type: ResetType::Soft,
-        // }));
-
-        self.prepared_first_actions = true;
-    }
+    // fn prepare_first_actions(&mut self, _connector_id: u32) {
+    // self.call_queue
+    //     .push_back(Action::ChangeConfiguration(call::ChangeConfiguration {
+    //         key: "CS_URL".to_string(),
+    //         value: "ws://192.168.1.16:9000".to_string(),
+    //     }));
+    // self.call_queue.push_back(Action::Reset(call::Reset {
+    //     reset_type: ResetType::Soft,
+    // }));
+    // }
 
     pub fn new(
         peer: SocketAddr,
         ws_stream: WebSocketStream<TcpStream>,
         bms: Bms,
         charging_plan: Option<ChargingPlan>,
-        mut last_charging_session: Option<ChargingSession>,
+        last_charging_session: Option<ChargingSession>,
+        command: args::Command,
     ) -> Self {
-        let last_known_stop_energy = match last_charging_session {
-            Some(ref cs) if cs.is_complete() => {
-                let last_known_stop_energy = cs.last_energy();
-                last_charging_session = None;
-                Some(last_known_stop_energy)
-            }
-            _ => None,
-        };
-
-        Connection {
+        let mut this = Connection {
             peer,
             ws_stream,
             connector_id: None,
             bms,
-            last_known_stop_energy,
-            charging_plan,
-            prepared_first_actions: false,
+            last_known_stop_energy: None,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
-            charging_session: last_charging_session,
+            charging_session: None,
+        };
+
+        if let Some(ref cs) = last_charging_session
+            && cs.is_complete()
+        {
+            this.last_known_stop_energy = Some(cs.last_energy());
+        } else {
+            // FIXME is last_charging_session is some (and not complete)
+            // init last_known_stop_energy with the energy of the first snapshot
+            // or the initial_energy
+            this.charging_session = last_charging_session;
         }
+
+        use args::Command::*;
+        match command {
+            Run => {
+                if let Some(charging_plan) = charging_plan {
+                    this.call_queue.push_back(Action::ClearChargingProfile(
+                        call::ClearChargingProfile {
+                            id: None,
+                            connector_id: None,
+                            charging_profile_purpose: None,
+                            stack_level: None,
+                        },
+                    ));
+
+                    if let Some(charging_schedule) = charging_plan.to_charging_schedule(&bms) {
+                        this.call_queue.push_back(Action::SetChargingProfile(
+                            schedule::SetChargingProfile::builder(charging_schedule).build(),
+                        ));
+                    }
+                }
+            }
+            StopSession => {
+                let cs = this.charging_session.as_ref().expect("checked by caller");
+                this.call_queue.push_back(Action::RemoteStopTransaction(
+                    call::RemoteStopTransaction {
+                        // FIXME use transaction id & fallback to session_id
+                        // if not defined
+                        transaction_id: cs.session_id(),
+                    },
+                ));
+            }
+            Reset => {
+                // After a reset, the EVSE starts the last chaging plan that
+                // was set, regardless of the moment it was supposed to start.
+                // Set a 0 W permanent limit to make sure we don't start
+                // charging unexpectedly.
+
+                this.call_queue.push_back(Action::ClearChargingProfile(
+                    call::ClearChargingProfile {
+                        id: None,
+                        connector_id: None,
+                        charging_profile_purpose: None,
+                        stack_level: None,
+                    },
+                ));
+                this.call_queue.push_back(Action::SetChargingProfile(
+                    schedule::SetChargingProfile::builder(ChargingSchedule::new()).build(),
+                ));
+
+                this.call_queue.push_back(Action::Reset(call::Reset {
+                    reset_type: ResetType::Soft,
+                }));
+            }
+        }
+
+        this
     }
 
     async fn handle_incoming_message(&mut self, msg: &str) -> anyhow::Result<()> {
@@ -388,11 +389,12 @@ impl Connection {
                             "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
                             self.peer
                         );
+                        // FIXME update transaction id in current session
                     }
                 } else if let Some(energy) = energy {
                     if let Some(transaction_id) = action.transaction_id {
                         warn!(
-                            "{} ## adding missed charging session with transaction id {transaction_id},\
+                            "{} ## adding missed charging session with transaction id {transaction_id}, \
                             last known stop energy: {:.3}",
                             self.peer,
                             self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
@@ -485,7 +487,7 @@ impl Connection {
                         Utc::now(),
                         0,
                         ChargingSessionState::Error(
-                            "Got start transaction while session with still active".to_string(),
+                            "Got start transaction while session was still active".to_string(),
                         ),
                     );
                 }
@@ -755,12 +757,6 @@ impl Connection {
                     self.handle_incoming_ws_message(msg)
                         .await
                         .context("handling incoming message")?;
-
-                    if !self.prepared_first_actions
-                        && let Some(connector_id) = self.connector_id
-                    {
-                        self.prepare_first_actions(connector_id);
-                    }
 
                     if let Some(action) = self.call_queue.pop_front()
                         && let Err(err) = self.send_action(action).await

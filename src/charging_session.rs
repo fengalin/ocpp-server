@@ -188,6 +188,7 @@ impl ChargingSession {
         mut snapshot: ChargingSessionSnapshot,
     ) -> SocProgress {
         let added_energy = snapshot.energy.saturating_sub(self.initial_energy);
+        // FIXME use first snapshot value if available?
         let soc_progress = self.bms.map_or(SocProgress::Unknown, |bms| {
             bms.get_current_soc(added_energy)
         });

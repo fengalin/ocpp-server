@@ -22,7 +22,7 @@ pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 pub mod measurements;
 pub mod schedule;
-pub use schedule::ChargingPlan;
+pub use schedule::{ChargingPlan, ChargingSchedule};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let charging_plan = Option::<ChargingPlan>::try_from(&args)
         .inspect(|cp| {
-            if !args.run {
+            if args.is_dry_run() {
                 info!("Charging plan: {cp:?}");
                 if let Some(cp) = cp {
                     let _ = cp.to_charging_schedule(&bms);
@@ -65,9 +65,15 @@ async fn main() -> anyhow::Result<()> {
                     sess.last_soc()
                 );
             }
-            Ok(None) => info!("no known charging session"),
+            Ok(None) => {
+                if args.is_stop_session() {
+                    bail!("no known charging session to stop");
+                } else {
+                    info!("no known charging session");
+                }
+            }
             Err(err) => {
-                error!("failed to query last active session: {err}");
+                bail!("failed to query last active session: {err}");
             }
         }
     }
@@ -82,15 +88,21 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bindind to {addr}"))?;
     info!("Listening on: {addr}");
 
-    if !args.run {
+    if args.is_dry_run() {
         warn!("Quitting now!\nUse --run to actually run the server");
         return Ok(());
+    }
+
+    if args.is_reset() {
+        warn!("Resetting... this will cancel any charging plan (limit will be set to 0 W)");
     }
 
     let accept_stream = listener.accept().fuse();
     pin_mut!(accept_stream);
 
     loop {
+        trace!("main loop iteration");
+
         futures::select_biased! {
             _ = ctrl_c => {
                 warn!("shutting down due to SIGINT");
@@ -103,18 +115,31 @@ async fn main() -> anyhow::Result<()> {
                 let peer = stream.peer_addr().context("getting peer address")?;
                 let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
 
-                let charging_session = Database::get().get_last_charging_session(&bms)
-                    .context("getting last charging session")?;
-
                 info!("peer address {peer}");
 
-                let mut connection = Connection::new(peer, ws_stream, bms,
-                    charging_plan, charging_session);
+                let last_charging_session = Database::get()
+                    .get_last_charging_session(&bms)
+                    .context("getting last charging session")?;
+
+                let mut connection = Connection::new(
+                    peer,
+                    ws_stream,
+                    bms,
+                    charging_plan,
+                    last_charging_session,
+                    args.command.expect("not dry-run"),
+                );
+
                 if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
                     // FIXME when connection is lost due to a reboot,
                     // (Connection reset without closing handshake)
                     // the charging point doesn't seem to be able to connect again
                     error!("{}: {err:#}", connection.peer());
+                }
+
+                if args.is_reset() {
+                    warn!("exiting after reset");
+                    break;
                 }
             }
             complete => break,
