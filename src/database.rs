@@ -19,18 +19,18 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
             CREATE TABLE charging_session (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 state STRING,
-                battery_capacity FLOAT,
-                soc_cap FLOAT,
                 transaction_id INTEGER
             );
             CREATE TABLE charging_session_snapshot (
                 timestamp STRING,
                 sessionid INTEGER,
+                is_reference INTEGER,
                 energy INTEGER,
                 power INTEGER,
                 l1_voltage INTEGER,
                 temperature INTEGER,
                 soc FLOAT,
+                soc_cap FLOAT,
                 FOREIGN KEY (sessionid) REFERENCES charging_session(id)
             );
             CREATE INDEX charging_session_snapshot_session_id ON charging_session_snapshot (sessionid);
@@ -48,14 +48,11 @@ impl<'a> Database<'a> {
         Database(DATABASE.lock().unwrap())
     }
 
-    pub fn get_last_charging_session<'b>(
-        &self,
-        bms: impl Into<Option<&'b Bms>>,
-    ) -> anyhow::Result<Option<ChargingSession>> {
-        let Some((session_id, state, battery_capacity, mut soc_cap)) = self
+    pub fn get_last_charging_session(&self, bms: &Bms) -> anyhow::Result<Option<ChargingSession>> {
+        let Some((session_id, state)) = self
             .0
-            .query_row::<(i32, String, Option<f64>, Option<f64>), _, _>(
-                "SELECT id, state, battery_capacity, soc_cap FROM charging_session
+            .query_row::<(i32, String), _, _>(
+                "SELECT id, state FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
                     )",
@@ -63,9 +60,7 @@ impl<'a> Database<'a> {
                 |row| {
                     let session_id = row.get(0)?;
                     let state = row.get(1)?;
-                    let battery_capacity = row.get(2)?;
-                    let soc_cap = row.get(3)?;
-                    Ok((session_id, state, battery_capacity, soc_cap))
+                    Ok((session_id, state))
                 },
             )
             .optional()
@@ -73,26 +68,6 @@ impl<'a> Database<'a> {
         else {
             return Ok(None);
         };
-
-        if let Some((db_soc_cap, new_soc_cap)) =
-            Option::zip(soc_cap, bms.into().and_then(|bms| bms.soc_cap))
-            && db_soc_cap != new_soc_cap
-        {
-            // if the soc_cap was updated in this invocation,
-            // prefer the new value to the one kept with the session
-            soc_cap = Some(new_soc_cap);
-            let res = self.0.execute(
-                "UPDATE charging_session SET soc_cap = :soc_cap WHERE id = :session_id;",
-                named_params![
-                    ":soc_cap": soc_cap,
-                    ":session_id": session_id,
-                ],
-            );
-
-            if let Err(err) = res {
-                log::error!("could not update soc_cap for active charging session: {err}");
-            };
-        }
 
         let mut stmt = self
             .0
@@ -110,6 +85,7 @@ impl<'a> Database<'a> {
         let mut cs = None;
         while let Some(row) = rows.next().context("getting last charging session row")? {
             let timestamp = row.get_unwrap::<_, DateTime<Utc>>("timestamp");
+            let is_reference = row.get_unwrap::<_, i64>("is_reference") == 1;
             let energy = row.get_unwrap::<_, i64>("energy") as u64;
             let power = row.get_unwrap::<_, Option<i64>>("power").map(|p| p as u64);
             let l1_voltage = row
@@ -119,32 +95,26 @@ impl<'a> Database<'a> {
                 .get_unwrap::<_, Option<i64>>("temperature")
                 .map(|p| p as u64);
             let soc = row.get_unwrap::<_, Option<f64>>("soc");
+            let soc_cap = row.get_unwrap::<_, Option<f64>>("soc_cap");
 
             let cs = cs.get_or_insert_with(|| {
                 let session_id = row.get_unwrap::<_, i64>("sessionid") as i32;
 
-                let bms = battery_capacity.map(|capacity| Bms {
-                    capacity,
-                    // FIXME
-                    constant_power_loss: 400,
-                    initial_soc: soc,
-                    soc_cap,
-                });
-
                 ChargingSession::from_database(
                     session_id,
-                    energy,
-                    bms,
+                    bms.clone(),
                     state.parse().expect("infallible"),
                 )
             });
 
             cs.add_snapshot_from_database(
                 ChargingSessionSnapshot::builder(timestamp, energy)
+                    .is_reference(is_reference)
                     .power(power)
                     .l1_voltage(l1_voltage)
                     .temperature(temperature)
                     .soc(soc)
+                    .soc_cap(soc_cap)
                     .build(),
             );
         }
@@ -155,18 +125,15 @@ impl<'a> Database<'a> {
     pub fn add_new_charging_session(
         &self,
         state: ChargingSessionState,
-        bms: Option<&Bms>,
         transaction_id: Option<i32>,
     ) -> i32 {
         self.0
             .query_one::<i32, _, _>(
-                "INSERT INTO charging_session (state, battery_capacity, soc_cap, transaction_id)
-                    VALUES (:state, :battery_capacity, :soc_cap, :transaction_id)
+                "INSERT INTO charging_session (state, transaction_id)
+                    VALUES (:state, :transaction_id)
                     RETURNING rowid;",
                 named_params![
                     ":state": state.to_string(),
-                    ":battery_capacity": bms.map(|bms| bms.capacity),
-                    ":soc_cap": bms.and_then(|bms| bms.soc_cap),
                     ":transaction_id": transaction_id.map(|tid| tid as i64),
                 ],
                 |row| row.get(0),
@@ -200,25 +167,29 @@ impl<'a> Database<'a> {
         let res = self.0.execute(
             "
             INSERT INTO charging_session_snapshot
-            (timestamp, sessionid, energy, power, l1_voltage, temperature, soc)
+            (timestamp, sessionid, is_reference, energy, power, l1_voltage, temperature, soc, soc_cap)
             VALUES (
                 :timestamp,
                 :session_id,
+                :is_reference,
                 :energy,
                 :power,
                 :l1_voltage,
                 :temperature,
-                :soc
+                :soc,
+                :soc_cap
             );
         ",
             named_params![
                 ":timestamp": snapshot.timestamp,
                 ":session_id": session_id,
+                ":is_reference": snapshot.is_reference,
                 ":energy": snapshot.energy as i64,
                 ":power": snapshot.power.map(|p| p as i64),
                 ":l1_voltage": snapshot.l1_voltage.map(|v| v as i64),
                 ":temperature": snapshot.temperature.map(|t| t as i64),
                 ":soc": snapshot.soc,
+                ":soc_cap": snapshot.soc_cap,
             ],
         );
 

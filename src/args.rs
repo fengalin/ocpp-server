@@ -83,7 +83,8 @@ impl From<&Args> for crate::Bms {
         crate::Bms {
             capacity: args.battery_capacity as f64,
             constant_power_loss: args.constant_power_loss,
-            initial_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
+            reference_energy: None,
+            reference_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
             soc_cap: args.soc_cap.map(|soc| soc as f64 / 100.0),
         }
     }

@@ -210,7 +210,7 @@ impl ChargingPlan {
                     \tenergy to add: {:.1} kWh\n\
                     \tenergy needed: {:.1} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
-                    bms.initial_soc.unwrap_or_default() * 100.0,
+                    bms.reference_soc.unwrap_or_default() * 100.0,
                     bms.soc_cap.expect("defined at this stage") * 100.0,
                     energy_to_add / 1_000.0,
                     energy_needed / 1_000.0,

@@ -96,7 +96,7 @@ impl Connection {
                         },
                     ));
 
-                    if let Some(charging_schedule) = charging_plan.to_charging_schedule(&bms) {
+                    if let Some(charging_schedule) = charging_plan.to_charging_schedule(&this.bms) {
                         this.call_queue.push_back(Action::SetChargingProfile(
                             schedule::SetChargingProfile::builder(charging_schedule).build(),
                         ));
@@ -231,7 +231,7 @@ impl Connection {
                                     self.charging_session = Some(ChargingSession::with_state(
                                         action.status.clone(),
                                         self.last_known_stop_energy.unwrap_or_default(),
-                                        self.bms,
+                                        self.bms.clone(),
                                         None,
                                         action.timestamp.map(|ts| ts.inner()),
                                     ));
@@ -352,8 +352,11 @@ impl Connection {
                     );
                 }
 
-                let cs =
-                    ChargingSession::new(self.bms, action.timestamp.inner(), action.meter_start);
+                let cs = ChargingSession::new(
+                    self.bms.clone(),
+                    action.timestamp.inner(),
+                    action.meter_start,
+                );
                 let transaction_id = cs.session_id();
                 info!(
                     "## starting transaction with id: {}, timestamp: {}, meter start: {}",
@@ -517,7 +520,7 @@ impl Connection {
                 self.charging_session = Some(ChargingSession::with_state(
                     ChargingSessionState::Unknown,
                     self.last_known_stop_energy.unwrap_or_default(),
-                    self.bms,
+                    self.bms.clone(),
                     transaction_id,
                     None,
                 ));

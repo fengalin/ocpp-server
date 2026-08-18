@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     // make sure the DB is available
     {
         let db = Database::get();
-        match db.get_last_charging_session(None) {
+        match db.get_last_charging_session(&bms) {
             Ok(Some(sess)) => {
                 info!(
                     "last known session:\n\
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
                         ",
                     sess.session_id(),
                     sess.state(),
-                    sess.bms().map(|bms| bms.soc_cap),
+                    sess.bms().soc_cap,
                     sess.last_soc()
                 );
             }
@@ -100,49 +100,36 @@ async fn main() -> anyhow::Result<()> {
     let accept_stream = listener.accept().fuse();
     pin_mut!(accept_stream);
 
-    loop {
-        trace!("main loop iteration");
-
-        futures::select_biased! {
-            _ = ctrl_c => {
-                warn!("shutting down due to SIGINT");
-                break;
-            }
-            accept_res = accept_stream => {
-                let Ok((stream, _)) = accept_res else {
-                    bail!("TCP listener terminated");
-                };
-                let peer = stream.peer_addr().context("getting peer address")?;
-                let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
-
-                info!("peer address {peer}");
-
-                let last_charging_session = Database::get()
-                    .get_last_charging_session(&bms)
-                    .context("getting last charging session")?;
-
-                let mut connection = Connection::new(
-                    ws_stream,
-                    bms,
-                    charging_plan,
-                    last_charging_session,
-                    args.command.expect("not dry-run"),
-                );
-
-                if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
-                    // FIXME when connection is lost due to a reboot,
-                    // (Connection reset without closing handshake)
-                    // the charging point doesn't seem to be able to connect again
-                    error!("{peer}: {err:#}");
-                }
-
-                if args.is_reset() {
-                    warn!("exiting after reset");
-                    break;
-                }
-            }
-            complete => break,
+    futures::select_biased! {
+        _ = ctrl_c => {
+            warn!("shutting down due to SIGINT");
         }
+        accept_res = accept_stream => {
+            let Ok((stream, _)) = accept_res else {
+                bail!("TCP listener terminated");
+            };
+            let peer = stream.peer_addr().context("getting peer address")?;
+            let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
+
+            info!("peer address {peer}");
+
+            let last_charging_session = Database::get()
+                .get_last_charging_session(&bms)
+                .context("getting last charging session")?;
+
+            let mut connection = Connection::new(
+                ws_stream,
+                bms.clone(),
+                charging_plan,
+                last_charging_session,
+                args.command.expect("not dry-run"),
+            );
+
+            if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
+                error!("{peer}: {err:#}");
+            }
+        }
+        complete => (),
     }
 
     Ok(())
