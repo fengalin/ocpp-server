@@ -33,6 +33,7 @@ pub struct Connection {
     connector_id: Option<u32>,
     bms: Bms,
     last_known_stop_energy: Option<u64>,
+    last_meter_values: Option<MeterValueSelection>,
     send_action_id: usize,
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
@@ -66,6 +67,7 @@ impl Connection {
             connector_id: None,
             bms,
             last_known_stop_energy: None,
+            last_meter_values: None,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
@@ -281,189 +283,55 @@ impl Connection {
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::MeterValues(action) => {
-                let mut timestamp = None;
-                let mut energy = None;
-                let mut power = None;
-                let mut l1_voltage = None;
-                let mut temperature = None;
-                let meter_val_selection: Vec<_> = action
+                let mut meter_val_selection: Vec<_> = action
                     .meter_value
                     .iter()
-                    .map(|mv| {
-                        timestamp = Some(mv.timestamp.inner());
-                        (
-                            mv.timestamp.inner().with_timezone(&chrono::Local),
-                            mv.sampled_value
-                                .iter()
-                                .filter_map(|sv| {
-                                    use Measurand::*;
-                                    match sv.measurand {
-                                        Some(PowerOffered) => Some(format!(
-                                            "Power Offered: {} kW",
-                                            sv.value
-                                                .parse::<u64>()
-                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
-                                        )),
-                                        Some(PowerActiveImport) => {
-                                            power = sv.value.parse::<u64>().ok();
-                                            Some(format!(
-                                                "Active Power I: {} kW",
-                                                sv.value
-                                                    .parse::<u64>()
-                                                    .map_or(f64::NAN, |v| v as f64 / 1_000.0)
-                                            ))
-                                        }
-                                        Some(EnergyActiveImportRegister) => {
-                                            energy = sv.value.parse::<u64>().ok();
-                                            Some(format!(
-                                                "Active Energy I: {} kWh",
-                                                sv.value
-                                                    .parse::<u64>()
-                                                    .map_or(f64::NAN, |v| v as f64 / 1_000.0)
-                                            ))
-                                        }
-                                        Some(Voltage) if sv.phase == Some(Phase::L1) => {
-                                            l1_voltage = sv.value.parse::<u64>().ok();
-                                            Some(format!("Voltage L1: {} V", sv.value))
-                                        }
-                                        Some(Temperature) => {
-                                            temperature = sv.value.parse::<u64>().ok();
-                                            Some(format!("Temperature: {} °C", sv.value))
-                                        }
-                                        Some(Frequency) => {
-                                            Some(format!("Frequency: {} Hz", sv.value))
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                                .collect::<Vec<String>>(),
-                        )
-                    })
+                    .map(MeterValueSelection::from)
                     .collect();
 
-                info!(
-                    "{} >> incoming MeterValues {meter_val_selection:?}, transaction id: {:?}",
-                    self.peer, action.transaction_id,
-                );
-                if let Some(((timestamp, energy), cs)) = Option::zip(
-                    Option::zip(timestamp, energy),
-                    self.charging_session.as_mut(),
-                ) && let Some(transaction_id) = action.transaction_id
-                {
-                    let session_id = cs.session_id();
-                    if session_id == transaction_id {
-                        if energy > cs.last_energy() {
-                            let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
-                                .power(power)
-                                .l1_voltage(l1_voltage)
-                                .temperature(temperature)
-                                .build();
-                            if self.last_known_stop_energy.is_none()
-                                || self.last_known_stop_energy == Some(0)
-                            {
-                                info!(
-                                    "{} ## session {session_id}: current {:.3} kWh (SoC can not be determined)",
-                                    self.peer,
-                                    energy as f64 / 1_000f64
-                                );
-                            } else {
-                                let soc_progress = cs.add_snapshot(snapshot);
-                                if soc_progress.is_complete() && !cs.is_complete() {
-                                    info!(
-                                        "{} >> Stopping session {session_id}: {soc_progress}",
-                                        self.peer
-                                    );
-                                    cs.set_state(ChargingSessionState::SocCapReached);
-                                    self.call_queue.push_back(Action::RemoteStopTransaction(
-                                        call::RemoteStopTransaction {
-                                            transaction_id: session_id,
-                                        },
-                                    ));
-                                } else {
-                                    info!("{} ## session {session_id}: {soc_progress}", self.peer);
-                                }
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
-                            self.peer
-                        );
-                        // FIXME update transaction id in current session
-                    }
-                } else if let Some(energy) = energy {
-                    if let Some(transaction_id) = action.transaction_id {
-                        warn!(
-                            "{} ## adding missed charging session with transaction id {transaction_id}, \
-                            last known stop energy: {:.3}",
-                            self.peer,
-                            self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
-                        );
-                        self.check_bms_on_missed_session();
-
-                        self.charging_session = Some(ChargingSession::with_state(
-                            ChargingSessionState::Unknown,
-                            self.last_known_stop_energy.unwrap_or_default(),
-                            self.bms,
-                            transaction_id,
-                            None,
-                        ));
-                    } else {
-                        // no known session in progress
-                        self.update_last_known_stop_energy(energy);
-                    }
+                // FIXME check if we need to handle possibly multiple items
+                if meter_val_selection.len() > 1 {
+                    info!(
+                        "{} >> MeterValues {meter_val_selection:?}, transaction id: {:?}",
+                        self.peer, action.transaction_id,
+                    );
                 }
+
+                if let Some(mv) = meter_val_selection.pop() {
+                    if self
+                        .last_meter_values
+                        .as_ref()
+                        .is_some_and(|last_mv| *last_mv != mv)
+                        || self.last_meter_values.is_none()
+                    {
+                        info!(
+                            "{} >> MeterValues {mv}, transaction id: {:?}",
+                            self.peer, action.transaction_id,
+                        );
+                        self.last_meter_values = Some(mv.clone());
+                    }
+
+                    self.handle_meter_value(mv, action.transaction_id);
+                }
+
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::DataTransfer(action) => {
-                let data_trans_selection: Vec<_> = action
-                    .data
-                    .iter()
-                    .map(|d| {
-                        let Ok(dpms) = serde_json::from_str::<Vec<Dpm>>(d) else {
-                            return vec![DataTransfer {
-                                timestamp: "N/A".to_string(),
-                                transaction_id: None,
-                                sampled_values: vec![d.clone()],
-                            }];
-                        };
-                        dpms.iter()
-                            .map(|dpm| DataTransfer {
-                                timestamp: dpm.data.timestamp.clone(),
-                                transaction_id: dpm.data.transaction_id,
-                                sampled_values: dpm
-                                    .data
-                                    .sampled_value
-                                    .iter()
-                                    .filter_map(|sv| match sv.measurand.as_str() {
-                                        "Power.Active.Import" => Some(format!(
-                                            "Active Power I: {} kW, ",
-                                            sv.value
-                                                .parse::<u64>()
-                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
-                                        )),
-                                        "Energy.Active.Import.Register" => Some(format!(
-                                            "Active Energy I: {} kWh, ",
-                                            sv.value
-                                                .parse::<u64>()
-                                                .map_or(f64::NAN, |v| v as f64 / 1_000.0)
-                                        )),
-                                        "Voltage" if sv.phase.as_deref() == Some("L1") => {
-                                            Some(format!("Voltage L1: {} V, ", sv.value))
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect(),
-                            })
-                            .collect()
-                    })
-                    .collect();
+                for d in action.data.iter() {
+                    let Ok(dpm_values) = serde_json::from_str::<Vec<Dpm>>(d) else {
+                        continue;
+                    };
 
-                info!(
-                    "{} >> incoming Data Transfer {} {data_trans_selection:?}",
-                    self.peer,
-                    action.message_id.as_ref().unwrap(),
-                );
+                    for dpm_value in dpm_values {
+                        info!(
+                            "{} >> DPM data: {} {}",
+                            self.peer,
+                            action.message_id.as_ref().unwrap(),
+                            DpmSelection::from(dpm_value),
+                        );
+                    }
+                }
+
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -605,6 +473,77 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    fn handle_meter_value(&mut self, mv: MeterValueSelection, transaction_id: Option<i32>) {
+        if let Some((energy, cs)) =
+            Option::zip(mv.active_energy_import, self.charging_session.as_mut())
+            && let Some(transaction_id) = transaction_id
+        {
+            let session_id = cs.session_id();
+            if session_id == transaction_id {
+                if energy > cs.last_energy() {
+                    let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
+                        .power(mv.active_power_import)
+                        .l1_voltage(mv.voltage_l1)
+                        .temperature(mv.temperature)
+                        .build();
+
+                    if self.last_known_stop_energy.is_none()
+                        || self.last_known_stop_energy == Some(0)
+                    {
+                        info!(
+                            "{} ## session {session_id}: current {:.3} kWh (SoC can not be determined)",
+                            self.peer,
+                            energy as f64 / 1_000f64
+                        );
+                    } else {
+                        let soc_progress = cs.add_snapshot(snapshot);
+                        if soc_progress.is_complete() && !cs.is_complete() {
+                            info!(
+                                "{} >> Stopping session {session_id}: {soc_progress}",
+                                self.peer
+                            );
+                            cs.set_state(ChargingSessionState::SocCapReached);
+                            self.call_queue.push_back(Action::RemoteStopTransaction(
+                                call::RemoteStopTransaction {
+                                    transaction_id: session_id,
+                                },
+                            ));
+                        } else {
+                            info!("{} ## session {session_id}: {soc_progress}", self.peer);
+                        }
+                    }
+                }
+            } else {
+                warn!(
+                    "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
+                    self.peer
+                );
+                // FIXME update transaction id in current session
+            }
+        } else if let Some(energy) = mv.active_energy_import {
+            if let Some(transaction_id) = transaction_id {
+                warn!(
+                    "{} ## adding missed charging session with transaction id {transaction_id}, \
+                    last known stop energy: {:.3}",
+                    self.peer,
+                    self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
+                );
+                self.check_bms_on_missed_session();
+
+                self.charging_session = Some(ChargingSession::with_state(
+                    ChargingSessionState::Unknown,
+                    self.last_known_stop_energy.unwrap_or_default(),
+                    self.bms,
+                    transaction_id,
+                    None,
+                ));
+            } else {
+                // no known session in progress
+                self.update_last_known_stop_energy(energy);
+            }
+        }
     }
 
     fn update_last_known_stop_energy(&mut self, meter_energy: u64) {
