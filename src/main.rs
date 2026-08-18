@@ -122,7 +122,6 @@ async fn main() -> anyhow::Result<()> {
                     .context("getting last charging session")?;
 
                 let mut connection = Connection::new(
-                    peer,
                     ws_stream,
                     bms,
                     charging_plan,
@@ -134,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
                     // FIXME when connection is lost due to a reboot,
                     // (Connection reset without closing handshake)
                     // the charging point doesn't seem to be able to connect again
-                    error!("{}: {err:#}", connection.peer());
+                    error!("{peer}: {err:#}");
                 }
 
                 if args.is_reset() {

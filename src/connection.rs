@@ -15,7 +15,7 @@ use ocpp_rs::{
         typed_call_result::TypedCallResult,
     },
 };
-use std::{collections::VecDeque, net::SocketAddr};
+use std::collections::VecDeque;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
@@ -28,7 +28,6 @@ const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
 #[derive(Debug)]
 pub struct Connection {
-    peer: SocketAddr,
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
     bms: Bms,
@@ -54,7 +53,6 @@ impl Connection {
     // }
 
     pub fn new(
-        peer: SocketAddr,
         ws_stream: WebSocketStream<TcpStream>,
         bms: Bms,
         charging_plan: Option<ChargingPlan>,
@@ -62,7 +60,6 @@ impl Connection {
         command: args::Command,
     ) -> Self {
         let mut this = Connection {
-            peer,
             ws_stream,
             connector_id: None,
             bms,
@@ -163,15 +160,14 @@ impl Connection {
     }
 
     async fn handle_incoming_call(&mut self, call: Call) -> anyhow::Result<()> {
-        trace!("{} >> incoming {call:?}", self.peer);
+        trace!(">> incoming {call:?}");
 
         match call.payload {
             Action::StatusNotification(action) => {
                 if action.connector_id != 0 {
                     if !matches!(action.error_code, ChargePointErrorCode::NoError) {
                         warn!(
-                            "{} >> connector {}: {:?} {:?}, timestamp: {:?}",
-                            self.peer,
+                            ">> connector {}: {:?} {:?}, timestamp: {:?}",
                             action.connector_id,
                             action.status,
                             action.error_code,
@@ -181,8 +177,7 @@ impl Connection {
                         );
                     } else {
                         info!(
-                            "{} >> connector {}: {:?}, timestamp: {:?}",
-                            self.peer,
+                            ">> connector {}: {:?}, timestamp: {:?}",
                             action.connector_id,
                             action.status,
                             action
@@ -201,9 +196,8 @@ impl Connection {
                                     // would allow starting a new session is by unplugging
                                     // the EV first or by rebooting the charging point.
                                     warn!(
-                                        "{} ## ending previous active session with id: {} \
+                                        "## ending previous active session with id: {} \
                                         due to connector status: {:?}",
-                                        self.peer,
                                         cs.session_id(),
                                         action.status,
                                     );
@@ -231,7 +225,7 @@ impl Connection {
                                     cs.set_state(action.status.clone());
                                 } else {
                                     // missed the transaction start
-                                    warn!("{} ## adding missed charging session", self.peer);
+                                    warn!("## adding missed charging session");
                                     self.check_bms_on_missed_session();
 
                                     self.charging_session = Some(ChargingSession::with_state(
@@ -257,7 +251,7 @@ impl Connection {
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::Heartbeat(action) => {
-                info!("{} >> incoming {action:?}", self.peer);
+                info!(">> incoming {action:?}");
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -267,7 +261,7 @@ impl Connection {
                 );
             }
             Action::BootNotification(action) => {
-                info!("{} >> incoming {action:?}", self.peer);
+                info!(">> incoming {action:?}");
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -279,7 +273,7 @@ impl Connection {
                 );
             }
             Action::SecurityEventNotification(action) => {
-                info!("{} >> incoming {action:?}", self.peer);
+                info!(">> incoming {action:?}");
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::MeterValues(action) => {
@@ -292,8 +286,8 @@ impl Connection {
                 // FIXME check if we need to handle possibly multiple items
                 if meter_val_selection.len() > 1 {
                     info!(
-                        "{} >> MeterValues {meter_val_selection:?}, transaction id: {:?}",
-                        self.peer, action.transaction_id,
+                        ">> MeterValues {meter_val_selection:?}, transaction id: {:?}",
+                        action.transaction_id,
                     );
                 }
 
@@ -305,8 +299,8 @@ impl Connection {
                         || self.last_meter_values.is_none()
                     {
                         info!(
-                            "{} >> MeterValues {mv}, transaction id: {:?}",
-                            self.peer, action.transaction_id,
+                            ">> MeterValues {mv}, transaction id: {:?}",
+                            action.transaction_id,
                         );
                         self.last_meter_values = Some(mv.clone());
                     }
@@ -324,8 +318,7 @@ impl Connection {
 
                     for dpm_value in dpm_values {
                         info!(
-                            "{} >> DPM data: {} {}",
-                            self.peer,
+                            ">> DPM data: {} {}",
                             action.message_id.as_ref().unwrap(),
                             DpmSelection::from(dpm_value),
                         );
@@ -346,8 +339,7 @@ impl Connection {
                     && !cs.state().is_complete()
                 {
                     warn!(
-                        "{} ## new session ending previous session with id: {}, state: {}",
-                        self.peer,
+                        "## new session ending previous session with id: {}, state: {}",
                         cs.session_id(),
                         cs.state(),
                     );
@@ -364,8 +356,7 @@ impl Connection {
                     ChargingSession::new(self.bms, action.timestamp.inner(), action.meter_start);
                 let transaction_id = cs.session_id();
                 info!(
-                    "{} ## starting transaction with id: {}, timestamp: {}, meter start: {}",
-                    self.peer,
+                    "## starting transaction with id: {}, timestamp: {}, meter start: {}",
                     transaction_id,
                     action.timestamp.inner().with_timezone(&chrono::Local),
                     action.meter_start,
@@ -389,8 +380,7 @@ impl Connection {
                     let cur_session_id = cs.session_id();
                     if cur_session_id == action.transaction_id {
                         info!(
-                            "{} ## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
-                            self.peer,
+                            "## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
                             action.transaction_id,
                             action.timestamp.inner().with_timezone(&chrono::Local),
                             action.meter_stop,
@@ -399,8 +389,7 @@ impl Connection {
                         cs.stop(action.timestamp.inner(), action.meter_stop, action.reason)
                     } else {
                         warn!(
-                            "{} ## transaction with id: {} stopped (expected {cur_session_id}), timestamp: {}, meter stop: {}, reason: {:?}",
-                            self.peer,
+                            "## transaction with id: {} stopped (expected {cur_session_id}), timestamp: {}, meter stop: {}, reason: {:?}",
                             action.transaction_id,
                             action.timestamp.inner().with_timezone(&chrono::Local),
                             action.meter_stop,
@@ -416,8 +405,7 @@ impl Connection {
                     }
                 } else {
                     warn!(
-                        "{} ## transaction with id: {} stopped (unexpected), timestamp: {}, meter stop: {}, reason: {:?}",
-                        self.peer,
+                        "## transaction with id: {} stopped (unexpected), timestamp: {}, meter stop: {}, reason: {:?}",
                         action.transaction_id,
                         action.timestamp.inner().with_timezone(&chrono::Local),
                         action.meter_stop,
@@ -439,7 +427,7 @@ impl Connection {
             }
             Action::Authorize(action) => {
                 // FIXME is this even sent with this charging point?
-                info!("{} >> incoming {action:?}", self.peer);
+                info!(">> incoming {action:?}");
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -453,12 +441,12 @@ impl Connection {
                 );
             }
             _ => {
-                info!("{} >> incoming {call:?}", self.peer);
+                info!(">> incoming {call:?}");
             }
         };
 
         if let Some(pending_response) = self.pending_response.take() {
-            trace!("{} << sending response {pending_response:?}", self.peer);
+            trace!("<< sending response {pending_response:?}");
             match parse::serialize_message(&pending_response) {
                 Ok(response) => {
                     self.ws_stream
@@ -493,17 +481,13 @@ impl Connection {
                         || self.last_known_stop_energy == Some(0)
                     {
                         info!(
-                            "{} ## session {session_id}: current {:.3} kWh (SoC can not be determined)",
-                            self.peer,
+                            "## session {session_id}: current {:.3} kWh (SoC can not be determined)",
                             energy as f64 / 1_000f64
                         );
                     } else {
                         let soc_progress = cs.add_snapshot(snapshot);
                         if soc_progress.is_complete() && !cs.is_complete() {
-                            info!(
-                                "{} >> Stopping session {session_id}: {soc_progress}",
-                                self.peer
-                            );
+                            info!(">> Stopping session {session_id}: {soc_progress}");
                             cs.set_state(ChargingSessionState::SocCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction {
@@ -511,23 +495,21 @@ impl Connection {
                                 },
                             ));
                         } else {
-                            info!("{} ## session {session_id}: {soc_progress}", self.peer);
+                            info!("## session {session_id}: {soc_progress}");
                         }
                     }
                 }
             } else {
                 warn!(
-                    "{} >> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
-                    self.peer
+                    ">> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
                 );
                 // FIXME update transaction id in current session
             }
         } else if let Some(energy) = mv.active_energy_import {
             if let Some(transaction_id) = transaction_id {
                 warn!(
-                    "{} ## adding missed charging session with transaction id {transaction_id}, \
+                    "## adding missed charging session with transaction id {transaction_id}, \
                     last known stop energy: {:.3}",
-                    self.peer,
                     self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
                 );
                 self.check_bms_on_missed_session();
@@ -553,9 +535,8 @@ impl Connection {
                 if self.charging_session.is_none() {
                     // only log when no charging session is in progress
                     info!(
-                        "{} ## updating last known stop energy: {:.3} kWh, \
+                        "## updating last known stop energy: {:.3} kWh, \
                         previous: {:.3} kWh",
-                        self.peer,
                         meter_energy as f64 / 1_000f64,
                         *last as f64 / 1_000f64
                     );
@@ -564,17 +545,15 @@ impl Connection {
             }
             None => {
                 info!(
-                    "{} ## setting last known stop energy: {:.3} kWh",
-                    self.peer,
+                    "## setting last known stop energy: {:.3} kWh",
                     meter_energy as f64 / 1_000f64,
                 );
                 self.last_known_stop_energy = Some(meter_energy);
             }
             Some(last) => {
                 info!(
-                    "{} ## ignoring last meter energy: {:.3} kWh, \
+                    "## ignoring last meter energy: {:.3} kWh, \
                     lower than last known stop energy: {:.3} kWh",
-                    self.peer,
                     meter_energy as f64 / 1_000f64,
                     last as f64 / 1_000f64
                 );
@@ -586,15 +565,11 @@ impl Connection {
         if self.bms.soc_cap.is_some() {
             if self.last_known_stop_energy.is_none() || self.last_known_stop_energy == Some(0) {
                 warn!(
-                    "{} ## last stop energy is unknown => \
+                    "## last stop energy is unknown => \
                     SoC & SoC cap will not have the expected effect",
-                    self.peer
                 );
             } else {
-                warn!(
-                    "{} ## ensure the SoC & SoC cap are set as expected",
-                    self.peer
-                );
+                warn!("## ensure the SoC & SoC cap are set as expected");
             }
         }
     }
@@ -616,7 +591,7 @@ impl Connection {
     }
 
     fn handle_incoming_call_result(&mut self, call_result: CallResultRaw) {
-        debug!("{} >> incoming {call_result:?}", self.peer);
+        debug!(">> incoming {call_result:?}");
 
         match self
             .call_response_tracker
@@ -624,35 +599,32 @@ impl Connection {
             .context("resolving call result")
         {
             Ok(TypedCallResult::GetConfiguration(result)) => {
-                info!("{} >> incoming {result:#?}", self.peer);
+                info!(">> incoming {result:#?}");
             }
             Ok(TypedCallResult::ClearChargingProfile(result)) => {
-                info!("{} >> incoming {result:?}", self.peer);
+                info!(">> incoming {result:?}");
             }
             Ok(TypedCallResult::GetCompositeSchedule(result)) => {
-                info!("{} >> incoming {result:#?}", self.peer);
+                info!(">> incoming {result:#?}");
             }
             Ok(TypedCallResult::ChangeAvailability(result)) => {
-                info!("{} >> incoming {result:#?}", self.peer);
+                info!(">> incoming {result:#?}");
             }
             Ok(TypedCallResult::RemoteStartTransaction(result)) => {
-                info!("{} >> incoming {result:#?}", self.peer);
+                info!(">> incoming {result:#?}");
             }
             Ok(TypedCallResult::RemoteStopTransaction(result)) => {
-                info!("{} >> incoming {result:#?}", self.peer);
+                info!(">> incoming {result:#?}");
             }
             other => {
-                info!("{} >> incoming {other:?}", self.peer);
+                info!(">> incoming {other:?}");
             }
         }
     }
 
     async fn send_action(&mut self, action: Action) -> anyhow::Result<()> {
         self.send_action_id += 1;
-        info!(
-            "{} << sending {} {action:?}",
-            self.peer, self.send_action_id
-        );
+        info!("<< sending {} {action:?}", self.send_action_id);
         let call = Call::new(format!("{}.occp-server-test", self.send_action_id), action);
         let call = self
             .call_response_tracker
@@ -664,10 +636,6 @@ impl Connection {
             .context("ws send")?;
 
         Ok(())
-    }
-
-    pub fn peer(&self) -> &SocketAddr {
-        &self.peer
     }
 
     pub async fn run_loop(
@@ -700,7 +668,7 @@ impl Connection {
                     if let Some(action) = self.call_queue.pop_front()
                         && let Err(err) = self.send_action(action).await
                     {
-                        error!("{}: failed to send first action: {err}", self.peer);
+                        error!("failed to send first action: {err}");
                     }
                 }
                 complete => break,
@@ -718,18 +686,18 @@ impl Connection {
                     .context("handling incoming ws msg")?;
             }
             ts::Message::Binary(payload) => {
-                warn!("{} >> msg bin: {payload:?}", self.peer);
+                warn!(">> msg bin: {payload:?}");
             }
             ts::Message::Ping(payload) => {
-                trace!("{} >> ping", self.peer);
+                trace!(">> ping");
                 self.ws_stream.send(ts::Message::Pong(payload)).await?;
             }
             ts::Message::Close(reason) => {
-                warn!("{} >> websocket closed by peer: {reason:?}", self.peer);
+                warn!(">> websocket closed by peer: {reason:?}");
                 return Ok(());
             }
             other => {
-                warn!("{} >> unhandled websocket message: {other:?}", self.peer);
+                warn!(">> unhandled websocket message: {other:?}");
             }
         }
 
