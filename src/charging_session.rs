@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use log::{error, warn};
 use ocpp_rs::v16::enums;
 use std::{fmt, str};
 
@@ -69,26 +70,32 @@ impl ChargingSessionSnapshotBuilder {
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct ChargingSession {
     session_id: i32,
+    transaction_id: Option<i32>,
     bms: Bms,
     snapshots: Vec<ChargingSessionSnapshot>,
     state: ChargingSessionState,
 }
 
 impl ChargingSession {
-    pub fn new(bms: Bms, timestamp: DateTime<Utc>, energy: u64) -> Self {
+    pub fn new(mut bms: Bms, timestamp: DateTime<Utc>, energy: u64) -> Self {
         let db = Database::get();
 
         let session_id = db.add_new_charging_session(ChargingSessionState::Active, None);
 
+        if bms.initial_energy.is_none() {
+            bms.initial_energy = Some(energy as f64);
+        }
+
         let mut this = ChargingSession {
             session_id,
+            transaction_id: None,
             bms,
             snapshots: vec![],
             state: ChargingSessionState::Active,
         };
         let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
             .is_reference(true)
-            .soc(this.bms.reference_soc)
+            .soc(this.bms.initial_soc)
             .soc_cap(this.bms.soc_cap)
             .build();
         this.add_and_save_snapshot(&db, snapshot);
@@ -100,28 +107,34 @@ impl ChargingSession {
     ///
     /// This is useful for cases where we missed the transaction start.
     pub fn with_state(
+        mut bms: Bms,
         state: impl Into<ChargingSessionState>,
-        initial_energy: u64,
-        bms: Bms,
+        last_known_stop_energy: u64,
         transaction_id: impl Into<Option<i32>>,
         timestamp: impl Into<Option<DateTime<Utc>>>,
     ) -> Self {
         let db = Database::get();
 
         let state = state.into();
-        let session_id = db.add_new_charging_session(state.clone(), transaction_id.into());
+        let transaction_id = transaction_id.into();
+        let session_id = db.add_new_charging_session(state.clone(), transaction_id);
+
+        if bms.initial_energy.is_none() {
+            bms.initial_energy = Some(last_known_stop_energy as f64);
+        }
 
         let snapshot = ChargingSessionSnapshot::builder(
             timestamp.into().unwrap_or_else(Utc::now),
-            initial_energy,
+            last_known_stop_energy,
         )
         .is_reference(true)
-        .soc(bms.reference_soc)
+        .soc(bms.initial_soc)
         .soc_cap(bms.soc_cap)
         .build();
 
         let mut this = ChargingSession {
             session_id,
+            transaction_id,
             bms,
             snapshots: vec![],
             state,
@@ -150,9 +163,15 @@ impl ChargingSession {
         db.add_charging_session_snapshot(session_id, &snapshot);
     }
 
-    pub fn from_database(session_id: i32, bms: Bms, state: ChargingSessionState) -> Self {
+    pub fn from_database(
+        bms: Bms,
+        session_id: i32,
+        transaction_id: Option<i32>,
+        state: ChargingSessionState,
+    ) -> Self {
         ChargingSession {
             session_id,
+            transaction_id,
             bms,
             snapshots: vec![],
             state,
@@ -185,14 +204,14 @@ impl ChargingSession {
         self.state = state;
     }
 
-    fn update_energy_and_soc(&mut self, snapshot: &mut ChargingSessionSnapshot) -> SocProgress {
-        if snapshot.is_reference {
-            self.bms.set_reference(snapshot.energy);
-        } else if self.bms.reference_energy.is_none() {
-            // if this is the first snapshot after retrieving from db
-            // use this snapshot as a reference
-            snapshot.is_reference = true;
-            self.bms.set_reference(snapshot.energy);
+    fn add_and_save_snapshot(
+        &mut self,
+        db: &Database,
+        mut snapshot: ChargingSessionSnapshot,
+    ) -> SocProgress {
+        if self.bms.initial_energy.is_none() {
+            // TODO check this is real world situations before turning it into an assertion?
+            error!("FIXME unknown BMS ref energy while adding a non-reference snapshot");
         }
 
         let soc_progress = self.bms.get_current_soc(snapshot.energy);
@@ -200,16 +219,6 @@ impl ChargingSession {
         if snapshot.soc_cap.is_none() {
             snapshot.soc_cap = self.bms.soc_cap;
         }
-
-        soc_progress
-    }
-
-    fn add_and_save_snapshot(
-        &mut self,
-        db: &Database,
-        mut snapshot: ChargingSessionSnapshot,
-    ) -> SocProgress {
-        let soc_progress = self.update_energy_and_soc(&mut snapshot);
 
         db.add_charging_session_snapshot(self.session_id, &snapshot);
         self.snapshots.push(snapshot);
@@ -223,6 +232,112 @@ impl ChargingSession {
 
     pub fn add_snapshot_from_database(&mut self, snapshot: ChargingSessionSnapshot) {
         self.snapshots.push(snapshot);
+    }
+
+    pub fn done_retrieving_snapshots_from_db(&mut self, db: &Database) {
+        if self.state.is_complete() {
+            return;
+        }
+
+        // EV has been charging on the exact same session
+        // check if we need to update SoC according to user indications
+
+        let Some(first_snapshot) = self.snapshots.first() else {
+            error!("FIXME: session: {}, no first snapshot", self.session_id);
+            return;
+        };
+        let Some(ref_snapshot) = self.last_reference_snapshot() else {
+            error!(
+                "FIXME: session: {}, no reference snapshots",
+                self.session_id
+            );
+            return;
+        };
+
+        let ref_energy = ref_snapshot.energy;
+        let first_energy = first_snapshot.energy;
+
+        if ref_energy < first_energy {
+            error!(
+                "FIXME: session: {}, no reference snapshots energy < first snapshot energy",
+                self.session_id
+            );
+            return;
+        }
+
+        // recover the initial SoC from the last ref snapshot
+        let ref_soc = ref_snapshot.soc;
+        let ref_soc_cap = ref_snapshot.soc_cap;
+
+        let first_to_ref_energy = ref_energy - first_energy;
+        let soc_delta = (first_to_ref_energy as f64) / self.bms.capacity;
+        let initial_soc = ref_soc.map(|ref_soc| ref_soc - soc_delta);
+
+        self.bms.initial_energy = Some(first_energy as f64);
+
+        let mut initial_soc_updated = false;
+        match (initial_soc, self.bms.initial_soc) {
+            (Some(initial_soc), Some(bms_ref_soc)) => {
+                if (initial_soc - bms_ref_soc).abs() > 0.009 {
+                    warn!(
+                        "specified different initial SoC for a recovered uncomplete session, \
+                            make sure this is what you intended to do"
+                    );
+                    initial_soc_updated = true;
+                }
+            }
+            (Some(sess_init_soc), None) if sess_init_soc > 0.0 => {
+                self.bms.initial_soc = Some(sess_init_soc);
+            }
+            (None, Some(bms_ref_soc)) => {
+                warn!(
+                    "specified initial SoC {bms_ref_soc} for a recovered uncomplete session \
+                        for which the initial SoC was previously unknown, \
+                        make sure this is what you intended to do"
+                );
+                initial_soc_updated = true;
+            }
+            _ => (),
+        }
+
+        if self.bms.soc_cap.is_none() && !ref_soc_cap.is_some() {
+            warn!(
+                "removed SoC cap for a recovered uncomplete session, \
+                    make sure this is really what you intended to do"
+            );
+        }
+
+        if initial_soc_updated {
+            let bms_ref_soc = self
+                .bms
+                .initial_soc
+                .expect("defined if initial_soc_updated is set");
+
+            let last_snapshot = self.last_snapshot().expect("at least one snapshot");
+
+            let first_energy = first_energy as f64;
+            let last_snapshot_energy = last_snapshot.energy as f64;
+            if first_energy <= last_snapshot_energy {
+                let new_snapshot =
+                    ChargingSessionSnapshot::builder(Utc::now(), last_snapshot.energy)
+                        .is_reference(true)
+                        .soc(
+                            bms_ref_soc + (last_snapshot_energy - first_energy) / self.bms.capacity,
+                        )
+                        .soc_cap(self.bms.soc_cap)
+                        .build();
+
+                db.add_charging_session_snapshot(self.session_id, &new_snapshot);
+                self.snapshots.push(new_snapshot);
+            } else {
+                error!(
+                    "FIXME: session: {}, first snapshot energy: {:.3} > last snapshot energy: {:.3}",
+                    self.session_id,
+                    first_energy / 1_000.0,
+                    last_snapshot_energy / 1_000.0,
+                );
+            }
+        }
     }
 
     pub fn stop(
@@ -317,6 +432,7 @@ impl str::FromStr for ChargingSessionState {
             "StoppedByUser" => StoppedByUser,
             "Reboot" => Reboot,
             "UnlockCommandFromServer" => UnlockCommandFromServer,
+            "Unknown" => Unknown,
             other => Error(other.to_string()),
         })
     }
@@ -373,10 +489,16 @@ mod tests {
             env_logger::builder()
                 .format_source_path(true)
                 .format_line_number(true)
+                .filter_level(log::LevelFilter::Warn)
+                .parse_default_env()
                 .try_init()
                 .unwrap();
         });
     }
+
+    const BATTERY_CAPACITY: f64 = 48_100f64;
+    const INITIAL_ENERGY: u64 = 100;
+    const MAX_ADDED_ENERGY_FIRST_PERIOD: u64 = 25;
 
     #[test]
     #[ignore = "backup the database before running this test"]
@@ -385,31 +507,36 @@ mod tests {
 
         // run the tests sequentially so get_last_active_charging_session
         // returns what it is supposed to return
-        session_regular();
+        session_with_soc_and_soc_cap();
         session_unknown_initial_soc();
         session_unknown_initial_soc_no_cap();
+        multi_period_session_with_soc_and_soc_cap();
+        multi_period_session_unknown_initial_soc();
+        missed_start_active_session_with_soc_and_soc_cap();
+        missed_start_suspended_session_with_soc_and_soc_cap();
     }
 
-    fn session_regular() {
+    fn session_with_soc_and_soc_cap() {
         let start_time = Utc::now();
-        let initial_energy = 100;
-        let battery_capacity = 48_100f64;
         let initial_soc = 0.3f64;
-        let max_added_energy = 25u64;
-        let soc_cap = initial_soc + max_added_energy as f64 / battery_capacity;
+        let soc_cap = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
 
         let bms = Bms {
-            capacity: battery_capacity,
+            capacity: BATTERY_CAPACITY,
             constant_power_loss: 400,
-            reference_energy: None,
-            reference_soc: Some(initial_soc),
+            initial_energy: None,
+            initial_soc: Some(initial_soc),
             soc_cap: Some(soc_cap),
         };
-        let mut cs = ChargingSession::new(bms, start_time, initial_energy);
-        println!("inserted charging session with id: {}", cs.session_id());
+        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        let last_snapshot = cs.last_snapshot().unwrap();
+        assert_eq!(last_snapshot.timestamp, start_time);
+        assert!(last_snapshot.is_reference);
+        assert_eq!(last_snapshot.energy, INITIAL_ENERGY);
 
+        let snapshot_ts = Utc::now();
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 10)
+            ChargingSessionSnapshot::builder(snapshot_ts, INITIAL_ENERGY + 10)
                 .power(10)
                 .l1_voltage(230)
                 .temperature(27)
@@ -418,13 +545,22 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SocProgress::AbsoluteCapNotReached {
-                soc: cs.bms().reference_soc.unwrap() + 10f64 / cs.bms().capacity,
+                soc: cs.bms().initial_soc.unwrap() + 10f64 / cs.bms().capacity,
                 cap: soc_cap,
             },
             soc_progress,
         );
+        let last_snapshot = cs.last_snapshot().unwrap();
+        assert_eq!(last_snapshot.timestamp, snapshot_ts);
+        assert!(!last_snapshot.is_reference);
+        assert_eq!(last_snapshot.energy, INITIAL_ENERGY + 10);
+        assert_eq!(last_snapshot.power, Some(10));
+        assert_eq!(last_snapshot.l1_voltage, Some(230));
+        assert_eq!(last_snapshot.temperature, Some(27));
+
+        let snapshot_ts = Utc::now();
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 20)
+            ChargingSessionSnapshot::builder(snapshot_ts, INITIAL_ENERGY + 20)
                 .power(10)
                 .l1_voltage(228)
                 .temperature(28)
@@ -433,34 +569,46 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SocProgress::AbsoluteCapNotReached {
-                soc: cs.bms().reference_soc.unwrap() + 20f64 / cs.bms().capacity,
+                soc: cs.bms().initial_soc.unwrap() + 20f64 / cs.bms().capacity,
                 cap: soc_cap,
             },
             soc_progress,
         );
+        let last_snapshot = cs.last_snapshot().unwrap();
+        assert_eq!(last_snapshot.timestamp, snapshot_ts);
+        assert!(!last_snapshot.is_reference);
+        assert_eq!(last_snapshot.energy, INITIAL_ENERGY + 20);
+        assert_eq!(last_snapshot.power, Some(10));
+        assert_eq!(last_snapshot.l1_voltage, Some(228));
+        assert_eq!(last_snapshot.temperature, Some(28));
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
 
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + max_added_energy)
-                .power(10)
-                .l1_voltage(227)
-                .temperature(30)
-                .build(),
+            ChargingSessionSnapshot::builder(
+                Utc::now(),
+                INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
+            )
+            .power(10)
+            .l1_voltage(227)
+            .temperature(30)
+            .build(),
         );
         assert!(soc_progress.is_complete());
         assert_eq!(
             SocProgress::AbsoluteCapReached {
-                soc: cs.bms().reference_soc.unwrap() + max_added_energy as f64 / cs.bms().capacity,
+                soc: cs.bms().initial_soc.unwrap()
+                    + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / cs.bms().capacity,
                 cap: soc_cap,
             },
             soc_progress,
         );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
         cs.stop(
             Utc::now(),
-            initial_energy + max_added_energy,
+            INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
             ChargingSessionState::SocCapReached,
         );
 
@@ -470,29 +618,24 @@ mod tests {
             &ChargingSessionState::SocCapReached,
             last_session.unwrap().state()
         );
-
-        println!("charging session: {cs:?}");
     }
 
     fn session_unknown_initial_soc() {
         let start_time = Utc::now();
-        let initial_energy = 100;
-        let battery_capacity = 48_100f64;
-        let max_added_energy = 25u64;
-        let soc_cap = max_added_energy as f64 / battery_capacity;
+        let soc_cap = MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
 
         let bms = Bms {
-            capacity: battery_capacity,
+            capacity: BATTERY_CAPACITY,
             constant_power_loss: 400,
-            reference_energy: None,
-            reference_soc: None,
+            initial_energy: None,
+            initial_soc: None,
             soc_cap: Some(soc_cap),
         };
-        let mut cs = ChargingSession::new(bms, start_time, initial_energy);
-        println!("inserted charging session with id: {}", cs.session_id());
+        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        assert!(cs.last_snapshot().unwrap().is_reference);
 
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 10)
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
                 .power(10)
                 .l1_voltage(230)
                 .temperature(27)
@@ -507,7 +650,7 @@ mod tests {
             soc_progress,
         );
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 20)
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 20)
                 .power(10)
                 .l1_voltage(228)
                 .temperature(28)
@@ -521,29 +664,34 @@ mod tests {
             },
             soc_progress,
         );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
 
         let soc_progress = cs.add_snapshot(
-            ChargingSessionSnapshot::builder(Utc::now(), initial_energy + max_added_energy)
-                .power(10)
-                .l1_voltage(227)
-                .temperature(30)
-                .build(),
+            ChargingSessionSnapshot::builder(
+                Utc::now(),
+                INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
+            )
+            .power(10)
+            .l1_voltage(227)
+            .temperature(30)
+            .build(),
         );
         assert!(soc_progress.is_complete());
         assert_eq!(
             SocProgress::RelativeCapReached {
-                added_soc: max_added_energy as f64 / cs.bms().capacity,
+                added_soc: MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / cs.bms().capacity,
                 cap: soc_cap,
             },
             soc_progress,
         );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
         cs.stop(
             Utc::now(),
-            initial_energy + max_added_energy,
+            INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
             ChargingSessionState::SocCapReached,
         );
 
@@ -553,28 +701,25 @@ mod tests {
             &ChargingSessionState::SocCapReached,
             last_session.unwrap().state()
         );
-
-        println!("charging session: {cs:?}");
     }
 
     fn session_unknown_initial_soc_no_cap() {
         let start_time = Utc::now();
-        let initial_energy = 100;
 
         let bms = Bms {
-            capacity: 48_100.0,
+            capacity: BATTERY_CAPACITY,
             constant_power_loss: 400,
-            reference_energy: None,
-            reference_soc: None,
+            initial_energy: None,
+            initial_soc: None,
             soc_cap: None,
         };
-        let mut cs = ChargingSession::new(bms, start_time, initial_energy);
-        println!("inserted charging session with id: {}", cs.session_id());
+        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        assert!(cs.last_snapshot().unwrap().is_reference);
 
         assert_eq!(
             SocProgress::RelativeUncapped(10f64 / cs.bms().capacity),
             cs.add_snapshot(
-                ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 10)
+                ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
                     .power(10)
                     .l1_voltage(230)
                     .temperature(27)
@@ -584,13 +729,14 @@ mod tests {
         assert_eq!(
             SocProgress::RelativeUncapped(20f64 / cs.bms().capacity),
             cs.add_snapshot(
-                ChargingSessionSnapshot::builder(Utc::now(), initial_energy + 20)
+                ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 20)
                     .power(10)
                     .l1_voltage(230)
                     .temperature(27)
                     .build()
             ),
         );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
@@ -606,7 +752,7 @@ mod tests {
 
         cs.stop(
             Utc::now(),
-            initial_energy + 25,
+            INITIAL_ENERGY + 25,
             ChargingSessionState::SuspendedByEv,
         );
 
@@ -616,7 +762,399 @@ mod tests {
             &ChargingSessionState::SuspendedByEv,
             last_session.unwrap().state()
         );
+    }
 
-        println!("charging session: {cs:?}");
+    fn multi_period_session_with_soc_and_soc_cap() {
+        let start_time = Utc::now();
+        let initial_soc = 0.3f64;
+        let mut soc_cap = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
+
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: Some(initial_soc),
+            soc_cap: Some(soc_cap),
+        };
+        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        assert!(cs.last_snapshot().unwrap().is_reference);
+
+        let _ = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
+                .power(10)
+                .l1_voltage(230)
+                .temperature(27)
+                .build(),
+        );
+        let _ = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 20)
+                .power(10)
+                .l1_voltage(228)
+                .temperature(28)
+                .build(),
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        // Simulate server going offline, then reconnecting without the session being suspended
+        // not changing initial SoC and expending the SoC cap
+        soc_cap += 10f64 / BATTERY_CAPACITY;
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: None,
+            soc_cap: Some(soc_cap),
+        };
+        let mut recovered_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(
+            recovered_session.bms().initial_energy,
+            Some(INITIAL_ENERGY as f64)
+        );
+        assert_eq!(recovered_session.bms().initial_soc, Some(initial_soc));
+
+        let soc_progress = recovered_session.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 30)
+                .power(10)
+                .l1_voltage(227)
+                .temperature(30)
+                .build(),
+        );
+        assert_eq!(
+            SocProgress::AbsoluteCapNotReached {
+                soc: initial_soc + 30f64 / cs.bms().capacity,
+                cap: soc_cap,
+            },
+            soc_progress,
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        // Simulate server going offline again,
+        // then reconnecting without the session being suspended
+        // this time, correcting initial SoC and removing the SoC cap
+        let corrected_initial_soc = initial_soc - 10f64 / BATTERY_CAPACITY;
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: Some(corrected_initial_soc),
+            soc_cap: None,
+        };
+        let mut recovered_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(
+            recovered_session.bms().initial_energy,
+            Some(INITIAL_ENERGY as f64)
+        );
+        assert_eq!(
+            recovered_session.bms().initial_soc,
+            Some(corrected_initial_soc)
+        );
+        let soc_progress = recovered_session.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 40)
+                .power(10)
+                .l1_voltage(227)
+                .temperature(30)
+                .build(),
+        );
+        assert_eq!(
+            SocProgress::AbsoluteUncapped(corrected_initial_soc + 40f64 / cs.bms().capacity),
+            soc_progress,
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+    }
+
+    fn multi_period_session_unknown_initial_soc() {
+        let start_time = Utc::now();
+        let mut soc_cap = MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
+
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: None,
+            soc_cap: Some(soc_cap),
+        };
+        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        assert!(cs.last_snapshot().unwrap().is_reference);
+
+        let _ = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
+                .power(10)
+                .l1_voltage(230)
+                .temperature(27)
+                .build(),
+        );
+        let _ = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 20)
+                .power(10)
+                .l1_voltage(228)
+                .temperature(28)
+                .build(),
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        // Simulate server going offline, then reconnecting without the session being suspended
+        // not changing initial SoC and expending the SoC cap
+        soc_cap += 10f64 / BATTERY_CAPACITY;
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: None,
+            soc_cap: Some(soc_cap),
+        };
+        let mut recovered_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(
+            recovered_session.bms().initial_energy,
+            Some(INITIAL_ENERGY as f64)
+        );
+        // recovered session started from an unknown reference SoC
+        assert_eq!(recovered_session.bms().initial_soc, None);
+
+        let soc_progress = recovered_session.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 30)
+                .power(10)
+                .l1_voltage(227)
+                .temperature(30)
+                .build(),
+        );
+        assert_eq!(
+            SocProgress::RelativeCapNotReached {
+                added_soc: 30f64 / cs.bms().capacity,
+                cap: soc_cap,
+            },
+            soc_progress,
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        // Simulate server going offline again,
+        // then reconnecting without the session being suspended
+        // this time, correcting initial SoC and removing the SoC cap
+        let corrected_initial_soc = 0.30;
+        let corrected_ref_soc = corrected_initial_soc + 30.0 / BATTERY_CAPACITY;
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: Some(corrected_initial_soc),
+            soc_cap: None,
+        };
+        let mut recovered_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(
+            recovered_session.bms().initial_energy,
+            Some(INITIAL_ENERGY as f64)
+        );
+        assert_eq!(
+            recovered_session.bms().initial_soc,
+            Some(corrected_initial_soc)
+        );
+        let last_snapshot = recovered_session.last_snapshot().unwrap();
+        assert!(last_snapshot.is_reference);
+        assert_eq!(Some(corrected_ref_soc), last_snapshot.soc);
+        assert_eq!(None, last_snapshot.soc_cap);
+
+        let soc_progress = recovered_session.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 40)
+                .power(10)
+                .l1_voltage(227)
+                .temperature(30)
+                .build(),
+        );
+        let last_snapshot = recovered_session.last_snapshot().unwrap();
+        let mut expected_soc = corrected_ref_soc + 10f64 / recovered_session.bms().capacity;
+        match soc_progress {
+            SocProgress::AbsoluteUncapped(cur_soc) => {
+                assert!((expected_soc - cur_soc).abs() < 0.00000000001);
+            }
+            other => unreachable!("{other:?}"),
+        }
+        assert!(!last_snapshot.is_reference);
+
+        // Simulate server going offline again,
+        // then reconnecting without the session being suspended
+        // this time, using unknown SoC and SoC cap
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: None,
+            soc_cap: None,
+        };
+        let mut recovered_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(
+            recovered_session.bms().initial_energy,
+            Some(INITIAL_ENERGY as f64)
+        );
+        if let Some(bms_initial_soc) = recovered_session.bms().initial_soc {
+            assert!((bms_initial_soc - corrected_initial_soc).abs() < 0.00000000001);
+        } else {
+            unreachable!();
+        }
+        let soc_progress = recovered_session.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 50)
+                .power(10)
+                .l1_voltage(227)
+                .temperature(30)
+                .build(),
+        );
+        expected_soc += 10f64 / recovered_session.bms().capacity;
+        match soc_progress {
+            SocProgress::AbsoluteUncapped(cur_soc) => {
+                assert!((expected_soc - cur_soc).abs() < 0.00000000001);
+            }
+            other => unreachable!("{other:?}"),
+        }
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+    }
+
+    /// Simulates receiving a MeterValue with active enery import
+    fn missed_start_active_session_with_soc_and_soc_cap() {
+        let initial_soc = 0.3f64;
+        let soc_cap = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
+
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: Some(initial_soc),
+            soc_cap: Some(soc_cap),
+        };
+
+        let current_time = Utc::now();
+        let last_known_energy = INITIAL_ENERGY;
+        let tid = 1;
+        let mut cs = ChargingSession::with_state(
+            bms.clone(),
+            ChargingSessionState::Unknown,
+            last_known_energy,
+            Some(tid),
+            current_time,
+        );
+        assert_eq!(cs.state, ChargingSessionState::Unknown);
+        assert_eq!(cs.transaction_id, Some(tid));
+
+        let last_snapshot = cs.last_snapshot().unwrap();
+        assert!(last_snapshot.is_reference);
+        assert_eq!(last_snapshot.timestamp, current_time);
+        assert_eq!(last_snapshot.energy, last_known_energy);
+
+        let cs_bms = cs.bms();
+        assert_eq!(cs_bms.initial_energy, Some(last_known_energy as f64));
+        assert_eq!(cs_bms.initial_soc, Some(initial_soc));
+        assert_eq!(cs_bms.soc_cap, Some(soc_cap));
+
+        let last_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(cs, last_session);
+
+        cs.set_state(ChargingSessionState::Active);
+        assert_eq!(cs.state, ChargingSessionState::Active);
+
+        let soc_progress = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
+                .power(10)
+                .l1_voltage(230)
+                .temperature(27)
+                .build(),
+        );
+        assert!(!soc_progress.is_complete());
+        assert_eq!(
+            SocProgress::AbsoluteCapNotReached {
+                soc: cs.bms().initial_soc.unwrap() + 10f64 / cs.bms().capacity,
+                cap: soc_cap,
+            },
+            soc_progress,
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        let last_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(cs, last_session);
+    }
+
+    fn missed_start_suspended_session_with_soc_and_soc_cap() {
+        let initial_soc = 0.3f64;
+        let soc_cap = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY;
+
+        let bms = Bms {
+            capacity: BATTERY_CAPACITY,
+            constant_power_loss: 400,
+            initial_energy: None,
+            initial_soc: Some(initial_soc),
+            soc_cap: Some(soc_cap),
+        };
+
+        let current_time = Utc::now();
+        let current_energy = INITIAL_ENERGY;
+        let tid = 1;
+        let mut cs = ChargingSession::with_state(
+            bms.clone(),
+            enums::ChargePointStatus::SuspendedEVSE,
+            current_energy,
+            Some(tid),
+            current_time,
+        );
+        assert_eq!(cs.state, ChargingSessionState::SuspendedByEvse);
+        assert_eq!(cs.transaction_id, Some(tid));
+
+        let last_snapshot = cs.last_snapshot().unwrap();
+        assert!(last_snapshot.is_reference);
+        assert_eq!(last_snapshot.timestamp, current_time);
+        assert_eq!(last_snapshot.energy, current_energy);
+
+        let cs_bms = cs.bms();
+        assert_eq!(cs_bms.initial_energy, Some(current_energy as f64));
+        assert_eq!(cs_bms.initial_soc, Some(initial_soc));
+        assert_eq!(cs_bms.soc_cap, Some(soc_cap));
+
+        let last_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(cs, last_session);
+
+        cs.set_state(ChargingSessionState::Active);
+        assert_eq!(cs.state, ChargingSessionState::Active);
+
+        let soc_progress = cs.add_snapshot(
+            ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
+                .power(10)
+                .l1_voltage(230)
+                .temperature(27)
+                .build(),
+        );
+        assert!(!soc_progress.is_complete());
+        assert_eq!(
+            SocProgress::AbsoluteCapNotReached {
+                soc: cs.bms().initial_soc.unwrap() + 10f64 / cs.bms().capacity,
+                cap: soc_cap,
+            },
+            soc_progress,
+        );
+        assert!(!cs.last_snapshot().unwrap().is_reference);
+
+        let last_session = Database::get()
+            .get_last_charging_session(&bms)
+            .expect("can retrieve last session")
+            .expect("last session exists");
+        assert_eq!(cs, last_session);
     }
 }

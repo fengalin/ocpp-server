@@ -4,31 +4,27 @@ use std::fmt;
 pub struct Bms {
     pub capacity: f64,
     pub constant_power_loss: u16,
-    pub reference_energy: Option<f64>,
-    pub reference_soc: Option<f64>,
+    pub initial_energy: Option<f64>,
+    pub initial_soc: Option<f64>,
     pub soc_cap: Option<f64>,
 }
 
 impl Bms {
-    pub fn set_reference(&mut self, energy: u64) {
-        self.reference_energy = Some(energy as f64);
-    }
-
     pub fn get_current_soc(&self, energy: u64) -> SocProgress {
-        let Some(refrence_energy) = self.reference_energy else {
+        let Some(initial_energy) = self.initial_energy else {
             return SocProgress::Unknown;
         };
-        let added_energy = energy as f64 - refrence_energy;
+        let added_energy = energy as f64 - initial_energy;
         if added_energy < 0.0 {
             log::error!(
-                "can't compute SoC progress: new energy: {energy}, reference energy: {refrence_energy:.0}"
+                "can't compute SoC progress: new energy: {energy}, reference energy: {initial_energy:.0}"
             );
             return SocProgress::Unknown;
         };
 
         let added_soc = added_energy / self.capacity;
 
-        if let Some(initial_soc) = self.reference_soc {
+        if let Some(initial_soc) = self.initial_soc {
             let soc = initial_soc + added_soc;
             match self.soc_cap {
                 Some(cap) => {
@@ -57,7 +53,7 @@ impl Bms {
     /// Computes the raw energy to add, not including constant power loss.
     pub fn get_energy_to_add(&self) -> f64 {
         let soc_cap = self.soc_cap.expect("checked by args");
-        let soc_to_add = soc_cap - self.reference_soc.unwrap_or_default();
+        let soc_to_add = soc_cap - self.initial_soc.unwrap_or_default();
         // FIXME check soc_cap > initial_soc in args & find an elegant way
         // to show it is guaranteed
         assert!(soc_cap <= 1.0);

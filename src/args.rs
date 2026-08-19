@@ -18,7 +18,10 @@ pub struct Args {
     )]
     pub constant_power_loss: u16,
 
-    #[clap(long, help = "initial State of Charge (%)")]
+    #[clap(
+        long,
+        help = "initial State of Charge (%) at start of a session (upcoming or in progress)"
+    )]
     pub initial_soc: Option<u8>,
 
     #[clap(long, help = "State of Charge upper limit (%)")]
@@ -83,8 +86,8 @@ impl From<&Args> for crate::Bms {
         crate::Bms {
             capacity: args.battery_capacity as f64,
             constant_power_loss: args.constant_power_loss,
-            reference_energy: None,
-            reference_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
+            initial_energy: None,
+            initial_soc: args.initial_soc.map(|soc| soc as f64 / 100.0),
             soc_cap: args.soc_cap.map(|soc| soc as f64 / 100.0),
         }
     }

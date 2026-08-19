@@ -205,7 +205,7 @@ impl Connection {
                                         Utc::now(),
                                         0,
                                         ChargingSessionState::Error(
-                                            "Got connector available while session with still active"
+                                            "Got connector available while session was still active"
                                                 .to_string(),
                                         ),
                                     );
@@ -229,19 +229,21 @@ impl Connection {
                                     self.check_bms_on_missed_session();
 
                                     self.charging_session = Some(ChargingSession::with_state(
+                                        self.bms.clone(),
                                         action.status.clone(),
                                         self.last_known_stop_energy.unwrap_or_default(),
-                                        self.bms.clone(),
                                         None,
                                         action.timestamp.map(|ts| ts.inner()),
                                     ));
                                 }
                             }
-                            ChargePointStatus::SuspendedEV => {
+                            ChargePointStatus::SuspendedEV | ChargePointStatus::Faulted => {
                                 // FIXME reached 100% => not restarting the session?
+                                if let Some(mut cs) = self.charging_session.take() {
+                                    cs.set_state(action.status.clone());
+                                }
                             }
-                            ChargePointStatus::Faulted => error!("faulted"),
-                            _ => (),
+                            ChargePointStatus::Unavailable | ChargePointStatus::Reserved => (),
                         }
                     }
                     if self.connector_id.is_none() {
@@ -518,11 +520,11 @@ impl Connection {
                 self.check_bms_on_missed_session();
 
                 self.charging_session = Some(ChargingSession::with_state(
+                    self.bms.clone(),
                     ChargingSessionState::Unknown,
                     self.last_known_stop_energy.unwrap_or_default(),
-                    self.bms.clone(),
                     transaction_id,
-                    None,
+                    mv.timestamp,
                 ));
             } else {
                 // no known session in progress

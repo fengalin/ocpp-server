@@ -49,10 +49,10 @@ impl<'a> Database<'a> {
     }
 
     pub fn get_last_charging_session(&self, bms: &Bms) -> anyhow::Result<Option<ChargingSession>> {
-        let Some((session_id, state)) = self
+        let Some((session_id, state, transaction_id)) = self
             .0
-            .query_row::<(i32, String), _, _>(
-                "SELECT id, state FROM charging_session
+            .query_row::<(i32, String, Option<i32>), _, _>(
+                "SELECT id, state, transaction_id FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
                     )",
@@ -60,7 +60,8 @@ impl<'a> Database<'a> {
                 |row| {
                     let session_id = row.get(0)?;
                     let state = row.get(1)?;
-                    Ok((session_id, state))
+                    let transaction_id = row.get(2)?;
+                    Ok((session_id, state, transaction_id))
                 },
             )
             .optional()
@@ -101,8 +102,9 @@ impl<'a> Database<'a> {
                 let session_id = row.get_unwrap::<_, i64>("sessionid") as i32;
 
                 ChargingSession::from_database(
-                    session_id,
                     bms.clone(),
+                    session_id,
+                    transaction_id,
                     state.parse().expect("infallible"),
                 )
             });
@@ -117,6 +119,10 @@ impl<'a> Database<'a> {
                     .soc_cap(soc_cap)
                     .build(),
             );
+        }
+
+        if let Some(ref mut cs_mut) = cs {
+            cs_mut.done_retrieving_snapshots_from_db(self);
         }
 
         Ok(cs)
