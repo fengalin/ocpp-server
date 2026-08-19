@@ -22,7 +22,10 @@ pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 pub mod measurements;
 pub mod schedule;
-pub use schedule::{ChargingPlan, ChargingSchedule};
+pub use schedule::{ChargingPlan, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
+
+#[cfg(test)]
+pub mod tests;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -53,6 +56,19 @@ async fn main() -> anyhow::Result<()> {
     // make sure the DB is available
     {
         let db = Database::get();
+
+        match db.get_last_charging_schedule() {
+            Ok(Some(schedule)) => {
+                info!("last known schedule:\n\t{schedule}");
+            }
+            Ok(None) => {
+                info!("no known charging schedule");
+            }
+            Err(err) => {
+                bail!("failed to query last charging schedule: {err}");
+            }
+        }
+
         match db.get_last_charging_session(&bms) {
             Ok(Some(sess)) => {
                 info!(
@@ -73,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Err(err) => {
-                bail!("failed to query last active session: {err}");
+                bail!("failed to query last session: {err}");
             }
         }
     }
@@ -113,15 +129,22 @@ async fn main() -> anyhow::Result<()> {
 
             info!("peer address {peer}");
 
-            let last_charging_session = Database::get()
-                .get_last_charging_session(&bms)
-                .context("getting last charging session")?;
+            let (last_charging_session, last_charging_schedule) = {
+                let db = Database::get();
+                (
+                    db.get_last_charging_session(&bms)
+                        .context("getting last charging session")?,
+                    db.get_last_charging_schedule()
+                        .context("getting last charging schedule")?,
+                )
+            };
 
             let mut connection = Connection::new(
                 ws_stream,
                 bms.clone(),
                 charging_plan,
                 last_charging_session,
+                last_charging_schedule,
                 args.command.expect("not dry-run"),
             );
 

@@ -413,7 +413,7 @@ impl fmt::Display for ChargingSessionState {
             UnlockCommandFromServer => "UnlockCommandFromServer",
             Unknown => "Unknown",
             Error(err) => {
-                return write!(f, "Error: {err}");
+                return write!(f, "{err}");
             }
         })
     }
@@ -482,20 +482,6 @@ impl From<Option<enums::Reason>> for ChargingSessionState {
 mod tests {
     use super::*;
 
-    fn init() {
-        use std::sync::Once;
-        static LOGGER: Once = Once::new();
-        LOGGER.call_once(|| {
-            env_logger::builder()
-                .format_source_path(true)
-                .format_line_number(true)
-                .filter_level(log::LevelFilter::Warn)
-                .parse_default_env()
-                .try_init()
-                .unwrap();
-        });
-    }
-
     const BATTERY_CAPACITY: f64 = 48_100f64;
     const INITIAL_ENERGY: u64 = 100;
     const MAX_ADDED_ENERGY_FIRST_PERIOD: u64 = 25;
@@ -503,7 +489,7 @@ mod tests {
     #[test]
     #[ignore = "backup the database before running this test"]
     fn charging_session() {
-        init();
+        crate::tests::init();
 
         // run the tests sequentially so get_last_active_charging_session
         // returns what it is supposed to return

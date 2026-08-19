@@ -5,6 +5,7 @@ use log::*;
 use ocpp_rs::{
     datetime::DateTimeWrapper,
     v16::{
+        self,
         call::{self, Action, Call},
         call_result::{self, CallResultRaw},
         data_types,
@@ -21,7 +22,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
     Bms, ChargingPlan, ChargingSchedule, ChargingSession, ChargingSessionSnapshot,
-    ChargingSessionState, args, measurements::*, schedule,
+    ChargingSessionState, Database, args, measurements::*, schedule,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -38,6 +39,7 @@ pub struct Connection {
     call_response_tracker: PendingCalls,
     call_queue: VecDeque<Action>,
     charging_session: Option<ChargingSession>,
+    charging_schedule: Option<ChargingSchedule>,
 }
 
 impl Connection {
@@ -57,6 +59,7 @@ impl Connection {
         bms: Bms,
         charging_plan: Option<ChargingPlan>,
         last_charging_session: Option<ChargingSession>,
+        mut last_charging_schedule: Option<ChargingSchedule>,
         command: args::Command,
     ) -> Self {
         let mut this = Connection {
@@ -70,6 +73,7 @@ impl Connection {
             call_response_tracker: PendingCalls::new(),
             call_queue: VecDeque::new(),
             charging_session: None,
+            charging_schedule: None,
         };
 
         if let Some(ref cs) = last_charging_session
@@ -83,24 +87,19 @@ impl Connection {
             this.charging_session = last_charging_session;
         }
 
+        if let Some(schedule) = last_charging_schedule.take()
+            && schedule.is_active()
+        {
+            this.charging_schedule = Some(schedule);
+        }
+
         use args::Command::*;
         match command {
             Run => {
-                if let Some(charging_plan) = charging_plan {
-                    this.call_queue.push_back(Action::ClearChargingProfile(
-                        call::ClearChargingProfile {
-                            id: None,
-                            connector_id: None,
-                            charging_profile_purpose: None,
-                            stack_level: None,
-                        },
-                    ));
-
-                    if let Some(charging_schedule) = charging_plan.to_charging_schedule(&this.bms) {
-                        this.call_queue.push_back(Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(charging_schedule).build(),
-                        ));
-                    }
+                if let Some(charging_plan) = charging_plan
+                    && let Some(charging_schedule) = charging_plan.to_charging_schedule(&this.bms)
+                {
+                    this.push_charging_schedule(charging_schedule);
                 }
             }
             StopSession => {
@@ -118,18 +117,7 @@ impl Connection {
                 // was set, regardless of the moment it was supposed to start.
                 // Set a 0 W permanent limit to make sure we don't start
                 // charging unexpectedly.
-
-                this.call_queue.push_back(Action::ClearChargingProfile(
-                    call::ClearChargingProfile {
-                        id: None,
-                        connector_id: None,
-                        charging_profile_purpose: None,
-                        stack_level: None,
-                    },
-                ));
-                this.call_queue.push_back(Action::SetChargingProfile(
-                    schedule::SetChargingProfile::builder(ChargingSchedule::new()).build(),
-                ));
+                this.push_charging_schedule(ChargingSchedule::new());
 
                 this.call_queue.push_back(Action::Reset(call::Reset {
                     reset_type: ResetType::Soft,
@@ -138,6 +126,27 @@ impl Connection {
         }
 
         this
+    }
+
+    fn push_charging_schedule(&mut self, mut schedule: ChargingSchedule) {
+        if let Some(mut cur_schedule) = self.charging_schedule.take() {
+            cur_schedule.inactivate();
+        }
+
+        self.call_queue
+            .push_back(Action::ClearChargingProfile(call::ClearChargingProfile {
+                id: None,
+                connector_id: None,
+                charging_profile_purpose: None,
+                stack_level: None,
+            }));
+
+        schedule.id = Database::get().add_new_charging_schedule(&schedule);
+        self.charging_schedule = Some(schedule.clone());
+
+        self.call_queue.push_back(Action::SetChargingProfile(
+            schedule::SetChargingProfile::builder(schedule).build(),
+        ));
     }
 
     async fn handle_incoming_message(&mut self, msg: &str) -> anyhow::Result<()> {
@@ -609,8 +618,15 @@ impl Connection {
             Ok(TypedCallResult::ClearChargingProfile(result)) => {
                 info!(">> incoming {result:?}");
             }
-            Ok(TypedCallResult::GetCompositeSchedule(result)) => {
-                info!(">> incoming {result:#?}");
+            Ok(TypedCallResult::SetChargingProfile(result)) => {
+                if result.payload.status == v16::enums::ChargingProfileStatus::Accepted {
+                    info!(">> charging profile accepted");
+                } else {
+                    error!(">> charging profile: {:?}", result.payload.status);
+                    if let Some(mut schedule) = self.charging_schedule.take() {
+                        schedule.inactivate();
+                    }
+                }
             }
             Ok(TypedCallResult::ChangeAvailability(result)) => {
                 info!(">> incoming {result:#?}");

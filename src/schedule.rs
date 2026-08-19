@@ -7,6 +7,8 @@ use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use log::{debug, info, warn};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 
+use crate::Database;
+
 const DEFAULT_LIMIT: f64 = 7_400.0;
 const DEFAULT_NB_OF_PHASES: i32 = 1;
 
@@ -16,11 +18,11 @@ pub enum ChargingScheduleError {
     EndEarlierThanStart { start: String, end: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChargingSchedulePeriod {
-    start: NaiveDateTime,
-    end: NaiveDateTime,
-    limit: f64,
+    pub start: NaiveDateTime,
+    pub end: NaiveDateTime,
+    pub limit: f64,
 }
 impl ChargingSchedulePeriod {
     pub fn builder(start: NaiveDateTime) -> ChargingSchedulePeriodBuilderNoEnd {
@@ -51,29 +53,115 @@ impl fmt::Display for ChargingSchedulePeriod {
         f.write_str(" -> ")?;
         f.write_str(&self.end.to_string())?;
         f.write_str(" (")?;
-        f.write_fmt(format_args!("{:.0}", self.limit))?;
+        f.write_fmt(format_args!("{:.3} kW", self.limit / 1_000.0))?;
         f.write_char(')')
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ChargingSchedule(BTreeMap<NaiveDateTime, ChargingSchedulePeriod>);
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChargingSchedule {
+    pub id: i32,
+    pub set_time: DateTime<Utc>,
+    pub state: ChargingScheduleState,
+    pub periods: BTreeMap<NaiveDateTime, ChargingSchedulePeriod>,
+}
+
 impl ChargingSchedule {
     pub fn new() -> Self {
         Self::default()
     }
 
+    pub fn new_inactive() -> Self {
+        ChargingSchedule {
+            state: ChargingScheduleState::Inactive,
+            ..Default::default()
+        }
+    }
+
+    pub fn inactivate(&mut self) {
+        self.state = ChargingScheduleState::Inactive;
+        Database::get().inactivate_charging_schedule(self.id);
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state.is_active()
+    }
+
     pub fn add_period(mut self, period: ChargingSchedulePeriod) -> Self {
-        self.0.insert(period.start, period);
+        self.periods.insert(period.start, period);
         self
     }
 
     pub fn periods(&self) -> impl Iterator<Item = &ChargingSchedulePeriod> {
-        self.0.values()
+        self.periods.values()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.periods.is_empty()
+    }
+}
+
+impl Default for ChargingSchedule {
+    fn default() -> Self {
+        ChargingSchedule {
+            id: 0,
+            set_time: Utc::now(),
+            state: ChargingScheduleState::Active,
+            periods: Default::default(),
+        }
+    }
+}
+
+impl fmt::Display for ChargingSchedule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "id: {}, state {}, set time: {}",
+            self.id,
+            self.state,
+            self.set_time.with_timezone(&Local),
+        ))?;
+        for period in self.periods.values() {
+            f.write_fmt(format_args!("\n\t* {period}"))?
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum ChargingScheduleState {
+    #[default]
+    Active,
+    Inactive,
+}
+impl ChargingScheduleState {
+    pub fn is_active(self) -> bool {
+        matches!(self, ChargingScheduleState::Active)
+    }
+    pub fn as_i32(self) -> i32 {
+        if !self.is_active() {
+            return 0;
+        }
+        1
+    }
+}
+
+impl From<i32> for ChargingScheduleState {
+    fn from(value: i32) -> Self {
+        if value == 0 {
+            return ChargingScheduleState::Inactive;
+        }
+
+        ChargingScheduleState::Active
+    }
+}
+
+impl fmt::Display for ChargingScheduleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ChargingScheduleState::*;
+        f.write_str(match self {
+            Active => "Active",
+            Inactive => "Inactive",
+        })
     }
 }
 
@@ -255,11 +343,13 @@ impl ChargingPlan {
 pub struct SetChargingProfile;
 impl SetChargingProfile {
     pub fn builder(schedule: ChargingSchedule) -> SetChargingProfileBuilder {
-        let set_charging_profile_start = Local::now();
-        debug!("SetCharingProfile start {set_charging_profile_start}");
+        debug!(
+            "SetCharingProfile start {}",
+            schedule.set_time.with_timezone(&Local)
+        );
         SetChargingProfileBuilder {
-            start_schedule_utc: set_charging_profile_start.to_utc(),
-            periods: schedule.0,
+            start_schedule_utc: schedule.set_time,
+            periods: schedule.periods,
         }
     }
 }
@@ -419,21 +509,9 @@ impl SetChargingProfileBuilder {
 mod tests {
     use super::*;
 
-    fn init() {
-        use std::sync::Once;
-        static LOGGER: Once = Once::new();
-        LOGGER.call_once(|| {
-            env_logger::builder()
-                .format_source_path(true)
-                .format_line_number(true)
-                .try_init()
-                .unwrap();
-        });
-    }
-
     #[test]
     pub fn disjointed_in_the_future() {
-        init();
+        crate::tests::init();
 
         let set_schedule_instant = NaiveDateTime::new(
             Local::now().date_naive(),
@@ -444,7 +522,7 @@ mod tests {
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
         let period1_end = period1_start + period1_duration;
-        let period1_limit = 5.0;
+        let period1_limit = 5_000.0;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -524,7 +602,7 @@ mod tests {
 
     #[test]
     pub fn disjointed_first_starting_in_the_past() {
-        init();
+        crate::tests::init();
 
         let set_schedule_instant = NaiveDateTime::new(
             Local::now().date_naive(),
@@ -534,7 +612,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() - period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5.0;
+        let period1_limit = 5_000.0;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -586,7 +664,7 @@ mod tests {
 
     #[test]
     pub fn disjointed_first_entirely_in_the_past() {
-        init();
+        crate::tests::init();
 
         let set_schedule_instant = NaiveDateTime::new(
             Local::now().date_naive(),
@@ -596,7 +674,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(3);
         let period1_start = set_schedule_instant.time() - period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5.0;
+        let period1_limit = 5_000.0;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -643,7 +721,7 @@ mod tests {
 
     #[test]
     pub fn second_partially_overlapping_first() {
-        init();
+        crate::tests::init();
 
         let set_schedule_instant = NaiveDateTime::new(
             Local::now().date_naive(),
@@ -653,7 +731,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5.0;
+        let period1_limit = 5_000.0;
 
         let period2_start_delta = TimeDelta::hours(2);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -705,7 +783,7 @@ mod tests {
 
     #[test]
     pub fn second_overlapping_first() {
-        init();
+        crate::tests::init();
 
         let set_schedule_instant = NaiveDateTime::new(
             Local::now().date_naive(),
@@ -715,7 +793,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5.0;
+        let period1_limit = 5_000.0;
 
         let period2_start_delta = TimeDelta::hours(2);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -758,5 +836,41 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    #[ignore = "backup the database before running this test"]
+    fn persist_charging_schedule() {
+        crate::tests::init();
+
+        let period1_start = NaiveTime::from_hms_opt(1, 28, 00).unwrap();
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5_000.0;
+
+        let period2_start = NaiveTime::from_hms_opt(13, 58, 00).unwrap();
+        let period2_duration = TimeDelta::minutes(30);
+
+        let mut schedule = ChargingSchedule::new()
+            .add_period(
+                ChargingSchedulePeriod::builder_starting_today(period1_start)
+                    .duration(period1_duration)
+                    .limit(period1_limit)
+                    .build(),
+            )
+            .add_period(
+                ChargingSchedulePeriod::builder_starting_today(period2_start)
+                    .duration(period2_duration)
+                    .build(),
+            );
+
+        let schedule_id = Database::get().add_new_charging_schedule(&schedule);
+        schedule.id = schedule_id;
+
+        let last_schedule = Database::get()
+            .get_last_charging_schedule()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(schedule, last_schedule);
     }
 }
