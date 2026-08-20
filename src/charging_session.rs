@@ -242,6 +242,8 @@ impl ChargingSession {
         // EV has been charging on the exact same session
         // check if we need to update SoC according to user indications
 
+        let initial_soc = self.initial_soc();
+
         let Some(first_snapshot) = self.snapshots.first() else {
             error!("FIXME: session: {}, no first snapshot", self.session_id);
             return;
@@ -254,24 +256,8 @@ impl ChargingSession {
             return;
         };
 
-        let ref_energy = ref_snapshot.energy;
         let first_energy = first_snapshot.energy;
-
-        if ref_energy < first_energy {
-            error!(
-                "FIXME: session: {}, no reference snapshots energy < first snapshot energy",
-                self.session_id
-            );
-            return;
-        }
-
-        // recover the initial SoC from the last ref snapshot
-        let ref_soc = ref_snapshot.soc;
         let ref_soc_cap = ref_snapshot.soc_cap;
-
-        let first_to_ref_energy = ref_energy - first_energy;
-        let soc_delta = (first_to_ref_energy as f64) / self.bms.capacity;
-        let initial_soc = ref_soc.map(|ref_soc| ref_soc - soc_delta);
 
         self.bms.initial_energy = Some(first_energy as f64);
 
@@ -372,6 +358,48 @@ impl ChargingSession {
         self.last_snapshot()
             .expect("at least one snapshot at this stage")
             .soc
+    }
+
+    pub fn initial_soc(&self) -> Option<f64> {
+        let first_snapshot = self.snapshots.first()?;
+        let ref_snapshot = self.last_reference_snapshot()?;
+
+        let first_energy = first_snapshot.energy;
+        let ref_energy = ref_snapshot.energy;
+
+        if ref_energy < first_energy {
+            error!(
+                "FIXME: session: {}, reference snapshots energy: {ref_energy} \
+                < first snapshot energy: {first_energy}",
+                self.session_id
+            );
+            return None;
+        }
+
+        let ref_soc = ref_snapshot.soc;
+
+        let first_to_ref_energy = ref_energy - first_energy;
+        let soc_delta = (first_to_ref_energy as f64) / self.bms.capacity;
+
+        ref_soc.map(|ref_soc| ref_soc - soc_delta)
+    }
+}
+
+impl fmt::Display for ChargingSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn soc_to_string(soc: Option<f64>) -> String {
+            soc.map_or_else(|| "None".to_string(), |ls| format!("{:.1} %", ls * 100.0))
+        }
+
+        f.write_fmt(format_args!(
+            "sid: {}, state: {}, initial SoC: {}, last SoC: {}, SoC cap: {}, tid: {:?}",
+            self.session_id,
+            self.state,
+            soc_to_string(self.initial_soc()),
+            soc_to_string(self.last_soc()),
+            soc_to_string(self.bms.soc_cap),
+            self.transaction_id,
+        ))
     }
 }
 

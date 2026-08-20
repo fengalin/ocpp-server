@@ -70,16 +70,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         match db.get_last_charging_session(&bms) {
-            Ok(Some(sess)) => {
-                info!(
-                    "last known session:\n\
-                        \tid: {}, state: {}, soc cap: {:?}, last soc: {:?}
-                        ",
-                    sess.session_id(),
-                    sess.state(),
-                    sess.bms().soc_cap,
-                    sess.last_soc()
-                );
+            Ok(Some(session)) => {
+                info!("last known session:\n\t{session}");
             }
             Ok(None) => {
                 if args.is_stop_session() {
