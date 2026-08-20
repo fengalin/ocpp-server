@@ -628,7 +628,14 @@ impl Connection {
                 info!(">> incoming {result:#?}");
             }
             Ok(TypedCallResult::ClearChargingProfile(result)) => {
-                info!(">> incoming {result:?}");
+                if result.payload.status == v16::enums::ClearChargingProfileStatus::Accepted {
+                    info!(">> clear charging profile accepted");
+                } else {
+                    error!(">> clear charging profile: {:?}", result.payload.status);
+                    if let Some(mut schedule) = self.charging_schedule.take() {
+                        schedule.inactivate();
+                    }
+                }
             }
             Ok(TypedCallResult::SetChargingProfile(result)) => {
                 if result.payload.status == v16::enums::ChargingProfileStatus::Accepted {
@@ -657,7 +664,17 @@ impl Connection {
 
     async fn send_action(&mut self, action: Action) -> anyhow::Result<()> {
         self.send_action_id += 1;
-        info!("<< sending {} {action:?}", self.send_action_id);
+        match &action {
+            Action::ClearChargingProfile(_) => {
+                info!("<< sending {} ClearChargingProfile", self.send_action_id);
+            }
+            Action::SetChargingProfile(_) => {
+                info!("<< sending {} SetChargingProfile", self.send_action_id);
+            }
+            other => {
+                info!("<< sending {} {other:?}", self.send_action_id);
+            }
+        }
         let call = Call::new(format!("{}.occp-server-test", self.send_action_id), action);
         let call = self
             .call_response_tracker
