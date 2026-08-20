@@ -34,6 +34,7 @@ pub struct Connection {
     bms: Bms,
     last_known_stop_energy: Option<u64>,
     last_meter_values: Option<MeterValueSelection>,
+    last_dpm: Option<DpmSelection>,
     send_action_id: usize,
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
@@ -68,6 +69,7 @@ impl Connection {
             bms,
             last_known_stop_energy: None,
             last_meter_values: None,
+            last_dpm: None,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
@@ -291,15 +293,12 @@ impl Connection {
                 let mut meter_val_selection: Vec<_> = action
                     .meter_value
                     .iter()
-                    .map(MeterValueSelection::from)
+                    .map(|mv| MeterValueSelection::new(mv, action.transaction_id))
                     .collect();
 
                 // FIXME check if we need to handle possibly multiple items
                 if meter_val_selection.len() > 1 {
-                    info!(
-                        ">> MeterValues {meter_val_selection:?}, transaction id: {:?}",
-                        action.transaction_id,
-                    );
+                    info!(">> MeterValues {meter_val_selection:?}");
                 }
 
                 if let Some(mv) = meter_val_selection.pop() {
@@ -309,30 +308,42 @@ impl Connection {
                         .is_some_and(|last_mv| *last_mv != mv)
                         || self.last_meter_values.is_none()
                     {
-                        info!(
-                            ">> MeterValues {mv}, transaction id: {:?}",
-                            action.transaction_id,
-                        );
+                        info!(">> MeterValues {mv}");
                         self.last_meter_values = Some(mv.clone());
+                    } else {
+                        trace!(">> MeterValues {mv:?}");
                     }
 
-                    self.handle_meter_value(mv, action.transaction_id);
+                    self.handle_meter_value(mv);
                 }
 
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::DataTransfer(action) => {
                 for d in action.data.iter() {
-                    let Ok(dpm_values) = serde_json::from_str::<Vec<Dpm>>(d) else {
+                    let Ok(mut dpm_data_set) = serde_json::from_str::<Vec<Dpm>>(d) else {
+                        error!(">> failed to parse DPM data set");
                         continue;
                     };
 
-                    for dpm_value in dpm_values {
-                        info!(
-                            ">> DPM data: {} {}",
-                            action.message_id.as_ref().unwrap(),
-                            DpmSelection::from(dpm_value),
-                        );
+                    // FIXME check if we need to handle possibly multiple items
+                    if dpm_data_set.len() > 1 {
+                        info!(">> DPM data set {dpm_data_set:?}");
+                    }
+
+                    if let Some(dpm_data) = dpm_data_set.pop() {
+                        let dpm_data = DpmSelection::from(dpm_data);
+                        if self
+                            .last_dpm
+                            .as_ref()
+                            .is_some_and(|last_dpm| *last_dpm != dpm_data)
+                            || self.last_dpm.is_none()
+                        {
+                            info!(">> DPM data {dpm_data}");
+                            self.last_dpm = Some(dpm_data);
+                        } else {
+                            trace!(">> DPM data {dpm_data:?}");
+                        }
                     }
                 }
 
@@ -477,13 +488,14 @@ impl Connection {
         Ok(())
     }
 
-    fn handle_meter_value(&mut self, mv: MeterValueSelection, transaction_id: Option<i32>) {
+    fn handle_meter_value(&mut self, mv: MeterValueSelection) {
         if let Some((energy, cs)) =
             Option::zip(mv.active_energy_import, self.charging_session.as_mut())
-            && let Some(transaction_id) = transaction_id
+            && let Some(transaction_id) = mv.transaction_id
         {
             let session_id = cs.session_id();
-            if session_id == transaction_id {
+            // FIXME
+            if true || session_id == transaction_id {
                 if energy > cs.last_energy() {
                     let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
                         .power(mv.active_power_import)
@@ -520,7 +532,7 @@ impl Connection {
                 // FIXME update transaction id in current session
             }
         } else if let Some(energy) = mv.active_energy_import {
-            if let Some(transaction_id) = transaction_id {
+            if let Some(transaction_id) = mv.transaction_id {
                 warn!(
                     "## adding missed charging session with transaction id {transaction_id}, \
                     last known stop energy: {:.3}",

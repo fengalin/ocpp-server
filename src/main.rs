@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening on: {addr}");
 
     if args.is_dry_run() {
-        warn!("Quitting now!\nUse --run to actually run the server");
+        warn!("Quitting now!\nUse the 'run' command to actually run the server");
         return Ok(());
     }
 

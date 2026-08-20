@@ -5,16 +5,18 @@ use std::{cmp, fmt};
 #[derive(Debug, Default, Clone)]
 pub struct MeterValueSelection {
     pub timestamp: DateTime<Utc>,
+    pub transaction_id: Option<i32>,
     pub active_energy_import: Option<u64>,
     pub active_power_import: Option<u64>,
     pub voltage_l1: Option<u64>,
     pub temperature: Option<u64>,
 }
 
-impl<'a> From<&'a v16_data_types::MeterValue> for MeterValueSelection {
-    fn from(mv: &'a v16_data_types::MeterValue) -> Self {
+impl MeterValueSelection {
+    pub fn new(mv: &v16_data_types::MeterValue, transaction_id: Option<i32>) -> Self {
         let mut this = MeterValueSelection {
             timestamp: mv.timestamp.inner(),
+            transaction_id,
             ..Default::default()
         };
 
@@ -40,7 +42,7 @@ impl<'a> From<&'a v16_data_types::MeterValue> for MeterValueSelection {
 impl fmt::Display for MeterValueSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V, temp.: {:.0} °C",
+            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V, temp.: {:.0} °C, tid: {:?}",
             self.timestamp.with_timezone(&Local),
             self.active_energy_import
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
@@ -48,6 +50,7 @@ impl fmt::Display for MeterValueSelection {
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
             self.voltage_l1.map_or(f64::NAN, |v| v as f64),
             self.temperature.map_or(f64::NAN, |v| v as f64),
+            self.transaction_id,
         ))
     }
 }
@@ -56,16 +59,16 @@ impl cmp::PartialEq for MeterValueSelection {
     #[allow(clippy::eq_op)]
     fn eq(&self, other: &Self) -> bool {
         self.active_energy_import == other.active_energy_import
-            && self.active_energy_import == other.active_energy_import
+            && self.active_power_import == other.active_power_import
             && Option::zip(self.voltage_l1, other.voltage_l1)
-                .is_some_and(|(s, o)| u64::abs_diff(s, o) < 3)
+                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 3)
             && self.temperature == other.temperature
     }
 }
 
 #[derive(Debug, Default)]
 pub struct DpmSelection {
-    pub timestamp: String,
+    pub timestamp: Option<DateTime<Utc>>,
     pub transaction_id: Option<i32>,
     pub active_energy_import: Option<u64>,
     pub active_power_import: Option<u64>,
@@ -75,7 +78,7 @@ pub struct DpmSelection {
 impl From<Dpm> for DpmSelection {
     fn from(dpm: Dpm) -> Self {
         let mut this = DpmSelection {
-            timestamp: dpm.data.timestamp.clone(),
+            timestamp: dpm.data.timestamp.parse().ok(),
             transaction_id: dpm.data.transaction_id,
             ..Default::default()
         };
@@ -97,16 +100,32 @@ impl From<Dpm> for DpmSelection {
     }
 }
 
+impl cmp::PartialEq for DpmSelection {
+    #[allow(clippy::eq_op)]
+    fn eq(&self, other: &Self) -> bool {
+        Option::zip(self.active_energy_import, other.active_energy_import)
+            .is_none_or(|(s, o)| u64::abs_diff(s, o) < 1_000)
+            && Option::zip(self.active_power_import, other.active_power_import)
+                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 750)
+            && Option::zip(self.voltage_l1, other.voltage_l1)
+                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 3)
+    }
+}
+
 impl fmt::Display for DpmSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V",
-            self.timestamp,
+            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V, tid: {:?}",
+            self.timestamp.map_or_else(
+                || "invalid".to_string(),
+                |ts| ts.with_timezone(&Local).to_string()
+            ),
             self.active_energy_import
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
             self.active_power_import
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
             self.voltage_l1.map_or(f64::NAN, |v| v as f64),
+            self.transaction_id,
         ))
     }
 }
