@@ -234,18 +234,6 @@ impl Connection {
                                     // with the transaction id before getting this
                                     // StatusNotification
                                     cs.set_state(action.status.clone());
-                                } else {
-                                    // missed the transaction start
-                                    warn!("## adding missed charging session");
-                                    self.check_bms_on_missed_session();
-
-                                    self.charging_session = Some(ChargingSession::with_state(
-                                        self.bms.clone(),
-                                        action.status.clone(),
-                                        self.last_known_stop_energy.unwrap_or_default(),
-                                        None,
-                                        action.timestamp.map(|ts| ts.inner()),
-                                    ));
                                 }
                             }
                             ChargePointStatus::SuspendedEV | ChargePointStatus::Faulted => {
@@ -493,9 +481,8 @@ impl Connection {
             Option::zip(mv.active_energy_import, self.charging_session.as_mut())
             && let Some(transaction_id) = mv.transaction_id
         {
-            let session_id = cs.session_id();
-            // FIXME
-            if true || session_id == transaction_id {
+            let session_tid = cs.transaction_id();
+            if session_tid == transaction_id {
                 if energy > cs.last_energy() {
                     let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
                         .power(mv.active_power_import)
@@ -503,48 +490,48 @@ impl Connection {
                         .temperature(mv.temperature)
                         .build();
 
-                    if self.last_known_stop_energy.is_none()
-                        || self.last_known_stop_energy == Some(0)
-                    {
+                    if self.last_known_stop_energy.is_none_or(|se| se == 0) {
                         info!(
-                            "## session {session_id}: current {:.3} kWh (SoC can not be determined)",
+                            "## session {session_tid}: current energy {:.3} kWh (SoC can not be determined)",
                             energy as f64 / 1_000f64
                         );
                     } else {
                         let soc_progress = cs.add_snapshot(snapshot);
                         if soc_progress.is_complete() && !cs.is_complete() {
-                            info!(">> Stopping session {session_id}: {soc_progress}");
+                            info!(">> Stopping session {session_tid}: {soc_progress}");
                             cs.set_state(ChargingSessionState::SocCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction {
-                                    transaction_id: session_id,
+                                    transaction_id: session_tid,
                                 },
                             ));
                         } else {
-                            info!("## session {session_id}: {soc_progress}");
+                            info!("## session {session_tid}: {soc_progress}");
                         }
                     }
                 }
             } else {
                 warn!(
-                    ">> MeterValues transaction id mismatch {transaction_id}, expected {session_id}",
+                    ">> MeterValues transaction id mismatch {transaction_id}, expected {session_tid}",
                 );
                 // FIXME update transaction id in current session
             }
         } else if let Some(energy) = mv.active_energy_import {
-            if let Some(transaction_id) = mv.transaction_id {
+            if let Some((transaction_id, last_known_stop_energy)) =
+                Option::zip(mv.transaction_id, self.last_known_stop_energy)
+            {
                 warn!(
                     "## adding missed charging session with transaction id {transaction_id}, \
                     last known stop energy: {:.3}",
-                    self.last_known_stop_energy.unwrap_or_default() as f64 / 1_000f64,
+                    last_known_stop_energy as f64 / 1_000f64
                 );
                 self.check_bms_on_missed_session();
 
                 self.charging_session = Some(ChargingSession::with_state(
                     self.bms.clone(),
-                    ChargingSessionState::Unknown,
-                    self.last_known_stop_energy.unwrap_or_default(),
                     transaction_id,
+                    ChargingSessionState::Unknown,
+                    last_known_stop_energy,
                     mv.timestamp,
                 ));
             } else {
@@ -554,6 +541,11 @@ impl Connection {
         }
     }
 
+    // FIXME use a dedicated type & implement a probation mechanism
+    // to check this is confirmed for a least 2 consecutive MV
+    // before ensuring this is not a WIP charging session
+    // (so the SoC can't be determine from the first ref & initial SoC
+    // but from a current SoC specified by user)
     fn update_last_known_stop_energy(&mut self, meter_energy: u64) {
         match self.last_known_stop_energy {
             Some(last) if last == meter_energy => (),

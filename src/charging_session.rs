@@ -70,7 +70,7 @@ impl ChargingSessionSnapshotBuilder {
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct ChargingSession {
     session_id: i32,
-    transaction_id: Option<i32>,
+    transaction_id: i32,
     bms: Bms,
     snapshots: Vec<ChargingSessionSnapshot>,
     state: ChargingSessionState,
@@ -88,7 +88,7 @@ impl ChargingSession {
 
         let mut this = ChargingSession {
             session_id,
-            transaction_id: None,
+            transaction_id: session_id,
             bms,
             snapshots: vec![],
             state: ChargingSessionState::Active,
@@ -108,16 +108,15 @@ impl ChargingSession {
     /// This is useful for cases where we missed the transaction start.
     pub fn with_state(
         mut bms: Bms,
+        transaction_id: i32,
         state: impl Into<ChargingSessionState>,
         last_known_stop_energy: u64,
-        transaction_id: impl Into<Option<i32>>,
         timestamp: impl Into<Option<DateTime<Utc>>>,
     ) -> Self {
         let db = Database::get();
 
         let state = state.into();
-        let transaction_id = transaction_id.into();
-        let session_id = db.add_new_charging_session(state.clone(), transaction_id);
+        let session_id = db.add_new_charging_session(state.clone(), Some(transaction_id));
 
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(last_known_stop_energy as f64);
@@ -171,7 +170,7 @@ impl ChargingSession {
     ) -> Self {
         ChargingSession {
             session_id,
-            transaction_id,
+            transaction_id: transaction_id.unwrap_or(session_id),
             bms,
             snapshots: vec![],
             state,
@@ -180,6 +179,10 @@ impl ChargingSession {
 
     pub fn session_id(&self) -> i32 {
         self.session_id
+    }
+
+    pub fn transaction_id(&self) -> i32 {
+        self.transaction_id
     }
 
     pub fn bms(&self) -> &Bms {
@@ -1053,13 +1056,13 @@ mod tests {
         let tid = 1;
         let mut cs = ChargingSession::with_state(
             bms.clone(),
+            tid,
             ChargingSessionState::Unknown,
             last_known_energy,
-            Some(tid),
             current_time,
         );
         assert_eq!(cs.state, ChargingSessionState::Unknown);
-        assert_eq!(cs.transaction_id, Some(tid));
+        assert_eq!(cs.transaction_id, tid);
 
         let last_snapshot = cs.last_snapshot().unwrap();
         assert!(last_snapshot.is_reference);
@@ -1121,13 +1124,13 @@ mod tests {
         let tid = 1;
         let mut cs = ChargingSession::with_state(
             bms.clone(),
+            tid,
             enums::ChargePointStatus::SuspendedEVSE,
             current_energy,
-            Some(tid),
             current_time,
         );
         assert_eq!(cs.state, ChargingSessionState::SuspendedByEvse);
-        assert_eq!(cs.transaction_id, Some(tid));
+        assert_eq!(cs.transaction_id, tid);
 
         let last_snapshot = cs.last_snapshot().unwrap();
         assert!(last_snapshot.is_reference);
