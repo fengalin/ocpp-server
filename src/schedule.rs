@@ -4,7 +4,7 @@ use std::{
 };
 
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 
 use crate::Database;
@@ -278,7 +278,13 @@ impl ChargingPlan {
                     ),
             ),
             ReachSocCapBefore { end_time } => {
-                let energy_to_add = bms.get_energy_to_add();
+                let Some(energy_to_add) = bms.get_energy_to_add() else {
+                    error!(
+                        "couldn't compute energy to add from BMS: {}",
+                        bms.initial_soc_and_cap
+                    );
+                    return None;
+                };
                 // FIXME use power limit from args
                 let available_power = DEFAULT_LIMIT - bms.constant_power_loss as f64;
                 // FIXME check in args
@@ -294,12 +300,11 @@ impl ChargingPlan {
                 let mut start;
                 let duration = TimeDelta::seconds(duration_s as _);
                 info!(
-                    "preparing schedule for SoC {:.0} % -> {:.0} %\n\
+                    "preparing schedule for SoC {}\n\
                     \tenergy to add: {:.1} kWh\n\
                     \tenergy needed: {:.1} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
-                    bms.initial_soc.unwrap_or_default() * 100.0,
-                    bms.soc_cap.expect("defined at this stage") * 100.0,
+                    bms.initial_soc_and_cap,
                     energy_to_add / 1_000.0,
                     energy_needed / 1_000.0,
                     (1.0 - (energy_to_add / energy_needed)) * 100.0,

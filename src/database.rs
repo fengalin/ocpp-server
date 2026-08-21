@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     Bms, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState, ChargingSession,
-    ChargingSessionSnapshot, ChargingSessionState,
+    ChargingSessionSnapshot, ChargingSessionState, bms::SoCProgress,
 };
 
 const SQLITE_PATH: &str = "./charging_sessions.sqlite";
@@ -32,6 +32,7 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 power INTEGER,
                 l1_voltage INTEGER,
                 temperature INTEGER,
+                is_absolute_soc INTERGER,
                 soc FLOAT,
                 soc_cap FLOAT,
                 FOREIGN KEY (sessionid) REFERENCES charging_session(id)
@@ -111,6 +112,7 @@ impl<'a> Database<'a> {
             let temperature = row
                 .get_unwrap::<_, Option<i64>>("temperature")
                 .map(|p| p as u64);
+            let is_absolute_soc = row.get_unwrap::<_, i64>("is_absolute_soc") != 0;
             let soc = row.get_unwrap::<_, Option<f64>>("soc");
             let soc_cap = row.get_unwrap::<_, Option<f64>>("soc_cap");
 
@@ -129,8 +131,7 @@ impl<'a> Database<'a> {
                     .power(power)
                     .l1_voltage(l1_voltage)
                     .temperature(temperature)
-                    .soc(soc)
-                    .soc_cap(soc_cap)
+                    .soc_progress(SoCProgress::new(is_absolute_soc, soc, soc_cap))
                     .build(),
             );
         }
@@ -188,7 +189,18 @@ impl<'a> Database<'a> {
         let res = self.0.execute(
             "
             INSERT INTO charging_session_snapshot
-            (timestamp, sessionid, is_reference, energy, power, l1_voltage, temperature, soc, soc_cap)
+            (
+                timestamp,
+                sessionid,
+                is_reference,
+                energy,
+                power,
+                l1_voltage,
+                temperature,
+                is_absolute_soc,
+                soc,
+                soc_cap
+            )
             VALUES (
                 :timestamp,
                 :session_id,
@@ -197,6 +209,7 @@ impl<'a> Database<'a> {
                 :power,
                 :l1_voltage,
                 :temperature,
+                :is_absolute_soc,
                 :soc,
                 :soc_cap
             );
@@ -209,8 +222,9 @@ impl<'a> Database<'a> {
                 ":power": snapshot.power.map(|p| p as i64),
                 ":l1_voltage": snapshot.l1_voltage.map(|v| v as i64),
                 ":temperature": snapshot.temperature.map(|t| t as i64),
-                ":soc": snapshot.soc,
-                ":soc_cap": snapshot.soc_cap,
+                ":is_absolute_soc": snapshot.soc_progress.is_absolute(),
+                ":soc": snapshot.soc_progress.soc().inner(),
+                ":soc_cap": snapshot.soc_progress.cap().inner(),
             ],
         );
 

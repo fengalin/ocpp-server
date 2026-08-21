@@ -10,7 +10,7 @@ mod args;
 use args::Args;
 
 mod bms;
-use bms::{Bms, SocProgress};
+use bms::{Bms, SoC, SoCProgress};
 
 mod connection;
 use connection::Connection;

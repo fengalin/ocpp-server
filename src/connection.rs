@@ -580,7 +580,7 @@ impl Connection {
     }
 
     fn check_bms_on_missed_session(&self) {
-        if self.bms.soc_cap.is_some() {
+        if !self.bms.initial_soc_and_cap.cap().is_unknown() {
             if self.last_known_stop_energy.is_none() || self.last_known_stop_energy == Some(0) {
                 warn!(
                     "## last stop energy is unknown => \
