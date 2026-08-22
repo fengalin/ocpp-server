@@ -109,6 +109,7 @@ impl Connection {
         if let Some(ref cs) = last_charging_session
             && cs.is_complete()
         {
+            // FIXME rely on the BMS
             this.last_known_stop_energy = Some(cs.last_energy());
         } else {
             // FIXME is last_charging_session is some (and not complete)
@@ -572,7 +573,8 @@ impl Connection {
                         "## initial energy can not be determined, check the configured SoC, \
                         SoC cap and charging schedule"
                     );
-                    bms.initial_soc_and_cap.update_soc(SoC::Unknown);
+                    bms.initial_soc.update(SoC::Unknown);
+                    bms.current_soc.update(SoC::Unknown);
                     energy
                 };
 

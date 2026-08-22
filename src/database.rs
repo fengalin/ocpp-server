@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     Bms, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState, ChargingSession,
-    ChargingSessionSnapshot, ChargingSessionState, bms::SoCProgress,
+    ChargingSessionSnapshot, ChargingSessionState, bms::SoC,
 };
 
 const SQLITE_PATH: &str = "./charging_sessions.sqlite";
@@ -65,7 +65,24 @@ impl<'a> Database<'a> {
         Database(DATABASE.lock().unwrap())
     }
 
+    /// Check last charging session, but don't persist any changes
+    pub fn check_last_charging_session(
+        &self,
+        bms: &Bms,
+    ) -> anyhow::Result<Option<ChargingSession>> {
+        self.get_last_charging_session_priv(bms, false)
+    }
+
+    /// Get last charging session, an dadd a new reference snapshot if applicable
     pub fn get_last_charging_session(&self, bms: &Bms) -> anyhow::Result<Option<ChargingSession>> {
+        self.get_last_charging_session_priv(bms, true)
+    }
+
+    fn get_last_charging_session_priv(
+        &self,
+        bms: &Bms,
+        apply_updates: bool,
+    ) -> anyhow::Result<Option<ChargingSession>> {
         let Some((session_id, state, transaction_id)) = self
             .0
             .query_row::<(i32, String, Option<i32>), _, _>(
@@ -131,13 +148,17 @@ impl<'a> Database<'a> {
                     .power(power)
                     .l1_voltage(l1_voltage)
                     .temperature(temperature)
-                    .soc_progress(SoCProgress::new(is_absolute_soc, soc, soc_cap))
+                    .soc(SoC::new(is_absolute_soc, soc))
+                    .soc_cap(soc_cap)
                     .build(),
             );
         }
 
-        if let Some(ref mut cs_mut) = cs {
-            cs_mut.done_retrieving_snapshots_from_db(self);
+        if let Some(ref mut cs_mut) = cs
+            && let Some(new_ref_snapshot) = cs_mut.finalise_last_session_retrieval()
+            && apply_updates
+        {
+            self.add_charging_session_snapshot(session_id, new_ref_snapshot);
         }
 
         Ok(cs)
@@ -222,9 +243,9 @@ impl<'a> Database<'a> {
                 ":power": snapshot.power.map(|p| p as i64),
                 ":l1_voltage": snapshot.l1_voltage.map(|v| v as i64),
                 ":temperature": snapshot.temperature.map(|t| t as i64),
-                ":is_absolute_soc": snapshot.soc_progress.is_absolute(),
-                ":soc": snapshot.soc_progress.soc().inner(),
-                ":soc_cap": snapshot.soc_progress.cap().inner(),
+                ":is_absolute_soc": snapshot.soc.is_absolute(),
+                ":soc": snapshot.soc.inner(),
+                ":soc_cap": snapshot.soc_cap,
             ],
         );
 

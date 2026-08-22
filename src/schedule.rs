@@ -278,13 +278,15 @@ impl ChargingPlan {
                     ),
             ),
             ReachSocCapBefore { end_time } => {
-                let Some(energy_to_add) = bms.get_energy_to_add() else {
+                let Some(energy_to_add) = bms.energy_to_soc(bms.soc_cap()) else {
                     error!(
-                        "couldn't compute energy to add from BMS: {}",
-                        bms.initial_soc_and_cap
+                        "couldn't compute energy to add for {} to {}",
+                        bms.current_soc,
+                        bms.soc_cap(),
                     );
                     return None;
                 };
+
                 // FIXME use power limit from args
                 let available_power = DEFAULT_LIMIT - bms.constant_power_loss as f64;
                 // FIXME check in args
@@ -300,11 +302,12 @@ impl ChargingPlan {
                 let mut start;
                 let duration = TimeDelta::seconds(duration_s as _);
                 info!(
-                    "preparing schedule for SoC {}\n\
+                    "preparing schedule for SoC {} to {}\n\
                     \tenergy to add: {:.1} kWh\n\
                     \tenergy needed: {:.1} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
-                    bms.initial_soc_and_cap,
+                    bms.current_soc,
+                    bms.soc_cap(),
                     energy_to_add / 1_000.0,
                     energy_needed / 1_000.0,
                     (1.0 - (energy_to_add / energy_needed)) * 100.0,

@@ -83,15 +83,14 @@ impl Args {
 impl From<&Args> for crate::Bms {
     fn from(args: &Args) -> Self {
         use crate::SoC;
-        crate::Bms::new(
-            args.battery_capacity,
-            args.constant_power_loss,
-            None,
-            // FIXME also support relative at some point
-            args.initial_soc
-                .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f64 / 100.0)),
-            args.soc_cap.map(|soc| soc as f64 / 100.0),
-        )
+        crate::Bms::builder(args.battery_capacity, args.constant_power_loss)
+            .initial_soc(
+                // FIXME also support relative at some point
+                args.initial_soc
+                    .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f64 / 100.0)),
+            )
+            .soc_cap(args.soc_cap.map(|soc| soc as f64 / 100.0))
+            .build()
     }
 }
 

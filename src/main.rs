@@ -39,39 +39,19 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .unwrap();
 
-    let bms = Bms::from(&args);
-    info!("Specs: {bms:#?}");
+    let mut bms = Bms::from(&args);
+    info!("User defined: {bms:#?}");
 
-    let charging_plan = Option::<ChargingPlan>::try_from(&args)
-        .inspect(|cp| {
-            if args.is_dry_run() {
-                info!("Charging plan: {cp:?}");
-                if let Some(cp) = cp {
-                    let _ = cp.to_charging_schedule(&bms);
-                }
-            }
-        })
-        .inspect_err(|err| error!("Charging plan: {err}"))?;
-
-    // make sure the DB is available
     {
         let db = Database::get();
 
-        match db.get_last_charging_schedule() {
-            Ok(Some(schedule)) => {
-                info!("last known schedule:\n\t{schedule}");
-            }
-            Ok(None) => {
-                info!("no known charging schedule");
-            }
-            Err(err) => {
-                bail!("failed to query last charging schedule: {err}");
-            }
-        }
-
-        match db.get_last_charging_session(&bms) {
+        match db.check_last_charging_session(&bms) {
             Ok(Some(session)) => {
                 info!("last known session:\n\t{session}");
+                if !session.is_complete() {
+                    bms = session.bms().clone();
+                    info!("updated from last chaging session: {bms:#?}");
+                }
             }
             Ok(None) => {
                 if args.is_stop_session() {
@@ -84,7 +64,30 @@ async fn main() -> anyhow::Result<()> {
                 bail!("failed to query last session: {err}");
             }
         }
+
+        match db.get_last_charging_schedule() {
+            Ok(Some(schedule)) => {
+                info!("last known schedule:\n\t{schedule}");
+            }
+            Ok(None) => {
+                info!("no known charging schedule");
+            }
+            Err(err) => {
+                bail!("failed to query last charging schedule: {err}");
+            }
+        }
     }
+
+    let charging_plan = Option::<ChargingPlan>::try_from(&args)
+        .inspect(|cp| {
+            if args.is_dry_run() {
+                info!("Charging plan: {cp:?}");
+                if let Some(cp) = cp {
+                    let _ = cp.to_charging_schedule(&bms);
+                }
+            }
+        })
+        .inspect_err(|err| error!("Charging plan: {err}"))?;
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
