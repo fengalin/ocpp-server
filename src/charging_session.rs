@@ -260,20 +260,20 @@ impl ChargingSession {
             );
         }
 
-        let mut update_initial_soc = false;
+        let mut add_reference_snapshot = false;
         match (
             initial_soc_progress.soc(),
             self.bms.initial_soc_and_cap.soc(),
         ) {
             (sess_init_soc, SoC::Unknown) => {
-                self.bms.initial_soc_and_cap = self.bms.initial_soc_and_cap.with_soc(sess_init_soc);
+                self.bms.initial_soc_and_cap.update_soc(sess_init_soc);
             }
             (sess_init_soc, bms_ref_soc) if sess_init_soc != bms_ref_soc => {
                 warn!(
                     "specified different initial SoC for a recovered uncomplete session, \
                             make sure this is what you intended to do"
                 );
-                update_initial_soc = true;
+                add_reference_snapshot = true;
             }
             (SoC::Unknown, bms_ref_soc) if !bms_ref_soc.is_unknown() => {
                 warn!(
@@ -281,12 +281,12 @@ impl ChargingSession {
                         for which the initial SoC was previously unknown, \
                         make sure this is what you intended to do"
                 );
-                update_initial_soc = true;
+                add_reference_snapshot = true;
             }
             _ => (),
         }
 
-        if update_initial_soc {
+        if add_reference_snapshot {
             let last_snapshot = self.last_snapshot().expect("at least one snapshot");
 
             let first_energy = first_energy as f64;
