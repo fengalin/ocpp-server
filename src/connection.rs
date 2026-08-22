@@ -572,7 +572,7 @@ impl Connection {
                         "## initial energy can not be determined, check the configured SoC, \
                         SoC cap and charging schedule"
                     );
-                    bms.initial_soc_and_cap = bms.initial_soc_and_cap.with_soc(SoC::Unknown);
+                    bms.initial_soc_and_cap.update_soc(SoC::Unknown);
                     energy
                 };
 
