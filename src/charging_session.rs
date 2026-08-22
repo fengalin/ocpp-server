@@ -266,7 +266,7 @@ impl ChargingSession {
             self.bms.initial_soc_and_cap.soc(),
         ) {
             (sess_init_soc, SoC::Unknown) => {
-                self.bms.initial_soc_and_cap = self.bms.initial_soc_and_cap.with_soc(sess_init_soc);
+                self.bms.initial_soc_and_cap.update_soc(sess_init_soc);
             }
             (sess_init_soc, bms_ref_soc) if sess_init_soc != bms_ref_soc => {
                 warn!(
