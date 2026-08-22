@@ -22,16 +22,43 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
     Bms, ChargingPlan, ChargingSchedule, ChargingSession, ChargingSessionSnapshot,
-    ChargingSessionState, Database, args, measurements::*, schedule,
+    ChargingSessionState, Database, SoC, args, measurements::*, schedule,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+enum EnergyTracker {
+    Increasing(u64),
+    Probation(u64),
+    Stationnary(u64),
+    #[default]
+    Unknown,
+}
+
+impl EnergyTracker {
+    fn have_energy(&mut self, energy: u64) {
+        use EnergyTracker::*;
+        *self = match self {
+            Increasing(v) if *v < energy => Increasing(energy),
+            // FIXME add an increasing to stationnary probation
+            // state before going back to stationnary?
+            Increasing(_) => Stationnary(energy),
+            Probation(v) if *v < energy => Increasing(energy),
+            Probation(_) => Stationnary(energy),
+            Stationnary(v) if *v < energy => Increasing(energy),
+            Stationnary(_) => Stationnary(energy),
+            Unknown => Probation(energy),
+        };
+    }
+}
 
 #[derive(Debug)]
 pub struct Connection {
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
     bms: Bms,
+    energy_tracker: EnergyTracker,
     last_known_stop_energy: Option<u64>,
     last_meter_values: Option<MeterValueSelection>,
     last_dpm: Option<DpmSelection>,
@@ -68,6 +95,7 @@ impl Connection {
             connector_id: None,
             bms,
             last_known_stop_energy: None,
+            energy_tracker: Default::default(),
             last_meter_values: None,
             last_dpm: None,
             send_action_id: 0,
@@ -431,7 +459,10 @@ impl Connection {
                         Some(action.transaction_id),
                     );
                 }
-                self.update_last_known_stop_energy(action.meter_stop);
+
+                self.energy_tracker.have_energy(action.meter_stop);
+                self.last_known_stop_energy = Some(action.meter_stop);
+
                 self.prepare_response(
                     action,
                     call.unique_id,
@@ -477,118 +508,133 @@ impl Connection {
     }
 
     fn handle_meter_value(&mut self, mv: MeterValueSelection) {
-        if let Some((energy, cs)) =
-            Option::zip(mv.active_energy_import, self.charging_session.as_mut())
-            && let Some(transaction_id) = mv.transaction_id
-        {
-            let session_tid = cs.transaction_id();
-            if session_tid == transaction_id {
-                if energy > cs.last_energy() {
-                    let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
-                        .power(mv.active_power_import)
-                        .l1_voltage(mv.voltage_l1)
-                        .temperature(mv.temperature)
-                        .build();
+        let Some(energy) = mv.active_energy_import else {
+            return;
+        };
 
-                    if self.last_known_stop_energy.is_none_or(|se| se == 0) {
-                        info!(
-                            "## session {session_tid}: current energy {:.3} kWh (SoC can not be determined)",
-                            energy as f64 / 1_000f64
-                        );
-                    } else {
+        use EnergyTracker::*;
+        self.energy_tracker.have_energy(energy);
+        match self.energy_tracker {
+            Increasing(_) => {
+                let Some(transaction_id) = mv.transaction_id else {
+                    debug!(
+                        "## MeterValue without transaction id, but incresing energy, \
+                        waiting for next MeterValue"
+                    );
+                    return;
+                };
+
+                match self.charging_session.as_mut() {
+                    Some(cs) if cs.transaction_id() == transaction_id => {
+                        let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
+                            .power(mv.active_power_import)
+                            .l1_voltage(mv.voltage_l1)
+                            .temperature(mv.temperature)
+                            .build();
+
                         let soc_progress = cs.add_snapshot(snapshot);
                         if soc_progress.is_complete() && !cs.is_complete() {
-                            info!(">> Stopping session {session_tid}: {soc_progress}");
+                            info!("## Stopping session {transaction_id}: {soc_progress}");
                             cs.set_state(ChargingSessionState::SocCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
-                                call::RemoteStopTransaction {
-                                    transaction_id: session_tid,
-                                },
+                                call::RemoteStopTransaction { transaction_id },
                             ));
                         } else {
-                            info!("## session {session_tid}: {soc_progress}");
+                            info!("## session {transaction_id}: {soc_progress}");
                         }
+
+                        return;
+                    }
+                    Some(cs) => {
+                        warn!(
+                            "## MeterValues transaction id mismatch {transaction_id}, \
+                            expected {}",
+                            cs.transaction_id()
+                        );
+                        cs.set_state(ChargingSessionState::Error(
+                            "transaction id mismatch".to_string(),
+                        ));
+                        self.charging_session = None;
+                    }
+                    None => {
+                        warn!(
+                            "## MeterValues with transaction id and increasing energy \
+                            for unknown session"
+                        );
                     }
                 }
-            } else {
-                warn!(
-                    ">> MeterValues transaction id mismatch {transaction_id}, expected {session_tid}",
-                );
-                // FIXME update transaction id in current session
-            }
-        } else if let Some(energy) = mv.active_energy_import {
-            if let Some((transaction_id, last_known_stop_energy)) =
-                Option::zip(mv.transaction_id, self.last_known_stop_energy)
-            {
-                warn!(
-                    "## adding missed charging session with transaction id {transaction_id}, \
-                    last known stop energy: {:.3}",
-                    last_known_stop_energy as f64 / 1_000f64
-                );
-                self.check_bms_on_missed_session();
 
+                let mut bms = self.bms.clone();
+                let start_energy = if let Some(last_stop_energy) = self.last_known_stop_energy {
+                    last_stop_energy
+                } else {
+                    warn!(
+                        "## initial energy can not be determined, check the configured SoC, \
+                        SoC cap and charging schedule"
+                    );
+                    bms.initial_soc_and_cap = bms.initial_soc_and_cap.with_soc(SoC::Unknown);
+                    energy
+                };
+
+                warn!(
+                    "## adding new charging session for {transaction_id}, \
+                    increasing start energy: {start_energy}"
+                );
+                self.charging_session = Some(ChargingSession::with_state(
+                    bms,
+                    transaction_id,
+                    ChargingSessionState::Active,
+                    energy,
+                    mv.timestamp,
+                ));
+            }
+            Stationnary(_) => {
+                let Some(transaction_id) = mv.transaction_id else {
+                    debug!(
+                        "## MeterValue without transaction id, stationary \
+                        waiting for next MeterValue"
+                    );
+                    return;
+                };
+
+                match self.charging_session.as_mut() {
+                    Some(cs) if cs.transaction_id() == transaction_id => {
+                        return;
+                    }
+                    Some(cs) => {
+                        warn!(
+                            "## MeterValues transaction id mismatch {transaction_id}, \
+                            expected {}",
+                            cs.transaction_id()
+                        );
+                        cs.set_state(ChargingSessionState::Error(
+                            "transaction id mismatch".to_string(),
+                        ));
+                    }
+                    None => {
+                        info!(
+                            ">> MeterValues with stationnary energy \
+                            for unknown session: {transaction_id}"
+                        );
+                    }
+                }
+
+                self.last_known_stop_energy = Some(energy);
+
+                warn!(
+                    "## adding new charging session for {transaction_id}, \
+                    stationnary start energy: {energy}"
+                );
                 self.charging_session = Some(ChargingSession::with_state(
                     self.bms.clone(),
                     transaction_id,
-                    ChargingSessionState::Unknown,
-                    last_known_stop_energy,
+                    ChargingSessionState::Active,
+                    energy,
                     mv.timestamp,
                 ));
-            } else {
-                // no known session in progress
-                self.update_last_known_stop_energy(energy);
             }
-        }
-    }
-
-    // FIXME use a dedicated type & implement a probation mechanism
-    // to check this is confirmed for a least 2 consecutive MV
-    // before ensuring this is not a WIP charging session
-    // (so the SoC can't be determine from the first ref & initial SoC
-    // but from a current SoC specified by user)
-    fn update_last_known_stop_energy(&mut self, meter_energy: u64) {
-        match self.last_known_stop_energy {
-            Some(last) if last == meter_energy => (),
-            Some(ref mut last) if *last < meter_energy => {
-                if self.charging_session.is_none() {
-                    // only log when no charging session is in progress
-                    info!(
-                        "## updating last known stop energy: {:.3} kWh, \
-                        previous: {:.3} kWh",
-                        meter_energy as f64 / 1_000f64,
-                        *last as f64 / 1_000f64
-                    );
-                }
-                *last = meter_energy;
-            }
-            None => {
-                info!(
-                    "## setting last known stop energy: {:.3} kWh",
-                    meter_energy as f64 / 1_000f64,
-                );
-                self.last_known_stop_energy = Some(meter_energy);
-            }
-            Some(last) => {
-                info!(
-                    "## ignoring last meter energy: {:.3} kWh, \
-                    lower than last known stop energy: {:.3} kWh",
-                    meter_energy as f64 / 1_000f64,
-                    last as f64 / 1_000f64
-                );
-            }
-        }
-    }
-
-    fn check_bms_on_missed_session(&self) {
-        if !self.bms.initial_soc_and_cap.cap().is_unknown() {
-            if self.last_known_stop_energy.is_none() || self.last_known_stop_energy == Some(0) {
-                warn!(
-                    "## last stop energy is unknown => \
-                    SoC & SoC cap will not have the expected effect",
-                );
-            } else {
-                warn!("## ensure the SoC & SoC cap are set as expected");
-            }
+            Probation(_) => info!(">> MeterValue with energy set to probation"),
+            Unknown => unreachable!("energy added"),
         }
     }
 
@@ -744,5 +790,55 @@ impl Connection {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn energy_tracker() {
+        use EnergyTracker::*;
+
+        // probation to stationnary
+        let mut tracker = EnergyTracker::default();
+        assert_eq!(tracker, Unknown);
+
+        let mut energy = 100;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Probation(energy));
+
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Stationnary(energy));
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Stationnary(energy));
+
+        energy += 10;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Increasing(energy));
+
+        energy += 10;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Increasing(energy));
+
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Stationnary(energy));
+
+        energy += 10;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Increasing(energy));
+
+        // probation to increasing
+        let mut tracker = EnergyTracker::default();
+        assert_eq!(tracker, Unknown);
+
+        let mut energy = 100;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Probation(energy));
+
+        energy += 10;
+        tracker.have_energy(energy);
+        assert_eq!(tracker, Increasing(energy));
     }
 }

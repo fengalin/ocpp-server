@@ -103,7 +103,7 @@ impl ChargingSession {
         mut bms: Bms,
         transaction_id: i32,
         state: impl Into<ChargingSessionState>,
-        last_known_stop_energy: u64,
+        start_energy: u64,
         timestamp: impl Into<Option<DateTime<Utc>>>,
     ) -> Self {
         let db = Database::get();
@@ -112,12 +112,12 @@ impl ChargingSession {
         let session_id = db.add_new_charging_session(state.clone(), Some(transaction_id));
 
         if bms.initial_energy.is_none() {
-            bms.initial_energy = Some(last_known_stop_energy as f64);
+            bms.initial_energy = Some(start_energy as f64);
         }
 
         let snapshot = ChargingSessionSnapshot::builder(
             timestamp.into().unwrap_or_else(Utc::now),
-            last_known_stop_energy,
+            start_energy,
         )
         .is_reference(true)
         .soc_progress(bms.initial_soc_and_cap)
