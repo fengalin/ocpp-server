@@ -275,14 +275,8 @@ impl ChargingSession {
         self.bms.initial_energy = Some(first_energy as f64);
         self.bms.current_energy = Some(last_known_energy as f64);
 
-        if self.bms.soc_cap.is_none() && ref_snapshot_cap.is_some() {
-            warn!(
-                "removed SoC cap for a recovered uncomplete session, \
-                    make sure this is really what you intended to do"
-            );
-        }
-
         let mut add_reference_snapshot = false;
+
         match (retrieved_initial_soc, self.bms.initial_soc) {
             (retrieved_init_soc, SoC::Unknown) => {
                 self.bms.initial_soc.update(retrieved_init_soc);
@@ -305,6 +299,33 @@ impl ChargingSession {
             _ => (),
         }
 
+        match (ref_snapshot_cap, self.bms.soc_cap) {
+            (Some(ref_soc_cap), Some(bms_soc_cap)) if ref_soc_cap < 1.0 && bms_soc_cap >= 1.0 => {
+                warn!(
+                    "disabling SoC cap for a recovered uncomplete session, \
+                        make sure this is really what you intended to do"
+                );
+                self.bms.soc_cap = None;
+                add_reference_snapshot = true;
+            }
+            (Some(ref_soc_cap), Some(bms_soc_cap)) if (ref_soc_cap - bms_soc_cap).abs() > 0.009 => {
+                warn!(
+                    "specified new SoC cap: {:.0} %, previous: {:.0} %",
+                    bms_soc_cap * 100.0,
+                    ref_soc_cap * 100.0,
+                );
+                add_reference_snapshot = true;
+            }
+            (None, Some(bms_soc_cap)) => {
+                warn!(
+                    "specified new SoC cap: {:.0} %, previously unspecified",
+                    bms_soc_cap * 100.0,
+                );
+                add_reference_snapshot = true;
+            }
+            _ => self.bms.soc_cap = ref_snapshot_cap,
+        }
+
         let last_snapshot = self.last_snapshot().expect("at least one snapshot");
 
         if add_reference_snapshot {
@@ -318,6 +339,7 @@ impl ChargingSession {
                     ChargingSessionSnapshot::builder(Utc::now(), last_snapshot.energy)
                         .is_reference(true)
                         .soc(current_soc)
+                        .soc_cap(self.bms.soc_cap)
                         .build();
 
                 self.snapshots.push(new_snapshot);
@@ -817,7 +839,7 @@ mod tests {
 
         // Simulate server going offline, then reconnecting without the session being suspended
         // not changing initial SoC and expending the SoC cap
-        soc_cap += 10f64 / BATTERY_CAPACITY as f64;
+        soc_cap += 0.01;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .soc_cap(soc_cap)
             .build();
@@ -834,6 +856,7 @@ mod tests {
             recovered_session.bms().initial_soc,
         );
         assert_eq!(Some(soc_cap), recovered_session.bms().soc_cap);
+        assert!(recovered_session.last_snapshot().unwrap().is_reference);
 
         let soc_progress = recovered_session.add_snapshot(
             ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 30)
@@ -849,7 +872,7 @@ mod tests {
             },
             soc_progress,
         );
-        assert!(!cs.last_snapshot().unwrap().is_reference);
+        assert!(!recovered_session.last_snapshot().unwrap().is_reference);
 
         // Simulate server going offline again,
         // then reconnecting without the session being suspended
@@ -857,6 +880,7 @@ mod tests {
         let corrected_initial_soc = initial_soc - 10f64 / BATTERY_CAPACITY as f64;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(corrected_initial_soc))
+            .soc_cap(100.0)
             .build();
         let mut recovered_session = Database::get()
             .get_last_charging_session(&bms)
@@ -913,7 +937,7 @@ mod tests {
 
         // Simulate server going offline, then reconnecting without the session being suspended
         // not changing initial SoC and expending the SoC cap
-        soc_cap += 10f64 / BATTERY_CAPACITY as f64;
+        soc_cap += 0.01;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .soc_cap(soc_cap)
             .build();
@@ -952,6 +976,7 @@ mod tests {
         let corrected_ref_soc = corrected_initial_soc + 30.0 / BATTERY_CAPACITY as f64;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(corrected_initial_soc))
+            .soc_cap(1.0)
             .build();
         let mut recovered_session = Database::get()
             .get_last_charging_session(&bms)

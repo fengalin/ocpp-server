@@ -258,8 +258,8 @@ impl ops::Sub<f64> for SoC {
 impl cmp::PartialEq for SoC {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (SoC::Absolute(this), SoC::Absolute(other)) => (this - other).abs() < 0.009,
-            (SoC::Relative(this), SoC::Relative(other)) => (this - other).abs() < 0.009,
+            (SoC::Absolute(this), SoC::Absolute(other)) => (this - other).abs() < 0.01,
+            (SoC::Relative(this), SoC::Relative(other)) => (this - other).abs() < 0.01,
             (SoC::Unknown, SoC::Unknown) => true,
             _ => false,
         }
