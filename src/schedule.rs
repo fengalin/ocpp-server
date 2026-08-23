@@ -219,8 +219,8 @@ impl ChargingSchedulePeriodBuilderNoEnd {
 pub struct ChargingSchedulePeriodBuilder(ChargingSchedulePeriod);
 impl ChargingSchedulePeriodBuilder {
     #[allow(unused)]
-    pub fn limit(mut self, limit: f64) -> Self {
-        self.0.limit = limit;
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.0.limit = limit as f64;
         self
     }
 
@@ -231,10 +231,16 @@ impl ChargingSchedulePeriodBuilder {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ChargingPlan {
-    OffPeakToday,
-    OffPeakTomorrow,
-    // FIXME add power limit
-    ReachSocCapBefore { end_time: NaiveTime },
+    OffPeakToday {
+        power_limit: u32,
+    },
+    OffPeakTomorrow {
+        power_limit: u32,
+    },
+    ReachSocCapBefore {
+        end_time: NaiveTime,
+        power_limit: u32,
+    },
     NoLimit,
 }
 
@@ -243,13 +249,14 @@ impl ChargingPlan {
         // FIXME make off peak period configurable
         use ChargingPlan::*;
         match self {
-            OffPeakToday => Some(
+            OffPeakToday { power_limit } => Some(
                 ChargingSchedule::new()
                     .add_period(
                         ChargingSchedulePeriod::builder_starting_today(
                             NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
                         )
                         .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
+                        .limit(*power_limit)
                         .build(),
                     )
                     .add_period(
@@ -257,16 +264,18 @@ impl ChargingPlan {
                             NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
                         )
                         .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
+                        .limit(*power_limit)
                         .build(),
                     ),
             ),
-            OffPeakTomorrow => Some(
+            OffPeakTomorrow { power_limit } => Some(
                 ChargingSchedule::new()
                     .add_period(
                         ChargingSchedulePeriod::builder_starting_tomorrow(
                             NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
                         )
                         .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
+                        .limit(*power_limit)
                         .build(),
                     )
                     .add_period(
@@ -274,10 +283,14 @@ impl ChargingPlan {
                             NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
                         )
                         .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
+                        .limit(*power_limit)
                         .build(),
                     ),
             ),
-            ReachSocCapBefore { end_time } => {
+            ReachSocCapBefore {
+                end_time,
+                power_limit,
+            } => {
                 let Some(energy_to_add) = bms.energy_to_soc(bms.soc_cap()) else {
                     error!(
                         "couldn't compute energy to add for {} to {}",
@@ -287,13 +300,13 @@ impl ChargingPlan {
                     return None;
                 };
 
-                // FIXME use power limit from args
-                let available_power = DEFAULT_LIMIT - bms.constant_power_loss as f64;
+                let available_power =
+                    power_limit.saturating_sub(bms.constant_power_loss as u32) as f64;
                 // FIXME check in args
                 assert!(available_power > 0.0);
                 // FIXME would also need a ponderation in case of variations due to DPM
                 let duration_s = energy_to_add / available_power * 60.0 * 60.0;
-                let energy_needed = duration_s * DEFAULT_LIMIT / 60.0 / 60.0;
+                let energy_needed = duration_s * (*power_limit as f64) / 60.0 / 60.0;
                 // FIXME add extra duration as we get closer to 100% SoC
 
                 let now = Local::now();
@@ -530,7 +543,7 @@ mod tests {
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
         let period1_end = period1_start + period1_duration;
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -620,7 +633,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() - period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -682,7 +695,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(3);
         let period1_start = set_schedule_instant.time() - period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start_delta = TimeDelta::hours(6);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -739,7 +752,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start_delta = TimeDelta::hours(2);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -801,7 +814,7 @@ mod tests {
         let period1_start_delta = TimeDelta::hours(1);
         let period1_start = set_schedule_instant.time() + period1_start_delta;
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start_delta = TimeDelta::hours(2);
         let period2_start = set_schedule_instant.time() + period2_start_delta;
@@ -847,13 +860,113 @@ mod tests {
     }
 
     #[test]
+    pub fn reach_soc_before() {
+        use crate::SoC;
+
+        crate::tests::init();
+
+        const BATTERY_CAPACITY: u32 = 48_100;
+        const POWER_LIMIT: u32 = 7_400;
+        const CONST_POWER_LOSS: u16 = 400;
+        const INITIAL_SOC: f64 = 0.30;
+        const SOC_CAP: f64 = 0.60;
+        const ENERGY_TO_ADD: f64 = (SOC_CAP - INITIAL_SOC) * BATTERY_CAPACITY as f64;
+        const DURATION_S: u64 = (60.0 * 60.0 * ENERGY_TO_ADD
+            / (POWER_LIMIT - CONST_POWER_LOSS as u32) as f64)
+            .round() as u64;
+        const HOURS_NEEDED_CEIL: u64 = DURATION_S.div_ceil(60 * 60);
+
+        let now = Local::now();
+
+        let end_time_can_start_today = now + TimeDelta::hours(HOURS_NEEDED_CEIL as _);
+        let end_time_can_not_start_today = now + TimeDelta::hours((HOURS_NEEDED_CEIL - 2) as _);
+
+        // unknown initial SoC & SoC cap
+        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS).build();
+        let charging_schedule = ChargingPlan::ReachSocCapBefore {
+            end_time: end_time_can_start_today.time(),
+            power_limit: POWER_LIMIT,
+        }
+        .to_charging_schedule(&bms);
+        assert_eq!(None, charging_schedule);
+
+        // unknown initial SoC
+        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+            .soc_cap(SOC_CAP)
+            .build();
+        let charging_schedule = ChargingPlan::ReachSocCapBefore {
+            end_time: end_time_can_start_today.time(),
+            power_limit: POWER_LIMIT,
+        }
+        .to_charging_schedule(&bms);
+        assert_eq!(None, charging_schedule);
+
+        // unknown initial SoC cap
+        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+            .initial_soc(SoC::Absolute(INITIAL_SOC))
+            .build();
+        let charging_schedule = ChargingPlan::ReachSocCapBefore {
+            end_time: end_time_can_start_today.time(),
+            power_limit: POWER_LIMIT,
+        }
+        .to_charging_schedule(&bms);
+        assert_eq!(None, charging_schedule);
+
+        // known initial SoC, can start today
+        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+            .initial_soc(SoC::Absolute(INITIAL_SOC))
+            .soc_cap(SOC_CAP)
+            .build();
+        let charging_schedule = ChargingPlan::ReachSocCapBefore {
+            end_time: end_time_can_start_today.time(),
+            power_limit: POWER_LIMIT,
+        }
+        .to_charging_schedule(&bms)
+        .unwrap();
+        let mut ref_schedule = ChargingSchedule::new().add_period(
+            ChargingSchedulePeriod::builder(
+                end_time_can_start_today.naive_local() - TimeDelta::seconds(DURATION_S as _),
+            )
+            .duration(TimeDelta::seconds(DURATION_S as _))
+            .limit(POWER_LIMIT)
+            .build(),
+        );
+        ref_schedule.set_time = charging_schedule.set_time;
+        assert_eq!(ref_schedule, charging_schedule,);
+
+        // known initial SOC, can't start today
+        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+            .initial_soc(SoC::Absolute(INITIAL_SOC))
+            .soc_cap(SOC_CAP)
+            .build();
+        let charging_schedule = ChargingPlan::ReachSocCapBefore {
+            end_time: end_time_can_not_start_today.time(),
+            power_limit: POWER_LIMIT,
+        }
+        .to_charging_schedule(&bms)
+        .unwrap();
+        let mut ref_schedule = ChargingSchedule::new().add_period(
+            ChargingSchedulePeriod::builder(
+                // needs to start tomorrow
+                (end_time_can_not_start_today + TimeDelta::days(1)).naive_local()
+                    - TimeDelta::seconds(DURATION_S as _),
+            )
+            .duration(TimeDelta::seconds(DURATION_S as _))
+            .limit(POWER_LIMIT)
+            .build(),
+        );
+        ref_schedule.set_time = charging_schedule.set_time;
+        assert_eq!(ref_schedule, charging_schedule,);
+    }
+
+    #[test]
     #[ignore = "backup the database before running this test"]
     fn persist_charging_schedule() {
         crate::tests::init();
 
         let period1_start = NaiveTime::from_hms_opt(1, 28, 00).unwrap();
         let period1_duration = TimeDelta::hours(2);
-        let period1_limit = 5_000.0;
+        let period1_limit = 5_000;
 
         let period2_start = NaiveTime::from_hms_opt(13, 58, 00).unwrap();
         let period2_duration = TimeDelta::minutes(30);
