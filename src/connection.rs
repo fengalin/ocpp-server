@@ -58,6 +58,7 @@ pub struct Connection {
     ws_stream: WebSocketStream<TcpStream>,
     connector_id: Option<u32>,
     bms: Bms,
+    last_known_tid: i32,
     energy_tracker: EnergyTracker,
     last_known_stop_energy: Option<u64>,
     last_meter_values: Option<MeterValueSelection>,
@@ -83,6 +84,7 @@ impl Connection {
             ws_stream,
             connector_id: None,
             bms,
+            last_known_tid: 0,
             last_known_stop_energy: None,
             energy_tracker: Default::default(),
             last_meter_values: None,
@@ -95,16 +97,17 @@ impl Connection {
             charging_schedule: None,
         };
 
-        if let Some(ref cs) = last_charging_session
-            && cs.is_complete()
-        {
-            // FIXME rely on the BMS
-            this.last_known_stop_energy = Some(cs.last_energy());
-        } else {
-            // FIXME is last_charging_session is some (and not complete)
-            // init last_known_stop_energy with the energy of the first snapshot
-            // or the initial_energy
-            this.charging_session = last_charging_session;
+        if let Some(ref cs) = last_charging_session {
+            this.last_known_tid = cs.transaction_id();
+
+            if cs.is_complete() {
+                this.last_known_stop_energy = Some(cs.last_energy());
+            } else {
+                let first_snapshot = cs.first_snapshot().expect("at least one");
+                this.last_known_stop_energy = Some(first_snapshot.energy);
+
+                this.charging_session = last_charging_session;
+            }
         }
 
         if let Some(schedule) = last_charging_schedule.take()
@@ -396,12 +399,13 @@ impl Connection {
                     );
                 }
 
+                let transaction_id = self.get_next_transaction_id();
                 let cs = ChargingSession::new(
                     self.bms.clone(),
                     action.timestamp.inner(),
+                    transaction_id,
                     action.meter_start,
                 );
-                let transaction_id = cs.transaction_id();
                 info!(
                     "## starting transaction with id: {transaction_id}, timestamp: {}, meter start: {}",
                     action.timestamp.inner().with_timezone(&chrono::Local),
@@ -457,11 +461,12 @@ impl Connection {
                         action.meter_stop,
                         action.reason
                     );
+                    self.have_transaction_id(action.transaction_id);
                     ChargingSession::save_missing_stopped_session(
                         Some(action.timestamp.inner()),
                         action.reason,
                         action.meter_stop,
-                        Some(action.transaction_id),
+                        action.transaction_id,
                     );
                 }
 
@@ -586,6 +591,7 @@ impl Connection {
                     "## adding new charging session for {transaction_id}, \
                     increasing start energy: {start_energy}"
                 );
+                self.have_transaction_id(transaction_id);
                 self.charging_session = Some(ChargingSession::with_state(
                     bms,
                     transaction_id,
@@ -631,6 +637,7 @@ impl Connection {
                     "## adding new charging session for {transaction_id}, \
                     stationnary start energy: {energy}"
                 );
+                self.have_transaction_id(transaction_id);
                 self.charging_session = Some(ChargingSession::with_state(
                     self.bms.clone(),
                     transaction_id,
@@ -642,6 +649,17 @@ impl Connection {
             Probation(_) => info!(">> MeterValue with energy set to probation"),
             Unknown => unreachable!("energy added"),
         }
+    }
+
+    fn have_transaction_id(&mut self, transaction_id: i32) {
+        if self.last_known_tid < transaction_id {
+            self.last_known_tid = transaction_id;
+        }
+    }
+
+    fn get_next_transaction_id(&mut self) -> i32 {
+        self.last_known_tid += 1;
+        self.last_known_tid
     }
 
     fn prepare_response<A: Response + std::fmt::Debug>(

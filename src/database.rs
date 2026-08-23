@@ -85,7 +85,7 @@ impl<'a> Database<'a> {
     ) -> anyhow::Result<Option<ChargingSession>> {
         let Some((session_id, state, transaction_id)) = self
             .0
-            .query_row::<(i32, String, Option<i32>), _, _>(
+            .query_row::<(i32, String, i32), _, _>(
                 "SELECT id, state, transaction_id FROM charging_session
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='charging_session'
@@ -167,7 +167,7 @@ impl<'a> Database<'a> {
     pub fn add_new_charging_session(
         &self,
         state: ChargingSessionState,
-        transaction_id: Option<i32>,
+        transaction_id: i32,
     ) -> i32 {
         self.0
             .query_one::<i32, _, _>(
@@ -177,7 +177,7 @@ impl<'a> Database<'a> {
                     RETURNING id;",
                 named_params![
                     ":state": state.to_string(),
-                    ":transaction_id": transaction_id.map(|tid| tid as i64),
+                    ":transaction_id": transaction_id as i64,
                 ],
                 |row| row.get(0),
             )
