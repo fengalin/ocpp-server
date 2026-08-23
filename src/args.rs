@@ -11,6 +11,9 @@ pub struct Args {
     #[clap(long, help = "battery capacity (Wh)", default_value_t = 48_100)]
     pub battery_capacity: u32,
 
+    #[clap(long, help = "charging plan power limit (W)", default_value_t = 7_400)]
+    pub power_limit: u32,
+
     #[clap(
         long,
         help = "Constant power lost while charging (W)",
@@ -116,8 +119,12 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
         };
 
         match charging_plan {
-            ChargingPlan::OffPeakToday => Ok(Some(crate::ChargingPlan::OffPeakToday)),
-            ChargingPlan::OffPeakTomorrow => Ok(Some(crate::ChargingPlan::OffPeakTomorrow)),
+            ChargingPlan::OffPeakToday => Ok(Some(crate::ChargingPlan::OffPeakToday {
+                power_limit: args.power_limit,
+            })),
+            ChargingPlan::OffPeakTomorrow => Ok(Some(crate::ChargingPlan::OffPeakTomorrow {
+                power_limit: args.power_limit,
+            })),
             ChargingPlan::ReachSocCapBefore => {
                 let mut err_msg = String::new();
                 if args.soc_cap.is_none() {
@@ -129,6 +136,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                             if err_msg.is_empty() {
                                 return Ok(Some(crate::ChargingPlan::ReachSocCapBefore {
                                     end_time,
+                                    power_limit: args.power_limit,
                                 }));
                             }
                         }
