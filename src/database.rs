@@ -11,10 +11,19 @@ use crate::{
     ChargingSessionSnapshot, ChargingSessionState, bms::SoC,
 };
 
-const SQLITE_PATH: &str = "./charging_sessions.sqlite";
 static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
-    let existed = fs::exists(SQLITE_PATH).expect("valid path");
-    let db = Connection::open(SQLITE_PATH).expect("be able to create the db");
+    let database_path = cfg_select! {
+        test => std::path::PathBuf::from("charging_sessions.sqlite"),
+        _ => {{
+            let proj_dirs = directories::ProjectDirs::from("org", "fengalin", env!("CARGO_PKG_NAME"))
+                .unwrap();
+            let db_dir = proj_dirs.data_dir();
+            fs::DirBuilder::new().recursive(true).create(db_dir).expect("write access to data dir");
+            db_dir.join("charging_sessions.sqlite")
+        }}
+    };
+    let existed = fs::exists(database_path.as_path()).expect("valid path");
+    let db = Connection::open(database_path).expect("be able to create the db");
 
     if !existed {
         db.execute_batch("
