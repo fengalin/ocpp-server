@@ -960,7 +960,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "backup the database before running this test"]
     fn persist_charging_schedule() {
         crate::tests::init();
 

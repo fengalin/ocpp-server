@@ -556,7 +556,6 @@ mod tests {
     const MAX_ADDED_ENERGY_FIRST_PERIOD: u64 = 25;
 
     #[test]
-    #[ignore = "backup the database before running this test"]
     fn charging_session() {
         crate::tests::init();
 
