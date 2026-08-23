@@ -382,13 +382,14 @@ impl Connection {
                     && !cs.state().is_complete()
                 {
                     warn!(
-                        "## new session ending previous session with id: {}, state: {}",
+                        "## new session start ending previous session with id: {}, tid {}, state: {}",
                         cs.session_id(),
+                        cs.transaction_id(),
                         cs.state(),
                     );
                     cs.stop(
                         Utc::now(),
-                        0,
+                        cs.last_energy(),
                         ChargingSessionState::Error(
                             "Got start transaction while session was still active".to_string(),
                         ),
@@ -400,10 +401,9 @@ impl Connection {
                     action.timestamp.inner(),
                     action.meter_start,
                 );
-                let transaction_id = cs.session_id();
+                let transaction_id = cs.transaction_id();
                 info!(
-                    "## starting transaction with id: {}, timestamp: {}, meter start: {}",
-                    transaction_id,
+                    "## starting transaction with id: {transaction_id}, timestamp: {}, meter start: {}",
                     action.timestamp.inner().with_timezone(&chrono::Local),
                     action.meter_start,
                 );
@@ -423,8 +423,8 @@ impl Connection {
             }
             Action::StopTransaction(action) => {
                 if let Some(mut cs) = self.charging_session.take() {
-                    let cur_session_id = cs.session_id();
-                    if cur_session_id == action.transaction_id {
+                    let cur_transaction_id = cs.transaction_id();
+                    if cur_transaction_id == action.transaction_id {
                         info!(
                             "## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
                             action.transaction_id,
@@ -435,7 +435,7 @@ impl Connection {
                         cs.stop(action.timestamp.inner(), action.meter_stop, action.reason)
                     } else {
                         warn!(
-                            "## transaction with id: {} stopped (expected {cur_session_id}), timestamp: {}, meter stop: {}, reason: {:?}",
+                            "## transaction with id: {} stopped (expected {cur_transaction_id}), timestamp: {}, meter stop: {}, reason: {:?}",
                             action.transaction_id,
                             action.timestamp.inner().with_timezone(&chrono::Local),
                             action.meter_stop,
