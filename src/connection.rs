@@ -71,17 +71,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    // fn prepare_first_actions(&mut self, _connector_id: u32) {
-    // self.call_queue
-    //     .push_back(Action::ChangeConfiguration(call::ChangeConfiguration {
-    //         key: "CS_URL".to_string(),
-    //         value: "ws://192.168.1.16:9000".to_string(),
-    //     }));
-    // self.call_queue.push_back(Action::Reset(call::Reset {
-    //     reset_type: ResetType::Soft,
-    // }));
-    // }
-
     pub fn new(
         ws_stream: WebSocketStream<TcpStream>,
         bms: Bms,
@@ -137,13 +126,28 @@ impl Connection {
                 let cs = this.charging_session.as_ref().expect("checked by caller");
                 this.call_queue.push_back(Action::RemoteStopTransaction(
                     call::RemoteStopTransaction {
-                        // FIXME use transaction id & fallback to session_id
-                        // if not defined
-                        transaction_id: cs.session_id(),
+                        transaction_id: cs.transaction_id(),
                     },
                 ));
             }
-            Reset => {
+            Reboot => {
+                // After a reset, the EVSE starts the last chaging plan that
+                // was set, regardless of the moment it was supposed to start.
+                // Set a 0 W permanent limit to make sure we don't start
+                // charging unexpectedly.
+                this.push_charging_schedule(ChargingSchedule::new());
+
+                this.call_queue.push_back(Action::Reset(call::Reset {
+                    reset_type: ResetType::Soft,
+                }));
+            }
+            SetServerIp(ip_address) => {
+                let server_ip = ip_address.get_ip_address().expect("checked by caller");
+                this.call_queue
+                    .push_back(Action::ChangeConfiguration(call::ChangeConfiguration {
+                        key: "CS_URL".to_string(),
+                        value: format!("ws://{server_ip}:9000"),
+                    }));
                 // After a reset, the EVSE starts the last chaging plan that
                 // was set, regardless of the moment it was supposed to start.
                 // Set a 0 W permanent limit to make sure we don't start
@@ -685,6 +689,13 @@ impl Connection {
                     if let Some(mut schedule) = self.charging_schedule.take() {
                         schedule.inactivate();
                     }
+                }
+            }
+            Ok(TypedCallResult::Reset(result)) => {
+                if result.payload.status == v16::enums::ResetStatus::Accepted {
+                    info!(">> reset accepted");
+                } else {
+                    error!(">> reset rejected");
                 }
             }
             Ok(TypedCallResult::ChangeAvailability(result)) => {

@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
 mod args;
-use args::Args;
+use args::{Args, Command};
 
 mod bms;
 use bms::{Bms, SoC, SoCProgress};
@@ -30,6 +30,7 @@ pub mod tests;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    args.check()?;
 
     env_logger::builder()
         .format_source_path(true)
@@ -99,13 +100,27 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bindind to {addr}"))?;
     info!("Listening on: {addr}");
 
-    if args.is_dry_run() {
-        warn!("Quitting now!\nUse the 'run' command to actually run the server");
-        return Ok(());
-    }
-
-    if args.is_reset() {
-        warn!("Resetting... this will cancel any charging plan (limit will be set to 0 W)");
+    match &args.command {
+        None => {
+            warn!("Quitting now!\nUse the 'run' command to actually run the server");
+            return Ok(());
+        }
+        Some(Command::Run) => {
+            info!("starting the server");
+        }
+        Some(Command::Reboot) => {
+            warn!("/!\\ Rebooting");
+            warn!("any charging plans will be replaced by a permanent 0 W plan");
+        }
+        Some(Command::SetServerIp(ip_address)) => {
+            let server_ip = ip_address
+                .get_ip_address()
+                .context("set-server-ip command")?;
+            warn!("Setting server IP address: {server_ip}");
+            warn!("/!\\ the charging point will Reboot");
+            warn!("any charging plans will be replaced by a permanent 0 W plan");
+        }
+        _ => (),
     }
 
     let accept_stream = listener.accept().fuse();
