@@ -77,10 +77,10 @@ pub struct ChargingSession {
 }
 
 impl ChargingSession {
-    pub fn new(mut bms: Bms, timestamp: DateTime<Utc>, energy: u64) -> Self {
+    pub fn new(mut bms: Bms, timestamp: DateTime<Utc>, tid: i32, energy: u64) -> Self {
         let db = Database::get();
 
-        let session_id = db.add_new_charging_session(ChargingSessionState::Active, None);
+        let session_id = db.add_new_charging_session(ChargingSessionState::Active, tid);
 
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(energy as f64);
@@ -88,7 +88,7 @@ impl ChargingSession {
 
         let mut this = ChargingSession {
             session_id,
-            transaction_id: session_id,
+            transaction_id: tid,
             bms,
             snapshots: vec![],
             state: ChargingSessionState::Active,
@@ -117,7 +117,7 @@ impl ChargingSession {
         let db = Database::get();
 
         let state = state.into();
-        let session_id = db.add_new_charging_session(state.clone(), Some(transaction_id));
+        let session_id = db.add_new_charging_session(state.clone(), transaction_id);
 
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(start_energy as f64);
@@ -152,7 +152,7 @@ impl ChargingSession {
         timestamp: Option<DateTime<Utc>>,
         reason: impl Into<ChargingSessionState>,
         stop_energy: u64,
-        transaction_id: Option<i32>,
+        transaction_id: i32,
     ) {
         let db = Database::get();
 
@@ -167,12 +167,12 @@ impl ChargingSession {
     pub fn from_database(
         bms: Bms,
         session_id: i32,
-        transaction_id: Option<i32>,
+        transaction_id: i32,
         state: ChargingSessionState,
     ) -> Self {
         ChargingSession {
             session_id,
-            transaction_id: transaction_id.unwrap_or(session_id),
+            transaction_id,
             bms,
             snapshots: vec![],
             state,
@@ -373,6 +373,10 @@ impl ChargingSession {
         let reason = reason.into();
         db.stop_charging_session(self.session_id, &reason);
         self.state = reason;
+    }
+
+    pub fn first_snapshot(&self) -> Option<&ChargingSessionSnapshot> {
+        self.snapshots.first()
     }
 
     pub fn last_snapshot(&self) -> Option<&ChargingSessionSnapshot> {
@@ -576,7 +580,9 @@ mod tests {
             .initial_soc(SoC::Absolute(initial_soc))
             .soc_cap(soc_cap)
             .build();
-        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        let tid = 10;
+        let mut cs = ChargingSession::new(bms, start_time, tid, INITIAL_ENERGY);
+        assert_eq!(tid, cs.transaction_id());
         assert_eq!(initial_soc, cs.bms().initial_soc.absolute().unwrap());
         assert_eq!(Some(soc_cap), cs.bms().soc_cap);
         let last_snapshot = cs.last_snapshot().unwrap();
@@ -676,7 +682,9 @@ mod tests {
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .soc_cap(soc_cap)
             .build();
-        let mut cs = ChargingSession::new(bms.clone(), start_time, INITIAL_ENERGY);
+        let tid = 11;
+        let mut cs = ChargingSession::new(bms.clone(), start_time, tid, INITIAL_ENERGY);
+        assert_eq!(tid, cs.transaction_id());
         assert_eq!(SoC::Unknown, cs.bms().initial_soc);
         assert_eq!(Some(soc_cap), cs.bms().soc_cap);
         assert!(cs.last_snapshot().unwrap().is_reference);
@@ -754,7 +762,9 @@ mod tests {
         let start_time = Utc::now();
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS).build();
-        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        let tid = 14;
+        let mut cs = ChargingSession::new(bms, start_time, tid, INITIAL_ENERGY);
+        assert_eq!(tid, cs.transaction_id());
         assert_eq!(SoC::Unknown, cs.bms().initial_soc);
         assert!(cs.bms().soc_cap.is_none());
         assert!(cs.last_snapshot().unwrap().is_reference);
@@ -818,7 +828,9 @@ mod tests {
             .initial_soc(SoC::Absolute(initial_soc))
             .soc_cap(soc_cap)
             .build();
-        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        let tid = 15;
+        let mut cs = ChargingSession::new(bms, start_time, tid, INITIAL_ENERGY);
+        assert_eq!(tid, cs.transaction_id());
         assert!(cs.last_snapshot().unwrap().is_reference);
 
         let _ = cs.add_snapshot(
@@ -916,7 +928,9 @@ mod tests {
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .soc_cap(soc_cap)
             .build();
-        let mut cs = ChargingSession::new(bms, start_time, INITIAL_ENERGY);
+        let tid = 16;
+        let mut cs = ChargingSession::new(bms, start_time, tid, INITIAL_ENERGY);
+        assert_eq!(tid, cs.transaction_id());
         assert!(cs.last_snapshot().unwrap().is_reference);
 
         let _ = cs.add_snapshot(
@@ -1058,7 +1072,7 @@ mod tests {
 
         let current_time = Utc::now();
         let last_known_energy = INITIAL_ENERGY;
-        let tid = 1;
+        let tid = 12;
         let mut cs = ChargingSession::with_state(
             bms.clone(),
             tid,
@@ -1066,8 +1080,8 @@ mod tests {
             last_known_energy,
             current_time,
         );
-        assert_eq!(cs.state, ChargingSessionState::Unknown);
-        assert_eq!(cs.transaction_id, tid);
+        assert_eq!(tid, cs.transaction_id());
+        assert_eq!(ChargingSessionState::Unknown, cs.state);
 
         let last_snapshot = cs.last_snapshot().unwrap();
         assert!(last_snapshot.is_reference);
@@ -1125,7 +1139,7 @@ mod tests {
 
         let current_time = Utc::now();
         let current_energy = INITIAL_ENERGY;
-        let tid = 1;
+        let tid = 13;
         let mut cs = ChargingSession::with_state(
             bms.clone(),
             tid,
@@ -1134,7 +1148,7 @@ mod tests {
             current_time,
         );
         assert_eq!(cs.state, ChargingSessionState::SuspendedByEvse);
-        assert_eq!(cs.transaction_id, tid);
+        assert_eq!(tid, cs.transaction_id());
 
         let last_snapshot = cs.last_snapshot().unwrap();
         assert!(last_snapshot.is_reference);
