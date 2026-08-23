@@ -1,5 +1,6 @@
-use anyhow::bail;
+use anyhow::{Context, bail};
 use chrono::NaiveTime;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, clap::Parser)]
 #[command(version, about = "Runs an OCPP server")]
@@ -46,25 +47,46 @@ pub struct Args {
     pub command: Option<Command>,
 }
 
-#[derive(clap::Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
+impl Args {
+    /// Check Args consistency
+    pub fn check(&self) -> anyhow::Result<()> {
+        use Command::*;
+        match &self.command {
+            None | Some(Run) | Some(StopSession) | Some(Reboot) => (),
+            Some(SetServerIp(cmd_args)) => {
+                let _ = cmd_args
+                    .get_ip_address()
+                    .context("checking set-server-ip command")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(clap::Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     #[clap(about = "Run the server")]
     Run,
     #[clap(about = "Stop the active session")]
     StopSession,
-    #[clap(about = "Reset the EVSE once connected")]
-    Reset,
+    #[clap(about = "Reboot the EVSE once connected. This will \
+        replace any charging schedule with a permanent 0 W limit")]
+    Reboot,
+    #[clap(about = "Change the server IP, this will also reboot and \
+        replace any charging schedule with a permanent 0 W limit")]
+    SetServerIp(ServerIp),
 }
 
 impl Command {
-    pub fn is_run(self) -> bool {
-        self == Command::Run
+    pub fn is_run(&self) -> bool {
+        matches!(self, Command::Run)
     }
-    pub fn is_stop_session(self) -> bool {
-        self == Command::StopSession
+    pub fn is_stop_session(&self) -> bool {
+        matches!(self, Command::StopSession)
     }
-    pub fn is_reset(self) -> bool {
-        self == Command::Reset
+    pub fn is_reboot(&self) -> bool {
+        matches!(self, Command::Reboot)
     }
 }
 
@@ -73,13 +95,13 @@ impl Args {
         self.command.is_none()
     }
     pub fn is_run(&self) -> bool {
-        self.command.is_some_and(|c| c.is_run())
+        self.command.as_ref().is_some_and(|c| c.is_run())
     }
     pub fn is_stop_session(&self) -> bool {
-        self.command.is_some_and(|c| c.is_stop_session())
+        self.command.as_ref().is_some_and(|c| c.is_stop_session())
     }
-    pub fn is_reset(&self) -> bool {
-        self.command.is_some_and(|c| c.is_reset())
+    pub fn is_reboot(&self) -> bool {
+        self.command.as_ref().is_some_and(|c| c.is_reboot())
     }
 }
 
@@ -159,5 +181,25 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
             }
             ChargingPlan::NoLimit => Ok(Some(crate::ChargingPlan::NoLimit)),
         }
+    }
+}
+
+#[derive(clap::Parser, Clone, Debug, Default, PartialEq, Eq)]
+#[clap(about = "server IP address")]
+pub struct ServerIp {
+    #[clap(
+        long,
+        help = "server IP address (used by command set-server-ip)",
+        default_value = "192.168.1.49"
+    )]
+    pub ip_address: String,
+}
+
+impl ServerIp {
+    // FIXME use proper error type
+    pub fn get_ip_address(&self) -> anyhow::Result<Ipv4Addr> {
+        self.ip_address
+            .parse::<Ipv4Addr>()
+            .context("server IP address")
     }
 }
