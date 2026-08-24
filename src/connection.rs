@@ -62,7 +62,9 @@ pub struct Connection {
     energy_tracker: EnergyTracker,
     last_known_stop_energy: Option<u64>,
     last_meter_values: Option<MeterValueSelection>,
+    last_meter_voltage_l1: Option<u64>,
     last_dpm: Option<DpmSelection>,
+    last_dpm_voltage_l1: Option<u64>,
     send_action_id: usize,
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
@@ -88,7 +90,9 @@ impl Connection {
             last_known_stop_energy: None,
             energy_tracker: Default::default(),
             last_meter_values: None,
+            last_meter_voltage_l1: None,
             last_dpm: None,
+            last_dpm_voltage_l1: None,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
@@ -350,12 +354,23 @@ impl Connection {
                     info!(">> MeterValues {meter_val_selection:?}");
                 }
 
-                if let Some(mv) = meter_val_selection.pop() {
-                    if self
-                        .last_meter_values
-                        .as_ref()
-                        .is_some_and(|last_mv| *last_mv != mv)
-                        || self.last_meter_values.is_none()
+                if let Some(mut mv) = meter_val_selection.pop() {
+                    // The charging point can end periodic consecutive meter values:
+                    // * one without active power import nor transaction id
+                    //   but with L1 voltage
+                    // * then one with all selected values but L1 voltage
+                    if mv.voltage_l1.is_none() {
+                        mv.voltage_l1 = self.last_meter_voltage_l1.take();
+                    } else {
+                        self.last_meter_voltage_l1 = mv.voltage_l1;
+                    }
+
+                    if self.last_meter_values.is_none()
+                        || (mv.active_power_import.is_some()
+                            && self
+                                .last_meter_values
+                                .as_ref()
+                                .is_some_and(|last_mv| *last_mv != mv))
                     {
                         info!(">> MeterValues {mv}");
                         self.last_meter_values = Some(mv.clone());
@@ -381,11 +396,23 @@ impl Connection {
                     }
 
                     if let Some(dpm_data) = dpm_data_set.pop() {
-                        let dpm_data = DpmSelection::from(dpm_data);
-                        if self
-                            .last_dpm
-                            .as_ref()
-                            .is_some_and(|last_dpm| *last_dpm != dpm_data)
+                        let mut dpm_data = DpmSelection::from(dpm_data);
+
+                        // The charging point can end periodic consecutive DPM data:
+                        // * one without active power import nor transaction id
+                        //   but with L1 voltage
+                        // * then one with all selected values but L1 voltage
+                        if dpm_data.voltage_l1.is_none() {
+                            dpm_data.voltage_l1 = self.last_dpm_voltage_l1.take();
+                        } else {
+                            self.last_dpm_voltage_l1 = dpm_data.voltage_l1;
+                        }
+
+                        if dpm_data.active_power_import.is_some()
+                            && self
+                                .last_dpm
+                                .as_ref()
+                                .is_some_and(|last_dpm| *last_dpm != dpm_data)
                             || self.last_dpm.is_none()
                         {
                             info!(">> DPM data {dpm_data}");

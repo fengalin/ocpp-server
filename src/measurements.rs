@@ -2,6 +2,21 @@ use chrono::{DateTime, Local, Utc};
 use ocpp_rs::v16::{data_types as v16_data_types, enums as v16_enums};
 use std::{cmp, fmt};
 
+/// Voltage floor step from which to report a difference when computing Eq
+const VOLTAGE_DIFF_STEP: u64 = 3;
+/// Voltage offset to add when computing Eq, so the steps are centered around 230 V
+const VOLTAGE_DIFF_OFFSET: u64 = 2;
+
+/// DPM energy rounding step from which to report a difference when computing Eq
+const DPM_ENERGY_DIFF_STEP: u64 = 1_000;
+/// DPM power rounding step from which to report a difference when computing Eq
+const DPM_POWER_DIFF_STEP: u64 = 500;
+
+fn voltage_eq(lhs: u64, rhs: u64) -> bool {
+    ((lhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
+        == ((rhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MeterValueSelection {
     pub timestamp: DateTime<Utc>,
@@ -60,8 +75,7 @@ impl cmp::PartialEq for MeterValueSelection {
     fn eq(&self, other: &Self) -> bool {
         self.active_energy_import == other.active_energy_import
             && self.active_power_import == other.active_power_import
-            && Option::zip(self.voltage_l1, other.voltage_l1)
-                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 3)
+            && Option::zip(self.voltage_l1, other.voltage_l1).is_none_or(|(s, o)| voltage_eq(s, o))
             && self.temperature == other.temperature
     }
 }
@@ -100,15 +114,24 @@ impl From<Dpm> for DpmSelection {
     }
 }
 
+fn dpm_energy_eq(lhs: u64, rhs: u64) -> bool {
+    ((lhs + DPM_ENERGY_DIFF_STEP / 2) / DPM_ENERGY_DIFF_STEP)
+        == ((rhs + DPM_ENERGY_DIFF_STEP / 2) / DPM_ENERGY_DIFF_STEP)
+}
+
+fn dpm_power_eq(lhs: u64, rhs: u64) -> bool {
+    ((lhs + DPM_POWER_DIFF_STEP / 2) / DPM_POWER_DIFF_STEP)
+        == ((rhs + DPM_POWER_DIFF_STEP / 2) / DPM_POWER_DIFF_STEP)
+}
+
 impl cmp::PartialEq for DpmSelection {
     #[allow(clippy::eq_op)]
     fn eq(&self, other: &Self) -> bool {
         Option::zip(self.active_energy_import, other.active_energy_import)
-            .is_none_or(|(s, o)| u64::abs_diff(s, o) < 1_000)
+            .is_none_or(|(s, o)| dpm_energy_eq(s, o))
             && Option::zip(self.active_power_import, other.active_power_import)
-                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 750)
-            && Option::zip(self.voltage_l1, other.voltage_l1)
-                .is_none_or(|(s, o)| u64::abs_diff(s, o) < 3)
+                .is_none_or(|(s, o)| dpm_power_eq(s, o))
+            && Option::zip(self.voltage_l1, other.voltage_l1).is_none_or(|(s, o)| voltage_eq(s, o))
     }
 }
 
@@ -247,6 +270,119 @@ mod tests {
                     transaction_id: None,
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn measure_eq() {
+        assert!(dpm_energy_eq(10, 490));
+        assert!(dpm_energy_eq(510, 990));
+        assert!(dpm_energy_eq(510, 1_040));
+        assert!(!dpm_energy_eq(490, 510));
+        assert!(!dpm_energy_eq(510, 1_510));
+
+        assert!(dpm_power_eq(10, 240));
+        assert!(dpm_power_eq(250, 490));
+        assert!(dpm_power_eq(500, 740));
+        assert!(!dpm_power_eq(240, 490));
+        assert!(!dpm_power_eq(500, 760));
+
+        assert!(voltage_eq(229, 230));
+        assert!(voltage_eq(231, 230));
+        assert!(!voltage_eq(228, 230));
+        assert!(!voltage_eq(229, 232));
+        assert!(!voltage_eq(230, 232));
+    }
+
+    #[test]
+    fn dpm_selection_eq() {
+        // Eq
+        assert_eq!(
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_500),
+                active_power_import: Some(240),
+                voltage_l1: None,
+                transaction_id: Some(1),
+            },
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_550),
+                active_power_import: Some(50),
+                voltage_l1: None,
+                transaction_id: None,
+            },
+        );
+
+        assert_eq!(
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_500),
+                active_power_import: Some(510),
+                voltage_l1: Some(229),
+                transaction_id: Some(1),
+            },
+            DpmSelection {
+                timestamp: None,
+                active_energy_import: Some(1_990),
+                active_power_import: Some(740),
+                voltage_l1: Some(230),
+                transaction_id: None,
+            },
+        );
+
+        // !Eq energy
+        assert_ne!(
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_500),
+                active_power_import: Some(730),
+                voltage_l1: Some(230),
+                transaction_id: Some(1),
+            },
+            DpmSelection {
+                timestamp: None,
+                active_energy_import: Some(2_500),
+                active_power_import: Some(730),
+                voltage_l1: Some(230),
+                transaction_id: Some(1),
+            },
+        );
+
+        // !Eq power
+        assert_ne!(
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_500),
+                active_power_import: Some(740),
+                voltage_l1: Some(229),
+                transaction_id: Some(1),
+            },
+            DpmSelection {
+                timestamp: None,
+                active_energy_import: Some(1_500),
+                active_power_import: Some(760),
+                voltage_l1: Some(229),
+                transaction_id: Some(1),
+            },
+        );
+
+        // !Eq voltage
+        assert_ne!(
+            DpmSelection {
+                timestamp: Some(Utc::now()),
+                active_energy_import: Some(1_500),
+                active_power_import: Some(730),
+                voltage_l1: Some(230),
+                transaction_id: Some(1),
+            },
+            DpmSelection {
+                timestamp: None,
+                active_energy_import: Some(1_500),
+                active_power_import: Some(730),
+                voltage_l1: Some(228),
+                transaction_id: Some(1),
+            },
         );
     }
 }
