@@ -263,7 +263,7 @@ impl<'a> Database<'a> {
         };
     }
 
-    pub fn get_last_charging_schedule(&self) -> anyhow::Result<Option<ChargingSchedule>> {
+    pub fn get_active_charging_schedule(&self) -> anyhow::Result<Option<ChargingSchedule>> {
         let Some((schedule_id, set_time, state)) = self
             .0
             .query_row::<(i32, DateTime<Utc>, i32), _, _>(
@@ -285,6 +285,18 @@ impl<'a> Database<'a> {
             return Ok(None);
         };
 
+        let state = ChargingScheduleState::from(state);
+        if !state.is_active() {
+            return Ok(None);
+        }
+
+        let mut schedule = ChargingSchedule {
+            id: schedule_id,
+            set_time,
+            state,
+            ..Default::default()
+        };
+
         let mut stmt = self
             .0
             .prepare(
@@ -298,7 +310,6 @@ impl<'a> Database<'a> {
             .query([schedule_id])
             .context("getting last charging schedule periods")?;
 
-        let mut schedule = None;
         while let Some(row) = rows
             .next()
             .context("getting last charging schedule period row")?
@@ -306,13 +317,6 @@ impl<'a> Database<'a> {
             let start = row.get_unwrap::<_, DateTime<Utc>>("start");
             let end = row.get_unwrap::<_, DateTime<Utc>>("end");
             let power_limit = row.get_unwrap::<_, f64>("power_limit");
-
-            let schedule = schedule.get_or_insert_with(|| ChargingSchedule {
-                id: schedule_id,
-                set_time,
-                state: state.into(),
-                ..Default::default()
-            });
 
             schedule.periods.insert(
                 start.naive_utc(),
@@ -324,7 +328,7 @@ impl<'a> Database<'a> {
             );
         }
 
-        Ok(schedule)
+        Ok(Some(schedule))
     }
 
     pub fn add_new_charging_schedule(&self, schedule: &ChargingSchedule) -> i32 {

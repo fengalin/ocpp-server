@@ -71,26 +71,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        match db.get_last_charging_schedule() {
+        match db.get_active_charging_schedule() {
             Ok(Some(schedule)) => {
-                info!("last known schedule:\n\t{schedule}");
+                info!("active charging schedule:\n\t{schedule}");
             }
             Ok(None) => {
-                info!("no known charging schedule");
+                info!("no active charging schedule");
             }
             Err(err) => {
-                bail!("failed to query last charging schedule: {err}");
+                bail!("failed to query active charging schedule: {err}");
             }
         }
     }
 
     let charging_plan = Option::<ChargingPlan>::try_from(&args)
         .inspect(|cp| {
-            if args.is_dry_run() {
-                info!("Charging plan: {cp:?}");
-                if let Some(cp) = cp {
-                    let _ = cp.to_charging_schedule(&bms);
-                }
+            if args.is_dry_run()
+                && let Some(cp) = cp
+            {
+                info!("Selected charging plan: {cp:?}");
+                let _ = cp.to_charging_schedule(&bms);
             }
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
                 (
                     db.get_last_charging_session(&bms)
                         .context("getting last charging session")?,
-                    db.get_last_charging_schedule()
+                    db.get_active_charging_schedule()
                         .context("getting last charging schedule")?,
                 )
             };

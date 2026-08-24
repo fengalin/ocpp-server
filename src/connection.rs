@@ -119,10 +119,12 @@ impl Connection {
         use args::Command::*;
         match command {
             Run => {
-                if let Some(charging_plan) = charging_plan
-                    && let Some(charging_schedule) = charging_plan.to_charging_schedule(&this.bms)
-                {
-                    this.push_charging_schedule(charging_schedule);
+                if let Some(charging_plan) = charging_plan {
+                    info!("using charging plan {charging_plan:?}");
+
+                    if let Some(charging_schedule) = charging_plan.to_charging_schedule(&this.bms) {
+                        this.push_charging_schedule(charging_schedule);
+                    }
                 }
             }
             StopSession => {
@@ -195,10 +197,26 @@ impl Connection {
             return Ok(());
         };
         match msg {
-            Message::Call(call) => self
-                .handle_incoming_call(call)
-                .await
-                .context("incoming call")?,
+            Message::Call(call) => {
+                self.handle_incoming_call(call)
+                    .await
+                    .context("incoming call")?;
+
+                if let Some(pending_response) = self.pending_response.take() {
+                    trace!("<< sending response {pending_response:?}");
+                    match parse::serialize_message(&pending_response) {
+                        Ok(response) => {
+                            self.ws_stream
+                                .send(ts::Message::Text(response.into()))
+                                .await
+                                .context("sending response")?;
+                        }
+                        Err(err) => {
+                            error!("Failed to serialize response: {err}, {pending_response:?}");
+                        }
+                    }
+                }
+            }
             Message::CallResult(call_result) => self.handle_incoming_call_result(call_result),
             Message::CallError(err) => error!("{err:?}"),
         }
@@ -399,6 +417,17 @@ impl Connection {
                     );
                 }
 
+                // We can't block a start transaction due to SoC cap being reached
+                // as the charging point attempts to restart in a loop.
+                // That's not really a problem though: if a new transaction
+                // starts and the server previously stopped a transaction,
+                // it means either:
+                // * the EV was unplugged / plugged again => it's up to the
+                //   user to configure the server as needed.
+                // * the charging point was rebooted, in which case an
+                //   permanent 0 W charging plan is applied.
+                // * TODO check what happens after a reboot due to
+                //   main power interuption.
                 let transaction_id = self.get_next_transaction_id();
                 let cs = ChargingSession::new(
                     self.bms.clone(),
@@ -498,21 +527,6 @@ impl Connection {
                 info!(">> incoming {call:?}");
             }
         };
-
-        if let Some(pending_response) = self.pending_response.take() {
-            trace!("<< sending response {pending_response:?}");
-            match parse::serialize_message(&pending_response) {
-                Ok(response) => {
-                    self.ws_stream
-                        .send(ts::Message::Text(response.into()))
-                        .await
-                        .context("sending response")?;
-                }
-                Err(err) => {
-                    error!("Failed to serialize response: {err}, {pending_response:?}");
-                }
-            }
-        }
 
         Ok(())
     }

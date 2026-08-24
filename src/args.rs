@@ -124,6 +124,8 @@ impl From<&Args> for crate::Bms {
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum ChargingPlan {
+    #[clap(help = "Block charging (0 W permanent plan)")]
+    Blocking,
     #[clap(help = "Off peak period Today")]
     OffPeakToday,
     #[clap(help = "Off peak period Tomorrow")]
@@ -144,6 +146,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
         };
 
         match charging_plan {
+            ChargingPlan::Blocking => Ok(Some(crate::ChargingPlan::Blocking)),
             ChargingPlan::OffPeakToday => Ok(Some(crate::ChargingPlan::OffPeakToday {
                 power_limit: args.power_limit,
             })),
