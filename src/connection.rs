@@ -339,7 +339,11 @@ impl Connection {
                 );
             }
             Action::SecurityEventNotification(action) => {
-                info!(">> incoming {action:?}");
+                if action.event_type == "SettingSystemTime" {
+                    trace!(">> incoming {action:?}");
+                } else {
+                    info!(">> incoming {action:?}");
+                }
                 self.prepare_response(action, call.unique_id, call_result::EmptyResponse {});
             }
             Action::MeterValues(action) => {
