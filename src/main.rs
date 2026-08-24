@@ -32,9 +32,14 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     args.check()?;
 
-    env_logger::builder()
+    let mut env_logger_builder = env_logger::builder();
+
+    #[cfg(debug_assertions)]
+    env_logger_builder
         .format_source_path(true)
-        .format_line_number(true)
+        .format_line_number(true);
+
+    env_logger_builder
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .try_init()
