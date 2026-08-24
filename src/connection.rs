@@ -242,12 +242,19 @@ impl Connection {
                         );
                     } else {
                         info!(
-                            ">> connector {}: {:?}, timestamp: {:?}",
+                            ">> connector {}: {:?}, timestamp: {:?}, {}",
                             action.connector_id,
                             action.status,
                             action
                                 .timestamp
                                 .map(|ts| ts.inner().with_timezone(&chrono::Local)),
+                            if let Some(ref info) = action.info
+                                && !info.is_empty()
+                            {
+                                format!(", info: {info}")
+                            } else {
+                                String::new()
+                            },
                         );
 
                         match action.status {
@@ -268,7 +275,7 @@ impl Connection {
                                     );
                                     cs.stop(
                                         Utc::now(),
-                                        0,
+                                        cs.last_energy(),
                                         ChargingSessionState::Error(
                                             "Got connector available while session was still active"
                                                 .to_string(),
@@ -474,9 +481,10 @@ impl Connection {
                             action.meter_stop,
                             action.reason
                         );
+                        self.have_transaction_id(action.transaction_id);
                         cs.stop(
                             Utc::now(),
-                            0,
+                            cs.last_energy(),
                             ChargingSessionState::Error(
                                 "Got stop transaction for another session".to_string(),
                             ),
