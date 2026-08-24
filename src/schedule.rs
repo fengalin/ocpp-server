@@ -120,6 +120,10 @@ impl fmt::Display for ChargingSchedule {
             self.state,
             self.set_time.with_timezone(&Local),
         ))?;
+        if self.periods.is_empty() {
+            f.write_str("\n\tpermanent 0 W (blocking)")?;
+            return Ok(());
+        }
         for period in self.periods.values() {
             f.write_fmt(format_args!("\n\t* {period}"))?
         }
@@ -231,6 +235,7 @@ impl ChargingSchedulePeriodBuilder {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ChargingPlan {
+    Blocking,
     OffPeakToday {
         power_limit: u32,
     },
@@ -249,6 +254,7 @@ impl ChargingPlan {
         // FIXME make off peak period configurable
         use ChargingPlan::*;
         match self {
+            Blocking => Some(ChargingSchedule::new()),
             OffPeakToday { power_limit } => Some(
                 ChargingSchedule::new()
                     .add_period(
@@ -987,7 +993,7 @@ mod tests {
         schedule.id = schedule_id;
 
         let last_schedule = Database::get()
-            .get_last_charging_schedule()
+            .get_active_charging_schedule()
             .unwrap()
             .unwrap();
 
