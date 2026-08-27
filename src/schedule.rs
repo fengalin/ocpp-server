@@ -3,7 +3,7 @@ use std::{
     fmt::{self, Write},
 };
 
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use log::{debug, error, info, warn};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 
@@ -58,6 +58,49 @@ impl fmt::Display for ChargingSchedulePeriod {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub struct OutstandingDurationEnergy {
+    pub duration: Duration,
+    pub energy: f64,
+}
+impl OutstandingDurationEnergy {
+    fn zero() -> Self {
+        Default::default()
+    }
+
+    pub fn is_zero(&self) -> bool {
+        *self == OutstandingDurationEnergy::zero()
+    }
+
+    fn add(&mut self, delta: TimeDelta, active_power: f64) {
+        assert!(delta.num_seconds() > 0);
+        self.duration += delta;
+        self.energy += active_power * delta.num_seconds() as f64 / 60.0 / 60.0;
+    }
+}
+
+impl fmt::Display for OutstandingDurationEnergy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_zero() {
+            return f.write_str("no more charging plans");
+        }
+
+        let total_secs = self.duration.num_seconds();
+        let total_mins = total_secs / 60;
+        let hours = total_mins / 60;
+        let mins = total_mins % 60;
+        let secs = total_secs % 60;
+        if hours > 0 {
+            f.write_fmt(format_args!("{hours}:{mins:02}:{secs:02}",))?;
+        } else {
+            f.write_fmt(format_args!("{mins:02}:{secs:02}",))?;
+        }
+
+        f.write_str(", +")?;
+        f.write_fmt(format_args!("{:.3} kWh", self.energy / 1_000.0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChargingSchedule {
     pub id: i32,
@@ -98,6 +141,36 @@ impl ChargingSchedule {
 
     pub fn is_empty(&self) -> bool {
         self.periods.is_empty()
+    }
+
+    // FIXME energy that will be added also depends on the SoC and DPM profile
+    pub fn outstanding(
+        &self,
+        from_instant: NaiveDateTime,
+        constant_power_loss: u16,
+    ) -> OutstandingDurationEnergy {
+        let mut rem = OutstandingDurationEnergy::default();
+        if !self.is_active() {
+            return rem;
+        }
+        for period in self.periods.values() {
+            if from_instant >= period.end {
+                continue;
+            }
+            if from_instant > period.start && from_instant < period.end {
+                rem.add(
+                    period.end - from_instant,
+                    period.limit - constant_power_loss as f64,
+                );
+                continue;
+            }
+            rem.add(
+                period.end - period.start,
+                period.limit - constant_power_loss as f64,
+            );
+        }
+
+        rem
     }
 }
 
@@ -322,8 +395,8 @@ impl ChargingPlan {
                 let duration = TimeDelta::seconds(duration_s as _);
                 info!(
                     "preparing schedule for SoC {} to {}\n\
-                    \tenergy to add: {:.1} kWh\n\
-                    \tenergy needed: {:.1} kWh (loss {:.1} %)\n\
+                    \tenergy to add: {:.3} kWh\n\
+                    \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
                     bms.current_soc,
                     bms.soc_cap(),
@@ -998,5 +1071,109 @@ mod tests {
             .unwrap();
 
         assert_eq!(schedule, last_schedule);
+    }
+
+    #[test]
+    fn outstanding() {
+        crate::tests::init();
+
+        const CONST_POWER_LOSS: u16 = 400;
+
+        let period1_start = NaiveTime::from_hms_opt(1, 28, 00).unwrap();
+        let period1_duration = TimeDelta::hours(2);
+        let period1_limit = 5_000;
+
+        let period2_start = NaiveTime::from_hms_opt(13, 58, 00).unwrap();
+        let period2_duration = TimeDelta::hours(1);
+
+        let mut schedule = ChargingSchedule::new()
+            .add_period(
+                ChargingSchedulePeriod::builder_starting_today(period1_start)
+                    .duration(period1_duration)
+                    .limit(period1_limit)
+                    .build(),
+            )
+            .add_period(
+                ChargingSchedulePeriod::builder_starting_today(period2_start)
+                    .duration(period2_duration)
+                    .build(),
+            );
+
+        let today = Local::now().date_naive();
+        let period1_start = NaiveDateTime::new(today, period1_start);
+        let period2_start = NaiveDateTime::new(today, period2_start);
+
+        let before_period1 = period1_start - TimeDelta::minutes(30);
+        assert_eq!(
+            OutstandingDurationEnergy {
+                duration: period1_duration + period2_duration,
+                energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
+                    * (period1_duration.num_seconds() as f64)
+                    / 60.0
+                    / 60.0
+                    + (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
+                        * (period2_duration.num_seconds() as f64)
+                        / 60.0
+                        / 60.0
+            },
+            schedule.outstanding(before_period1, CONST_POWER_LOSS),
+        );
+
+        let during_period1 = period1_start + TimeDelta::minutes(30);
+        let during_period1_dur = period1_start + period1_duration - during_period1;
+        assert_eq!(
+            OutstandingDurationEnergy {
+                duration: during_period1_dur + period2_duration,
+                energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
+                    * (during_period1_dur.num_seconds() as f64)
+                    / 60.0
+                    / 60.0
+                    + (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
+                        * (period2_duration.num_seconds() as f64)
+                        / 60.0
+                        / 60.0
+            },
+            schedule.outstanding(during_period1, CONST_POWER_LOSS),
+        );
+
+        let between_periods = period1_start + period1_duration + TimeDelta::minutes(30);
+        assert!(between_periods < period2_start);
+        assert_eq!(
+            OutstandingDurationEnergy {
+                duration: period2_duration,
+                energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
+                    * (period2_duration.num_seconds() as f64)
+                    / 60.0
+                    / 60.0
+            },
+            schedule.outstanding(between_periods, CONST_POWER_LOSS),
+        );
+
+        let during_period2 = period2_start + TimeDelta::minutes(30);
+        let during_period2_dur = period2_start + period2_duration - during_period2;
+        assert_eq!(
+            OutstandingDurationEnergy {
+                duration: during_period2_dur,
+                energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
+                    * (during_period2_dur.num_seconds() as f64)
+                    / 60.0
+                    / 60.0
+            },
+            schedule.outstanding(during_period2, CONST_POWER_LOSS),
+        );
+
+        let after_period2 = period2_start + period2_duration + TimeDelta::minutes(30);
+        assert!(
+            schedule
+                .outstanding(after_period2, CONST_POWER_LOSS)
+                .is_zero(),
+        );
+
+        schedule.inactivate();
+        assert!(
+            schedule
+                .outstanding(before_period1, CONST_POWER_LOSS)
+                .is_zero(),
+        );
     }
 }

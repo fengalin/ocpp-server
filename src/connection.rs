@@ -22,7 +22,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
 use crate::{
     Bms, ChargingPlan, ChargingSchedule, ChargingSession, ChargingSessionSnapshot,
-    ChargingSessionState, Database, SoC, args, measurements::*, schedule,
+    ChargingSessionState, Database, SoC, args, bms::SoCProgress, measurements::*, schedule,
 };
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
@@ -285,6 +285,7 @@ impl Connection {
                                                 .to_string(),
                                         ),
                                     );
+                                    self.log_session_progress();
                                 }
                             }
                             ChargePointStatus::Charging
@@ -299,12 +300,14 @@ impl Connection {
                                     // with the transaction id before getting this
                                     // StatusNotification
                                     cs.set_state(action.status.clone());
+                                    self.log_session_progress();
                                 }
                             }
                             ChargePointStatus::SuspendedEV | ChargePointStatus::Faulted => {
                                 // FIXME reached 100% => not restarting the session?
                                 if let Some(mut cs) = self.charging_session.take() {
                                     cs.set_state(action.status.clone());
+                                    self.log_session_progress();
                                 }
                             }
                             ChargePointStatus::Unavailable | ChargePointStatus::Reserved => (),
@@ -595,16 +598,28 @@ impl Connection {
                             .temperature(mv.temperature)
                             .build();
 
+                        let outstg_sched = self.charging_schedule.as_ref().map(|s| {
+                            s.outstanding(
+                                chrono::Local::now().naive_local(),
+                                self.bms.constant_power_loss,
+                            )
+                        });
                         let soc_progress = cs.add_snapshot(snapshot);
-                        if soc_progress.is_complete() && !cs.is_complete() {
+                        if soc_progress.is_complete()
+                            && !cs.is_complete()
+                            // don't stop if we are nearly done with the schedule
+                            // (less than 1% here) so we can start a new one without unplugging
+                            // FIXME could be an option
+                            // FIXME implement an optional intermediate SoC target for multi-period scheds
+                            && outstg_sched.is_none_or(|rem| rem.energy < self.bms.capacity / 100.0)
+                        {
                             info!("## Stopping session {transaction_id}: {soc_progress}");
                             cs.set_state(ChargingSessionState::SocCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction { transaction_id },
                             ));
-                        } else {
-                            info!("## session {transaction_id}: {soc_progress}");
                         }
+                        self.log_session_progress();
 
                         return;
                     }
@@ -617,6 +632,7 @@ impl Connection {
                         cs.set_state(ChargingSessionState::Error(
                             "transaction id mismatch".to_string(),
                         ));
+                        self.log_session_progress();
                         self.charging_session = None;
                     }
                     None => {
@@ -675,6 +691,7 @@ impl Connection {
                         cs.set_state(ChargingSessionState::Error(
                             "transaction id mismatch".to_string(),
                         ));
+                        self.log_session_progress();
                     }
                     None => {
                         info!(
@@ -702,6 +719,24 @@ impl Connection {
             Probation(_) => info!(">> MeterValue with energy set to probation"),
             Unknown => unreachable!("energy added"),
         }
+    }
+
+    fn log_session_progress(&self) {
+        let Some(ref cs) = self.charging_session else {
+            return;
+        };
+        info!(
+            "## session {cs} / {}{}",
+            SoCProgress::from_soc_and_cap(cs.last_soc(), self.bms.soc_cap).cap(),
+            if let Some(outstg_sched) = self.charging_schedule.as_ref().map(|s| s.outstanding(
+                chrono::Local::now().naive_local(),
+                self.bms.constant_power_loss,
+            )) {
+                format!(", outstanding: {outstg_sched}")
+            } else {
+                "".to_string()
+            }
+        );
     }
 
     fn have_transaction_id(&mut self, transaction_id: i32) {
