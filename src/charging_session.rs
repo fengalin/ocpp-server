@@ -433,12 +433,11 @@ impl ChargingSession {
 impl fmt::Display for ChargingSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "sid: {}, state: {}, last SoC: {}, initial SoC: {}, tid: {:?}",
-            self.session_id,
-            self.state,
-            self.last_soc(),
-            self.initial_soc(),
+            "tid: {}, state: {}, initial SoC: {}, last SoC: {}",
             self.transaction_id,
+            self.state,
+            self.initial_soc(),
+            self.last_soc(),
         ))
     }
 }

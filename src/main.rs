@@ -73,7 +73,12 @@ async fn main() -> anyhow::Result<()> {
 
         match db.get_active_charging_schedule() {
             Ok(Some(schedule)) => {
-                info!("active charging schedule:\n\t{schedule}");
+                info!(
+                    "active charging schedule:\n\t{schedule}\n\
+                    \toutstanding: {}",
+                    schedule
+                        .outstanding(chrono::Local::now().naive_local(), bms.constant_power_loss)
+                );
             }
             Ok(None) => {
                 info!("no active charging schedule");
@@ -90,7 +95,18 @@ async fn main() -> anyhow::Result<()> {
                 && let Some(cp) = cp
             {
                 info!("Selected charging plan: {cp:?}");
-                let _ = cp.to_charging_schedule(&bms);
+                if let Some(s) = cp.to_charging_schedule(&bms) {
+                    let outstanding =
+                        s.outstanding(chrono::Local::now().naive_local(), bms.constant_power_loss);
+                    info!(
+                        "outstanding: {outstanding}{}",
+                        if !outstanding.is_zero() {
+                            format!(", {}", SoC::Relative(outstanding.energy / bms.capacity))
+                        } else {
+                            "".to_string()
+                        }
+                    );
+                }
             }
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
