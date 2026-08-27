@@ -445,7 +445,7 @@ impl fmt::Display for ChargingSession {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub enum ChargingSessionState {
     Active,
-    SocCapReached,
+    SoCCapReached,
     SuspendedByEvse,
     SuspendedByEv,
     StoppedByUser,
@@ -462,7 +462,7 @@ impl ChargingSessionState {
         // * SuspendedByEv (probably same as SuspendedByEvse)
         matches!(
             self,
-            SocCapReached | StoppedByUser | Reboot | UnlockCommandFromServer | Error(_)
+            SoCCapReached | StoppedByUser | Reboot | UnlockCommandFromServer | Error(_)
         )
     }
 }
@@ -472,7 +472,7 @@ impl fmt::Display for ChargingSessionState {
         use ChargingSessionState::*;
         f.write_str(match self {
             Active => "Active",
-            SocCapReached => "SocCapReached",
+            SoCCapReached => "SoCCapReached",
             SuspendedByEvse => "SuspendedByEvse",
             SuspendedByEv => "SuspendedByEv",
             StoppedByUser => "StoppedByUser",
@@ -493,7 +493,7 @@ impl str::FromStr for ChargingSessionState {
         use ChargingSessionState::*;
         Ok(match s {
             "Active" => Active,
-            "SocCapReached" => SocCapReached,
+            "SoCCapReached" => SoCCapReached,
             "SuspendedByEvse" => SuspendedByEvse,
             "SuspendedByEv" => SuspendedByEv,
             "StoppedByUser" => StoppedByUser,
@@ -513,7 +513,7 @@ impl From<enums::ChargePointStatus> for ChargingSessionState {
             Charging | Preparing => Active,
             SuspendedEVSE => SuspendedByEvse,
             SuspendedEV => SuspendedByEv,
-            Finishing => SocCapReached,
+            Finishing => SoCCapReached,
             Unavailable => Error("Unavailable".to_string()),
             Faulted => Error("Faulted".to_string()),
             Available => panic!("should not be called in this state"),
@@ -662,13 +662,13 @@ mod tests {
         cs.stop(
             Utc::now(),
             INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
-            ChargingSessionState::SocCapReached,
+            ChargingSessionState::SoCCapReached,
         );
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(
-            &ChargingSessionState::SocCapReached,
+            &ChargingSessionState::SoCCapReached,
             last_session.unwrap().state()
         );
     }
@@ -745,13 +745,13 @@ mod tests {
         cs.stop(
             Utc::now(),
             INITIAL_ENERGY + MAX_ADDED_ENERGY_FIRST_PERIOD,
-            ChargingSessionState::SocCapReached,
+            ChargingSessionState::SoCCapReached,
         );
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
         assert_eq!(
-            &ChargingSessionState::SocCapReached,
+            &ChargingSessionState::SoCCapReached,
             last_session.unwrap().state()
         );
     }
