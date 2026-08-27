@@ -477,9 +477,10 @@ impl Connection {
                     action.meter_start,
                 );
                 info!(
-                    "## starting transaction with id: {transaction_id}, timestamp: {}, meter start: {}",
+                    "## starting transaction with id: {transaction_id}, timestamp: {}, \
+                    meter start: {:.3} kWh",
                     action.timestamp.inner().with_timezone(&chrono::Local),
-                    action.meter_start,
+                    action.meter_start as f64 / 1_000.0,
                 );
                 self.charging_session = Some(cs);
                 self.prepare_response(
@@ -500,19 +501,21 @@ impl Connection {
                     let cur_transaction_id = cs.transaction_id();
                     if cur_transaction_id == action.transaction_id {
                         info!(
-                            "## transaction with id: {} stopped, timestamp: {}, meter stop: {}, reason: {:?}",
+                            "## transaction with id: {} stopped, timestamp: {}, \
+                            meter stop: {:.3} kWh, reason: {:?}",
                             action.transaction_id,
                             action.timestamp.inner().with_timezone(&chrono::Local),
-                            action.meter_stop,
+                            action.meter_stop as f64 / 1_000.0,
                             action.reason
                         );
                         cs.stop(action.timestamp.inner(), action.meter_stop, action.reason)
                     } else {
                         warn!(
-                            "## transaction with id: {} stopped (expected {cur_transaction_id}), timestamp: {}, meter stop: {}, reason: {:?}",
+                            "## transaction with id: {} stopped (expected {cur_transaction_id}), \
+                            timestamp: {}, meter stop: {:.3} kWh, reason: {:?}",
                             action.transaction_id,
                             action.timestamp.inner().with_timezone(&chrono::Local),
-                            action.meter_stop,
+                            action.meter_stop as f64 / 1_000.0,
                             action.reason
                         );
                         self.have_transaction_id(action.transaction_id);
@@ -526,10 +529,11 @@ impl Connection {
                     }
                 } else {
                     warn!(
-                        "## transaction with id: {} stopped (unexpected), timestamp: {}, meter stop: {}, reason: {:?}",
+                        "## transaction with id: {} stopped (unexpected), \
+                        timestamp: {}, meter stop: {:.3} kWh, reason: {:?}",
                         action.transaction_id,
                         action.timestamp.inner().with_timezone(&chrono::Local),
-                        action.meter_stop,
+                        action.meter_stop as f64 / 1_000.0,
                         action.reason
                     );
                     self.have_transaction_id(action.transaction_id);
@@ -611,10 +615,10 @@ impl Connection {
                             // (less than 1% here) so we can start a new one without unplugging
                             // FIXME could be an option
                             // FIXME implement an optional intermediate SoC target for multi-period scheds
-                            && outstg_sched.is_none_or(|rem| rem.energy < self.bms.capacity / 100.0)
+                            && outstg_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
                         {
                             info!("## Stopping session {transaction_id}: {soc_progress}");
-                            cs.set_state(ChargingSessionState::SocCapReached);
+                            cs.set_state(ChargingSessionState::SoCCapReached);
                             self.call_queue.push_back(Action::RemoteStopTransaction(
                                 call::RemoteStopTransaction { transaction_id },
                             ));
@@ -705,7 +709,8 @@ impl Connection {
 
                 warn!(
                     "## adding new charging session for {transaction_id}, \
-                    stationnary start energy: {energy}"
+                    stationnary start energy: {:.3} kWh",
+                    energy as f64 / 1_000.0
                 );
                 self.have_transaction_id(transaction_id);
                 self.charging_session = Some(ChargingSession::with_state(
