@@ -232,24 +232,22 @@ impl Connection {
         match call.payload {
             Action::StatusNotification(action) => {
                 if action.connector_id != 0 {
+                    let connector_log = format!(
+                        ">> connector {}: {:?}{}",
+                        action.connector_id,
+                        action.status,
+                        if let Some(ts) = action.timestamp {
+                            format!(", timestamp: {}", ts.inner().with_timezone(&chrono::Local))
+                        } else {
+                            "".to_string()
+                        },
+                    );
+
                     if !matches!(action.error_code, ChargePointErrorCode::NoError) {
-                        warn!(
-                            ">> connector {}: {:?} {:?}, timestamp: {:?}",
-                            action.connector_id,
-                            action.status,
-                            action.error_code,
-                            action
-                                .timestamp
-                                .map(|ts| ts.inner().with_timezone(&chrono::Local)),
-                        );
+                        warn!("{connector_log}, {:?}", action.error_code);
                     } else {
-                        info!(
-                            ">> connector {}: {:?}, timestamp: {:?}, {}",
-                            action.connector_id,
-                            action.status,
-                            action
-                                .timestamp
-                                .map(|ts| ts.inner().with_timezone(&chrono::Local)),
+                        let connector_ok_log = format!(
+                            "{connector_log}{}",
                             if let Some(ref info) = action.info
                                 && !info.is_empty()
                             {
@@ -258,6 +256,11 @@ impl Connection {
                                 String::new()
                             },
                         );
+                        if matches!(action.status, ChargePointStatus::Charging) {
+                            warn!("{connector_ok_log}");
+                        } else {
+                            info!("{connector_ok_log}");
+                        }
 
                         match action.status {
                             ChargePointStatus::Available | ChargePointStatus::Finishing => {
