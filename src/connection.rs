@@ -658,7 +658,7 @@ impl Connection {
                 self.charging_session = Some(ChargingSession::with_state(
                     bms,
                     transaction_id,
-                    ChargingSessionState::Active,
+                    ChargingSessionState::Preparing,
                     energy,
                     mv.timestamp,
                 ));
@@ -706,7 +706,7 @@ impl Connection {
                 self.charging_session = Some(ChargingSession::with_state(
                     self.bms.clone(),
                     transaction_id,
-                    ChargingSessionState::Active,
+                    ChargingSessionState::Preparing,
                     energy,
                     mv.timestamp,
                 ));
