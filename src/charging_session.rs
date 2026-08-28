@@ -80,7 +80,7 @@ impl ChargingSession {
     pub fn new(mut bms: Bms, timestamp: DateTime<Utc>, tid: i32, energy: u64) -> Self {
         let db = Database::get();
 
-        let session_id = db.add_new_charging_session(ChargingSessionState::Active, tid);
+        let session_id = db.add_new_charging_session(ChargingSessionState::Preparing, tid);
 
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(energy as f64);
@@ -91,7 +91,7 @@ impl ChargingSession {
             transaction_id: tid,
             bms,
             snapshots: vec![],
-            state: ChargingSessionState::Active,
+            state: ChargingSessionState::Preparing,
         };
         let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
             .is_reference(true)
@@ -444,7 +444,8 @@ impl fmt::Display for ChargingSession {
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub enum ChargingSessionState {
-    Active,
+    Preparing,
+    Charging,
     SoCCapReached,
     SuspendedByEvse,
     SuspendedByEv,
@@ -471,7 +472,8 @@ impl fmt::Display for ChargingSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ChargingSessionState::*;
         f.write_str(match self {
-            Active => "Active",
+            Preparing => "Preparing",
+            Charging => "Charging",
             SoCCapReached => "SoCCapReached",
             SuspendedByEvse => "SuspendedByEvse",
             SuspendedByEv => "SuspendedByEv",
@@ -492,7 +494,8 @@ impl str::FromStr for ChargingSessionState {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use ChargingSessionState::*;
         Ok(match s {
-            "Active" => Active,
+            "Preparing" => Preparing,
+            "Charging" => Charging,
             "SoCCapReached" => SoCCapReached,
             "SuspendedByEvse" => SuspendedByEvse,
             "SuspendedByEv" => SuspendedByEv,
@@ -510,7 +513,8 @@ impl From<enums::ChargePointStatus> for ChargingSessionState {
         use ChargingSessionState::*;
         use enums::ChargePointStatus::*;
         match cp_status {
-            Charging | Preparing => Active,
+            enums::ChargePointStatus::Preparing => ChargingSessionState::Preparing,
+            enums::ChargePointStatus::Charging => ChargingSessionState::Charging,
             SuspendedEVSE => SuspendedByEvse,
             SuspendedEV => SuspendedByEv,
             Finishing => SoCCapReached,
@@ -638,7 +642,10 @@ mod tests {
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
-        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
+        assert_eq!(
+            &ChargingSessionState::Preparing,
+            last_session.unwrap().state()
+        );
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(
@@ -721,7 +728,10 @@ mod tests {
 
         let last_session = Database::get().get_last_charging_session(&bms).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
-        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
+        assert_eq!(
+            &ChargingSessionState::Preparing,
+            last_session.unwrap().state()
+        );
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(
@@ -792,7 +802,10 @@ mod tests {
 
         let last_session = Database::get().get_last_charging_session(cs.bms()).unwrap();
         assert_eq!(Some(&cs), last_session.as_ref());
-        assert_eq!(&ChargingSessionState::Active, last_session.unwrap().state());
+        assert_eq!(
+            &ChargingSessionState::Preparing,
+            last_session.unwrap().state()
+        );
 
         assert_eq!(
             Some(&cs),
@@ -1099,8 +1112,8 @@ mod tests {
             .expect("last session exists");
         assert_eq!(cs, last_session);
 
-        cs.set_state(ChargingSessionState::Active);
-        assert_eq!(cs.state, ChargingSessionState::Active);
+        cs.set_state(ChargingSessionState::Preparing);
+        assert_eq!(cs.state, ChargingSessionState::Preparing);
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
@@ -1164,8 +1177,8 @@ mod tests {
             .expect("last session exists");
         assert_eq!(cs, last_session);
 
-        cs.set_state(ChargingSessionState::Active);
-        assert_eq!(cs.state, ChargingSessionState::Active);
+        cs.set_state(ChargingSessionState::Preparing);
+        assert_eq!(cs.state, ChargingSessionState::Preparing);
 
         let soc_progress = cs.add_snapshot(
             ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
