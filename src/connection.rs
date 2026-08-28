@@ -64,7 +64,6 @@ pub struct Connection {
     last_meter_values: Option<MeterValueSelection>,
     last_meter_voltage_l1: Option<u64>,
     last_dpm: Option<DpmSelection>,
-    last_dpm_voltage_l1: Option<u64>,
     send_action_id: usize,
     pending_response: Option<Message>,
     call_response_tracker: PendingCalls,
@@ -92,7 +91,6 @@ impl Connection {
             last_meter_values: None,
             last_meter_voltage_l1: None,
             last_dpm: None,
-            last_dpm_voltage_l1: None,
             send_action_id: 0,
             pending_response: None,
             call_response_tracker: PendingCalls::new(),
@@ -403,18 +401,7 @@ impl Connection {
                     }
 
                     if let Some(dpm_data) = dpm_data_set.pop() {
-                        let mut dpm_data = DpmSelection::from(dpm_data);
-
-                        // The charging point can end periodic consecutive DPM data:
-                        // * one without active power import nor transaction id
-                        //   but with L1 voltage
-                        // * then one with all selected values but L1 voltage
-                        if dpm_data.voltage_l1.is_none() {
-                            dpm_data.voltage_l1 = self.last_dpm_voltage_l1.take();
-                        } else {
-                            self.last_dpm_voltage_l1 = dpm_data.voltage_l1;
-                        }
-
+                        let dpm_data = DpmSelection::from(dpm_data);
                         if dpm_data.active_power_import.is_some()
                             && self
                                 .last_dpm

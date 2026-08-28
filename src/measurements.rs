@@ -83,17 +83,14 @@ impl cmp::PartialEq for MeterValueSelection {
 #[derive(Debug, Default)]
 pub struct DpmSelection {
     pub timestamp: Option<DateTime<Utc>>,
-    pub transaction_id: Option<i32>,
     pub active_energy_import: Option<u64>,
     pub active_power_import: Option<u64>,
-    pub voltage_l1: Option<u64>,
 }
 
 impl From<Dpm> for DpmSelection {
     fn from(dpm: Dpm) -> Self {
         let mut this = DpmSelection {
             timestamp: dpm.data.timestamp.parse().ok(),
-            transaction_id: dpm.data.transaction_id,
             ..Default::default()
         };
 
@@ -103,9 +100,6 @@ impl From<Dpm> for DpmSelection {
                     this.active_energy_import = sv.value.parse::<u64>().ok()
                 }
                 "Power.Active.Import" => this.active_power_import = sv.value.parse::<u64>().ok(),
-                "Voltage" if sv.phase.as_deref() == Some("L1") => {
-                    this.voltage_l1 = sv.value.parse::<u64>().ok()
-                }
                 _ => (),
             }
         }
@@ -131,14 +125,13 @@ impl cmp::PartialEq for DpmSelection {
             .is_none_or(|(s, o)| dpm_energy_eq(s, o))
             && Option::zip(self.active_power_import, other.active_power_import)
                 .is_none_or(|(s, o)| dpm_power_eq(s, o))
-            && Option::zip(self.voltage_l1, other.voltage_l1).is_none_or(|(s, o)| voltage_eq(s, o))
     }
 }
 
 impl fmt::Display for DpmSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V, tid: {:?}",
+            "ts: {}, energy: {:.3} kWh, power: {:.3} kW",
             self.timestamp.map_or_else(
                 || "invalid".to_string(),
                 |ts| ts.with_timezone(&Local).to_string()
@@ -147,8 +140,6 @@ impl fmt::Display for DpmSelection {
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
             self.active_power_import
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
-            self.voltage_l1.map_or(f64::NAN, |v| v as f64),
-            self.transaction_id,
         ))
     }
 }
@@ -302,15 +293,11 @@ mod tests {
                 timestamp: Some(Utc::now()),
                 active_energy_import: Some(1_500),
                 active_power_import: Some(240),
-                voltage_l1: None,
-                transaction_id: Some(1),
             },
             DpmSelection {
                 timestamp: Some(Utc::now()),
                 active_energy_import: Some(1_550),
                 active_power_import: Some(50),
-                voltage_l1: None,
-                transaction_id: None,
             },
         );
 
@@ -319,15 +306,11 @@ mod tests {
                 timestamp: Some(Utc::now()),
                 active_energy_import: Some(1_500),
                 active_power_import: Some(510),
-                voltage_l1: Some(229),
-                transaction_id: Some(1),
             },
             DpmSelection {
                 timestamp: None,
                 active_energy_import: Some(1_990),
                 active_power_import: Some(740),
-                voltage_l1: Some(230),
-                transaction_id: None,
             },
         );
 
@@ -337,15 +320,11 @@ mod tests {
                 timestamp: Some(Utc::now()),
                 active_energy_import: Some(1_500),
                 active_power_import: Some(730),
-                voltage_l1: Some(230),
-                transaction_id: Some(1),
             },
             DpmSelection {
                 timestamp: None,
                 active_energy_import: Some(2_500),
                 active_power_import: Some(730),
-                voltage_l1: Some(230),
-                transaction_id: Some(1),
             },
         );
 
@@ -355,33 +334,11 @@ mod tests {
                 timestamp: Some(Utc::now()),
                 active_energy_import: Some(1_500),
                 active_power_import: Some(740),
-                voltage_l1: Some(229),
-                transaction_id: Some(1),
             },
             DpmSelection {
                 timestamp: None,
                 active_energy_import: Some(1_500),
                 active_power_import: Some(760),
-                voltage_l1: Some(229),
-                transaction_id: Some(1),
-            },
-        );
-
-        // !Eq voltage
-        assert_ne!(
-            DpmSelection {
-                timestamp: Some(Utc::now()),
-                active_energy_import: Some(1_500),
-                active_power_import: Some(730),
-                voltage_l1: Some(230),
-                transaction_id: Some(1),
-            },
-            DpmSelection {
-                timestamp: None,
-                active_energy_import: Some(1_500),
-                active_power_import: Some(730),
-                voltage_l1: Some(228),
-                transaction_id: Some(1),
             },
         );
     }
