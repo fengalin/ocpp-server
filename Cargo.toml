@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 bundled-sqlite = ["rusqlite/bundled"]
+systemd = []
 
 [dependencies]
 anyhow = "1.0.104"
