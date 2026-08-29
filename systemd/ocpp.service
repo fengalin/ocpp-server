@@ -1,0 +1,14 @@
+[Unit]
+Description=OCPP server daemon
+
+[Service]
+User=ocpp
+Type=simple
+ExecStart=/home/ocpp/bin/ocpp-server run
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

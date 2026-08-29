@@ -1,6 +1,6 @@
 # ```
 # cargo install cross --git https://github.com/cross-rs/cross
-# cross build --profile release-slim --target aarch64-unknown-linux-gnu --features bundled-sqlite
+# cross build --profile release-slim --target aarch64-unknown-linux-gnu --features bundled-sqlite,systemd
 #
 # current cross image sqlite3 version is too old for rusqlite:
 # > undefined reference to sqlite3_prepare_v3
