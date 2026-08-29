@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let mut bms = Bms::from(&args);
-    info!("User defined: {bms:#?}");
+    info!("User defined BMS:\n{bms}");
 
     {
         let db = Database::get();
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("last known session:\n{session}");
                 if !session.is_complete() {
                     bms = session.bms().clone();
-                    info!("updated from last chaging session: {bms:#?}");
+                    info!("consolidated BMS:\n{bms}");
                 }
             }
             Ok(None) => {
