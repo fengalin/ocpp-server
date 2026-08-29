@@ -61,8 +61,7 @@ pub struct Connection {
     last_known_tid: i32,
     energy_tracker: EnergyTracker,
     last_known_stop_energy: Option<u64>,
-    last_meter_values: Option<MeterValueSelection>,
-    last_meter_voltage_l1: Option<u64>,
+    meter_value_observer: MeterValueObserver,
     last_dpm: Option<DpmSelection>,
     send_action_id: usize,
     pending_response: Option<Message>,
@@ -88,8 +87,7 @@ impl Connection {
             last_known_tid: 0,
             last_known_stop_energy: None,
             energy_tracker: Default::default(),
-            last_meter_values: None,
-            last_meter_voltage_l1: None,
+            meter_value_observer: Default::default(),
             last_dpm: None,
             send_action_id: 0,
             pending_response: None,
@@ -363,25 +361,10 @@ impl Connection {
                 }
 
                 if let Some(mut mv) = meter_val_selection.pop() {
-                    // The charging point can end periodic consecutive meter values:
-                    // * one without active power import nor transaction id
-                    //   but with L1 voltage
-                    // * then one with all selected values but L1 voltage
-                    if mv.voltage_l1.is_none() {
-                        mv.voltage_l1 = self.last_meter_voltage_l1.take();
-                    } else {
-                        self.last_meter_voltage_l1 = mv.voltage_l1;
-                    }
+                    self.meter_value_observer.consolidate(&mut mv);
 
-                    if self.last_meter_values.is_none()
-                        || (mv.active_power_import.is_some()
-                            && self
-                                .last_meter_values
-                                .as_ref()
-                                .is_some_and(|last_mv| *last_mv != mv))
-                    {
+                    if self.meter_value_observer.pertinent_to_user(&mv) {
                         info!(">> MeterValues {mv}");
-                        self.last_meter_values = Some(mv.clone());
                     } else {
                         trace!(">> MeterValues {mv:?}");
                     }

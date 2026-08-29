@@ -74,9 +74,80 @@ impl cmp::PartialEq for MeterValueSelection {
     #[allow(clippy::eq_op)]
     fn eq(&self, other: &Self) -> bool {
         self.active_energy_import == other.active_energy_import
-            && self.active_power_import == other.active_power_import
+            && Option::zip(self.active_power_import, other.active_power_import)
+                .is_none_or(|(s, o)| s == o)
             && Option::zip(self.voltage_l1, other.voltage_l1).is_none_or(|(s, o)| voltage_eq(s, o))
-            && self.temperature == other.temperature
+    }
+}
+
+/// Meter Value Temperature observer
+/// Avoids logging when temperature fluctuates between two values
+#[derive(Debug, Default, Clone)]
+pub struct MeterValueObserver {
+    prev_meter_val: Option<MeterValueSelection>,
+    prev_temp_mean: Option<f64>,
+    last_voltage: Option<u64>,
+}
+
+impl MeterValueObserver {
+    /// Consolidates successive meter values
+    ///
+    /// Some MeterValues come with voltage but no power measure,
+    /// and they are usually followed by another MeterValue set
+    /// containing power but no voltages.
+    ///
+    /// This function keep track of voltage when present and
+    /// adds it to the next MeterValue set, so only the
+    /// consolidated one will be selected for log.
+    pub fn consolidate(&mut self, mv: &mut MeterValueSelection) {
+        match (mv.voltage_l1, mv.active_power_import) {
+            (Some(voltage), None) => self.last_voltage = Some(voltage),
+            (None, Some(_power)) => {
+                mv.voltage_l1 = self.last_voltage.take();
+            }
+            _ => (),
+        }
+    }
+
+    pub fn pertinent_to_user(&mut self, mv: &MeterValueSelection) -> bool {
+        if mv.active_power_import.is_none() {
+            // see consolidate()
+            return false;
+        }
+
+        let Some(prev_mv) = self.prev_meter_val.take() else {
+            self.prev_meter_val = Some(mv.clone());
+            self.prev_temp_mean = None;
+            return true;
+        };
+
+        self.prev_meter_val = Some(mv.clone());
+        let temp_mean = Option::zip(prev_mv.temperature, mv.temperature)
+            .map(|(prev_temp, temp)| (prev_temp as f64).midpoint(temp as f64));
+
+        let prev_temp_mean = std::mem::replace(&mut self.prev_temp_mean, temp_mean);
+
+        if prev_mv == *mv {
+            if let Some(prev_temp) = prev_mv.temperature
+                && let Some(temp) = mv.temperature
+                && prev_temp == temp
+            {
+                // all the same
+                false
+            } else if let Some(prev_temp_mean) = prev_temp_mean
+                && let Some(temp_mean) = temp_mean
+                && prev_temp_mean == temp_mean
+            {
+                // all the same
+                false
+            } else {
+                // evolving temperature or undefined / defined
+                true
+            }
+        } else {
+            // different values
+            true
+        }
     }
 }
 
@@ -283,6 +354,322 @@ mod tests {
         assert!(!voltage_eq(228, 230));
         assert!(!voltage_eq(229, 232));
         assert!(!voltage_eq(230, 232));
+    }
+
+    #[test]
+    fn meter_values_eq() {
+        let now = Utc::now();
+
+        // exact match
+        assert_eq!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+
+        // exact match but one is missing power
+        assert_eq!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: None,
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+
+        // timestamps are excluded from comparison
+        assert_eq!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: Utc::now(),
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+
+        // temperature are excluded from comparison
+        assert_eq!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: Utc::now(),
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(27),
+                transaction_id: Some(1),
+            },
+        );
+
+        // transction_id are excluded from comparison
+        assert_eq!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: None,
+            },
+            MeterValueSelection {
+                timestamp: Utc::now(),
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(27),
+                transaction_id: Some(1),
+            },
+        );
+
+        // different energy
+        assert_ne!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_100),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+
+        // different power
+        assert_ne!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(110),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+
+        // different voltage step
+        assert_ne!(
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(230),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+            MeterValueSelection {
+                timestamp: now,
+                active_energy_import: Some(1_000),
+                active_power_import: Some(100),
+                voltage_l1: Some(232),
+                temperature: Some(26),
+                transaction_id: Some(1),
+            },
+        );
+    }
+
+    #[test]
+    fn metervalue_observer() {
+        let mut mvo = MeterValueObserver::default();
+
+        // initial
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_000),
+            active_power_import: Some(100),
+            voltage_l1: Some(230),
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // different energy
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_100),
+            active_power_import: Some(100),
+            voltage_l1: Some(230),
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // different power
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_100),
+            active_power_import: Some(110),
+            voltage_l1: Some(230),
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // same as previous (no log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_100),
+            active_power_import: Some(110),
+            voltage_l1: None,
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(!mvo.pertinent_to_user(&mv));
+
+        // voltage, but no active power (no log, but consolidation on next MV)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: None,
+            voltage_l1: Some(230),
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(!mvo.pertinent_to_user(&mv));
+
+        // no voltage, but active power (consolidated voltage from MV and log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(10),
+            voltage_l1: None,
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert_eq!(Some(230), mv.voltage_l1);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // different voltage step, no active power (no log, but consolidation on next MV)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: None,
+            voltage_l1: Some(232),
+            temperature: None,
+            transaction_id: None,
+        };
+        mvo.consolidate(&mut mv);
+        assert!(!mvo.pertinent_to_user(&mv));
+
+        // no voltage, but active power (consolidated voltage from MV and log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(10),
+            voltage_l1: None,
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert_eq!(Some(232), mv.voltage_l1);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // same as previous, different temperature (log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(110),
+            voltage_l1: Some(232),
+            temperature: Some(27),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(mvo.pertinent_to_user(&mv));
+
+        // same as previous, fluctuating temperature (no log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(110),
+            voltage_l1: None,
+            temperature: Some(26),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(!mvo.pertinent_to_user(&mv));
+
+        // same as previous, fluctuating temperature again (no log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(110),
+            voltage_l1: None,
+            temperature: Some(27),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(!mvo.pertinent_to_user(&mv));
+
+        // same as previous, raising temperature (log)
+        let mut mv = MeterValueSelection {
+            timestamp: Utc::now(),
+            active_energy_import: Some(1_110),
+            active_power_import: Some(110),
+            voltage_l1: None,
+            temperature: Some(28),
+            transaction_id: Some(1),
+        };
+        mvo.consolidate(&mut mv);
+        assert!(mvo.pertinent_to_user(&mv));
     }
 
     #[test]
