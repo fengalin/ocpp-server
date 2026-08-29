@@ -94,6 +94,23 @@ impl Bms {
     }
 }
 
+impl fmt::Display for Bms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "cap.: {:.3} kWh, const loss: {} W, init energy: {} kWh, \
+            cur enery: {}, init SoC: {} %, cur SoC: {}",
+            self.capacity / 1_000.0,
+            self.constant_power_loss,
+            self.initial_energy
+                .map_or_else(|| "N/A".to_string(), |e| format!("{:.3}", e / 1_000.0)),
+            self.current_energy
+                .map_or_else(|| "N/A".to_string(), |e| format!("{:.3}", e / 1_000.0)),
+            self.initial_soc,
+            SoCProgress::from_soc_and_cap(self.current_soc, self.soc_cap),
+        ))
+    }
+}
+
 pub struct BmsBuilder(Bms);
 impl BmsBuilder {
     pub fn initial_energy(mut self, energy: u64) -> Self {
