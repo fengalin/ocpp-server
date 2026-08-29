@@ -143,6 +143,10 @@ impl ChargingSchedule {
         self.periods.is_empty()
     }
 
+    pub fn reset_set_time(&mut self) {
+        self.set_time = Utc::now();
+    }
+
     // FIXME energy that will be added also depends on the SoC and DPM profile
     pub fn outstanding(
         &self,

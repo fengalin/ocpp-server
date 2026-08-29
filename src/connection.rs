@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use futures::{future::FusedFuture, prelude::*};
 use log::*;
 use ocpp_rs::{
@@ -254,8 +254,29 @@ impl Connection {
                                 String::new()
                             },
                         );
+
+                        let action_ts = action.timestamp.map_or_else(Utc::now, |ts| ts.inner());
                         if matches!(action.status, ChargePointStatus::Charging) {
                             warn!("{connector_ok_log}");
+
+                            if action_ts.weekday() == chrono::Weekday::Mon
+                                && action_ts.hour() == 0
+                                && action_ts.minute() == 0
+                                && let Some(mut cs) = self.charging_schedule.take()
+                            {
+                                // The charging point I use clears the charging profile
+                                // on Monday 0:00 UTC (it seems to set a charging profile at some
+                                // later point, but that's still unclear when nor what profile).
+                                // If the EV is connected, charging starts regardless of any use
+                                // defined charging plan & SoC is only capted if specified.
+                                // As a workaround, push current charging schedule now
+                                warn!(
+                                    "alleged charging schedule removal by charging point: \
+                                    resetting charging schedule"
+                                );
+                                cs.reset_set_time();
+                                self.push_charging_schedule(cs);
+                            }
                         } else {
                             info!("{connector_ok_log}");
                         }
@@ -277,7 +298,7 @@ impl Connection {
                                         action.status,
                                     );
                                     cs.stop(
-                                        Utc::now(),
+                                        action_ts,
                                         cs.last_energy(),
                                         ChargingSessionState::Error(
                                             "Got connector available while session was still active"
