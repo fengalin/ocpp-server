@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
 
         match db.check_last_charging_session(&bms) {
             Ok(Some(session)) => {
-                info!("last known session:\n\t{session}");
+                info!("last known session:\n{session}");
                 if !session.is_complete() {
                     bms = session.bms().clone();
                     info!("updated from last chaging session: {bms:#?}");
@@ -74,10 +74,18 @@ async fn main() -> anyhow::Result<()> {
         match db.get_active_charging_schedule() {
             Ok(Some(schedule)) => {
                 info!(
-                    "active charging schedule:\n\t{schedule}\n\
-                    \toutstanding: {}",
-                    schedule
-                        .outstanding(chrono::Local::now().naive_local(), bms.constant_power_loss)
+                    "active charging schedule:\n{schedule}{}",
+                    if !schedule.is_empty() {
+                        format!(
+                            "\noutstanding: {}",
+                            schedule.outstanding(
+                                chrono::Local::now().naive_local(),
+                                bms.constant_power_loss
+                            )
+                        )
+                    } else {
+                        "".to_string()
+                    }
                 );
             }
             Ok(None) => {
