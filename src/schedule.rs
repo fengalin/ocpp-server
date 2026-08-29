@@ -82,7 +82,7 @@ impl OutstandingDurationEnergy {
 impl fmt::Display for OutstandingDurationEnergy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_zero() {
-            return f.write_str("no more charging plans");
+            return f.write_str("permanent 0 W (blocking)");
         }
 
         let total_secs = self.duration.num_seconds();
@@ -194,11 +194,11 @@ impl fmt::Display for ChargingSchedule {
             self.set_time.with_timezone(&Local),
         ))?;
         if self.periods.is_empty() {
-            f.write_str("\n\tpermanent 0 W (blocking)")?;
+            f.write_str("\npermanent 0 W (blocking)")?;
             return Ok(());
         }
         for period in self.periods.values() {
-            f.write_fmt(format_args!("\n\t* {period}"))?
+            f.write_fmt(format_args!("\n* {period}"))?
         }
         Ok(())
     }
