@@ -15,8 +15,8 @@ mod bms;
 use bms::{Bms, SoC, SoCProgress};
 pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
-mod connection;
-use connection::Connection;
+mod dispatcher;
+use dispatcher::Dispatcher;
 mod database;
 use database::Database;
 mod evse;
@@ -194,14 +194,14 @@ async fn main() -> anyhow::Result<()> {
                 last_charging_schedule,
             );
 
-            let mut connection = Connection::new(
+            let mut dispatcher = Dispatcher::new(
                 ws_stream,
                 evse,
                 args.command.expect("not dry-run"),
                 charging_plan,
             );
 
-            if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {
+            if let Err(err) = dispatcher.run_loop(ctrl_c.as_mut()).await {
                 error!("{peer}: {err:#}");
             }
         }
