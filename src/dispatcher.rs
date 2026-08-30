@@ -7,13 +7,13 @@ use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 use crate::{ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args};
 
 #[derive(Debug)]
-pub struct Connection {
+pub struct Dispatcher {
     ws_stream: WebSocketStream<TcpStream>,
     evse: Evse,
     ocpp_if: OcppInterface,
 }
 
-impl Connection {
+impl Dispatcher {
     pub fn new(
         ws_stream: WebSocketStream<TcpStream>,
         mut evse: Evse,
@@ -48,7 +48,7 @@ impl Connection {
             }
         };
 
-        Connection {
+        Dispatcher {
             ws_stream,
             evse,
             ocpp_if,
