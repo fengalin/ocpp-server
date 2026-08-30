@@ -10,7 +10,6 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Evse {
-    connector_id: Option<u32>,
     bms: Bms,
     last_known_tid: i32,
     energy_tracker: EnergyTracker,
@@ -29,7 +28,6 @@ impl Evse {
         mut last_charging_schedule: Option<ChargingSchedule>,
     ) -> Self {
         let mut this = Evse {
-            connector_id: None,
             bms,
             last_known_tid: 0,
             last_known_stop_energy: None,
@@ -223,9 +221,6 @@ impl Evse {
                     }
                     ChargePointStatus::Unavailable | ChargePointStatus::Reserved => (),
                 }
-            }
-            if self.connector_id.is_none() {
-                self.connector_id = Some(status.connector_id);
             }
         }
     }
