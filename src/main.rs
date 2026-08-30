@@ -20,6 +20,9 @@ use connection::Connection;
 mod database;
 use database::Database;
 
+mod evse;
+use evse::Evse;
+
 pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 pub mod measurements;
