@@ -4,33 +4,54 @@ use log::*;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
 
-use crate::{Bms, ChargingPlan, ChargingSchedule, ChargingSession, Evse, args};
+use crate::{ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args};
 
 #[derive(Debug)]
 pub struct Connection {
     ws_stream: WebSocketStream<TcpStream>,
     evse: Evse,
+    ocpp_if: OcppInterface,
 }
 
 impl Connection {
-    // FIXME move Evse construction to caller
     pub fn new(
         ws_stream: WebSocketStream<TcpStream>,
-        bms: Bms,
-        charging_plan: Option<ChargingPlan>,
-        last_charging_session: Option<ChargingSession>,
-        last_charging_schedule: Option<ChargingSchedule>,
+        mut evse: Evse,
         command: args::Command,
+        charging_plan: Option<ChargingPlan>,
     ) -> Self {
+        use args::Command::*;
+        let mut ocpp_if = OcppInterface::new();
+        match command {
+            Run => {
+                if let Some(charging_plan) = charging_plan {
+                    evse.set_charging_plan(charging_plan);
+                } else {
+                    // no charging plan specified, re-apply last schedule if any,
+                    // in case it was removed (e.g. due to a charging point reboot)
+                    evse.refresh_charging_schedule();
+                }
+            }
+            StopSession => {
+                evse.stop_current_session();
+            }
+            Reboot => {
+                evse.permanent_0w_set();
+                ocpp_if.push_command(CommandToChargingPoint::Reboot);
+            }
+            SetServerIp(ip_address) => {
+                let server_ip = ip_address.get_ip_address().expect("checked by caller");
+                evse.permanent_0w_set();
+                ocpp_if.push_command(CommandToChargingPoint::SetServerAddress(format!(
+                    "ws://{server_ip}:9000"
+                )));
+            }
+        };
+
         Connection {
             ws_stream,
-            evse: Evse::new(
-                bms,
-                charging_plan,
-                last_charging_session,
-                last_charging_schedule,
-                command,
-            ),
+            evse,
+            ocpp_if,
         }
     }
 
@@ -61,7 +82,7 @@ impl Connection {
                         .await
                         .context("handling incoming message")?;
 
-                    while let Some(call) = self.evse.pop_call() {
+                    for call in self.ocpp_if.pending_calls(&mut self.evse) {
                         if let Err(err) = self.ws_stream
                             .send(ts::Message::Text(call.into()))
                             .await
@@ -80,7 +101,10 @@ impl Connection {
     async fn handle_incoming_ws_message(&mut self, msg: ts::Message) -> anyhow::Result<()> {
         match msg {
             ts::Message::Text(text) => {
-                if let Some(response) = self.evse.handle_incoming_message(text.as_str()) {
+                if let Some(response) = self
+                    .ocpp_if
+                    .handle_incoming_message(&mut self.evse, text.as_str())
+                {
                     self.ws_stream
                         .send(ts::Message::Text(response.into()))
                         .await
