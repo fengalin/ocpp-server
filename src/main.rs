@@ -13,19 +13,17 @@ use args::{Args, Command};
 
 mod bms;
 use bms::{Bms, SoC, SoCProgress};
-
-mod connection;
-use connection::Connection;
-
-mod database;
-use database::Database;
-
-mod evse;
-use evse::Evse;
-
 pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
+mod connection;
+use connection::Connection;
+mod database;
+use database::Database;
+mod evse;
+use evse::Evse;
 pub mod measurements;
+mod ocpp;
+use ocpp::{CommandToChargingPoint, OcppInterface};
 pub mod schedule;
 pub use schedule::{ChargingPlan, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
 
@@ -190,13 +188,17 @@ async fn main() -> anyhow::Result<()> {
                 )
             };
 
-            let mut connection = Connection::new(
-                ws_stream,
+            let evse = Evse::new(
                 bms.clone(),
-                charging_plan,
                 last_charging_session,
                 last_charging_schedule,
+            );
+
+            let mut connection = Connection::new(
+                ws_stream,
+                evse,
                 args.command.expect("not dry-run"),
+                charging_plan,
             );
 
             if let Err(err) = connection.run_loop(ctrl_c.as_mut()).await {

@@ -145,6 +145,7 @@ impl ChargingSchedule {
 
     pub fn reset_set_time(&mut self) {
         self.set_time = Utc::now();
+        self.state = ChargingScheduleState::Active;
     }
 
     // FIXME energy that will be added also depends on the SoC and DPM profile
