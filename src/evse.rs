@@ -525,7 +525,14 @@ impl Evse {
                 chrono::Local::now().naive_local(),
                 self.bms.constant_power_loss,
             )) {
-                format!(", outstanding: {outstg_sched}")
+                format!(
+                    ", outstanding: {outstg_sched}{}",
+                    if !outstg_sched.is_zero() {
+                        format!(", {:.1} %", outstg_sched.energy / self.bms.capacity * 100.0)
+                    } else {
+                        "".to_string()
+                    }
+                )
             } else {
                 "".to_string()
             }
