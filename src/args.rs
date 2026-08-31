@@ -6,9 +6,6 @@ use std::net::Ipv4Addr;
 #[command(version, about = "Runs an OCPP server")]
 #[command(propagate_version = true)]
 pub struct Args {
-    #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
-    pub ocpp_port: u16,
-
     #[clap(long, help = "battery capacity (Wh)", default_value_t = 48_100)]
     pub battery_capacity: u32,
 
@@ -45,6 +42,15 @@ pub struct Args {
         help = "Charging plan end time - required for reach-soc-cap-before ('HH:MM')"
     )]
     pub end_time: Option<String>,
+
+    #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
+    pub ocpp_port: u16,
+
+    #[clap(
+        long,
+        help = "generate short logs: no timestamps, no modules. Suitable for a systemd unit"
+    )]
+    pub short_logs: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
