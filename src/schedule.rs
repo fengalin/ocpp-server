@@ -91,13 +91,12 @@ impl fmt::Display for OutstandingDurationEnergy {
         let mins = total_mins % 60;
         let secs = total_secs % 60;
         if hours > 0 {
-            f.write_fmt(format_args!("{hours}:{mins:02}:{secs:02}",))?;
+            f.write_fmt(format_args!("+{hours}:{mins:02}:{secs:02}",))?;
         } else {
-            f.write_fmt(format_args!("{mins:02}:{secs:02}",))?;
+            f.write_fmt(format_args!("+{mins:02}:{secs:02}",))?;
         }
 
-        f.write_str(", +")?;
-        f.write_fmt(format_args!("{:.3} kWh", self.energy / 1_000.0))
+        f.write_fmt(format_args!(", {:.3} kWh", self.energy / 1_000.0))
     }
 }
 
