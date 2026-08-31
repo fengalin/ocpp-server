@@ -2,9 +2,10 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use futures::{pin_mut, prelude::*};
 use log::*;
-#[cfg(feature = "systemd")]
-use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::{
+    io::Write,
+    net::{Ipv4Addr, SocketAddrV4},
+};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
@@ -42,12 +43,13 @@ async fn main() -> anyhow::Result<()> {
         .format_source_path(true)
         .format_line_number(true);
 
-    #[cfg(feature = "systemd")]
-    env_logger_builder
-        // when used as a systemd unit, timestamps are already logged
-        .format_timestamp(None)
-        // only keep the log level, not the crate/module
-        .format(|buf, record| writeln!(buf, "{}  {}", record.level(), record.args()));
+    if args.short_logs {
+        env_logger_builder
+            // when used as a systemd unit, timestamps are already logged
+            .format_timestamp(None)
+            // only keep the log level, not the crate/module
+            .format(|buf, record| writeln!(buf, "{}  {}", record.level(), record.args()));
+    }
 
     env_logger_builder
         .filter_level(log::LevelFilter::Info)

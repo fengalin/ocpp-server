@@ -4,7 +4,7 @@ Description=OCPP server daemon
 [Service]
 User=ocpp
 Type=simple
-ExecStart=/home/ocpp/bin/ocpp-server run
+ExecStart=/home/ocpp/bin/ocpp-server --short-logs run
 KillSignal=SIGINT
 Restart=on-failure
 RestartSec=10
