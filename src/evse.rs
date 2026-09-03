@@ -163,7 +163,7 @@ impl Evse {
                     },
                 );
 
-                let action_ts = status.timestamp.map_or_else(Utc::now, |ts| ts.inner());
+                let status_ts = status.timestamp.map_or_else(Utc::now, |ts| ts.inner());
                 if matches!(status.status, ChargePointStatus::Charging) {
                     warn!("{connector_ok_log}");
                 } else {
@@ -171,7 +171,7 @@ impl Evse {
                 }
 
                 match status.status {
-                    ChargePointStatus::Available | ChargePointStatus::Finishing => {
+                    ChargePointStatus::Available => {
                         if let Some(mut cs) = self.charging_session.take()
                             && !cs.is_complete()
                         {
@@ -187,7 +187,7 @@ impl Evse {
                                 status.status,
                             );
                             cs.stop(
-                                action_ts,
+                                status_ts,
                                 cs.last_energy(),
                                 ChargingSessionState::Error(
                                     "Got connector available while session was still active"
@@ -197,13 +197,35 @@ impl Evse {
                             self.log_session_progress();
                         }
                     }
-                    ChargePointStatus::Charging
-                    | ChargePointStatus::SuspendedEVSE
-                    | ChargePointStatus::Preparing => {
+                    ChargePointStatus::Finishing => {
+                        if let Some(ref mut cs) = self.charging_session
+                            && !cs.is_complete()
+                        {
+                            // when the transaction was stopped by the server
+                            // (SoC cap was reached), the status is Finishing.
+                            // The only way to get it back to a status which
+                            // would allow starting a new session is by unplugging
+                            // the EV first or by rebooting the charging point.
+                            // Finishing can also happen when the EV is unplugged
+                            warn!(
+                                "## ending active session with id: {} \
+                                due to connector status: {:?}",
+                                cs.session_id(),
+                                status.status,
+                            );
+                            cs.stop(status_ts, cs.last_energy(), ChargePointStatus::Finishing);
+                            self.log_session_progress();
+                        }
+                    }
+                    ChargePointStatus::Preparing
+                    | ChargePointStatus::Charging
+                    | ChargePointStatus::SuspendedEVSE => {
                         // the EV is not charging due to EVSE not providing
                         // energy (e.g. charging period with power limit set to 0)
                         // however, the session can still be restarted
-                        if let Some(cs) = self.charging_session.as_mut() {
+                        if let Some(ref mut cs) = self.charging_session
+                            && !cs.is_complete()
+                        {
                             // we can't ensure this is the same transaction
                             // and can only hope we got at least one MeterValue
                             // with the transaction id before getting this
@@ -214,7 +236,7 @@ impl Evse {
                     }
                     ChargePointStatus::SuspendedEV | ChargePointStatus::Faulted => {
                         // FIXME reached 100% => not restarting the session?
-                        if let Some(mut cs) = self.charging_session.take() {
+                        if let Some(ref mut cs) = self.charging_session {
                             cs.set_state(status.status.clone());
                             self.log_session_progress();
                         }
