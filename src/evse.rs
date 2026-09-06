@@ -379,34 +379,7 @@ impl Evse {
 
                 match self.charging_session.as_mut() {
                     Some(cs) if cs.transaction_id() == transaction_id => {
-                        let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
-                            .power(mv.active_power_import)
-                            .l1_voltage(mv.voltage_l1)
-                            .temperature(mv.temperature)
-                            .build();
-
-                        let outstg_sched = self.charging_schedule.as_ref().map(|s| {
-                            s.outstanding(
-                                chrono::Local::now().naive_local(),
-                                self.bms.constant_power_loss,
-                            )
-                        });
-                        let soc_progress = cs.add_snapshot(snapshot);
-                        if soc_progress.is_complete()
-                            && !cs.is_complete()
-                            // don't stop if we are nearly done with the schedule
-                            // (less than 1% here) so we can start a new one without unplugging
-                            // FIXME could be an option
-                            // FIXME implement an optional intermediate SoC target for multi-period scheds
-                            && outstg_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
-                        {
-                            info!("## Stopping session {transaction_id}: {soc_progress}");
-                            cs.set_state(ChargingSessionState::SoCCapReached);
-                            self.command_queue
-                                .push_back(CommandToChargingPoint::StopTransaction(transaction_id));
-                        }
-                        self.log_session_progress();
-
+                        self.update_current_session(mv, energy);
                         return;
                     }
                     Some(cs) => {
@@ -466,6 +439,12 @@ impl Evse {
 
                 match self.charging_session.as_mut() {
                     Some(cs) if cs.transaction_id() == transaction_id => {
+                        if let Some(last_snapshot) = cs.last_snapshot()
+                            && last_snapshot.energy != energy
+                        {
+                            // energy meter is stationnary but we are not up to date
+                            self.update_current_session(mv, energy);
+                        }
                         return;
                     }
                     Some(cs) => {
@@ -503,9 +482,58 @@ impl Evse {
                     mv.timestamp,
                 ));
             }
-            Probation(_) => info!(">> MeterValue with energy set to probation"),
+            Probation(_) => {
+                if let Some(transaction_id) = mv.transaction_id
+                    && let Some(ref cs) = self.charging_session
+                    && cs.transaction_id() == transaction_id
+                    && let Some(last_snapshot) = cs.last_snapshot()
+                    && last_snapshot.energy != energy
+                {
+                    // we are not up to date
+                    self.update_current_session(mv, energy);
+                }
+
+                info!(">> MeterValue with energy set to probation");
+            }
             Unknown => unreachable!("energy added"),
         }
+    }
+
+    pub fn update_current_session(&mut self, mv: MeterValueSelection, energy: u64) {
+        let Some(cs) = self.charging_session.as_mut() else {
+            return;
+        };
+
+        let outstg_sched = self.charging_schedule.as_ref().map(|s| {
+            s.outstanding(
+                chrono::Local::now().naive_local(),
+                self.bms.constant_power_loss,
+            )
+        });
+
+        let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
+            .power(mv.active_power_import)
+            .l1_voltage(mv.voltage_l1)
+            .temperature(mv.temperature)
+            .build();
+        let soc_progress = cs.add_snapshot(snapshot);
+        if soc_progress.is_complete()
+            && !cs.is_complete()
+            // don't stop if we are nearly done with the schedule
+            // (less than 1% here) so we can start a new one without unplugging
+            // FIXME could be an option
+            // FIXME implement an optional intermediate SoC target for multi-period scheds
+            && outstg_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
+        {
+            info!(
+                "## Stopping session {}: {soc_progress}",
+                cs.transaction_id()
+            );
+            cs.set_state(ChargingSessionState::SoCCapReached);
+            self.command_queue
+                .push_back(CommandToChargingPoint::StopTransaction(cs.transaction_id()));
+        }
+        self.log_session_progress();
     }
 
     pub fn have_dpm_data(&mut self, dpm_data: DpmSelection) {
