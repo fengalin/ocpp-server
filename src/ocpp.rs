@@ -218,7 +218,7 @@ impl OcppInterface {
                 );
             }
             _ => {
-                info!(">> incoming {call:?}");
+                error!(">> unhandled incoming {call:?}");
             }
         };
 
