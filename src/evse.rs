@@ -198,23 +198,26 @@ impl Evse {
                         }
                     }
                     ChargePointStatus::Finishing => {
-                        if let Some(ref mut cs) = self.charging_session
-                            && !cs.is_complete()
-                        {
-                            // when the transaction was stopped by the server
-                            // (SoC cap was reached), the status is Finishing.
-                            // The only way to get it back to a status which
-                            // would allow starting a new session is by unplugging
-                            // the EV first or by rebooting the charging point.
-                            // Finishing can also happen when the EV is unplugged
-                            warn!(
-                                "## ending active session with id: {} \
+                        if let Some(ref mut cs) = self.charging_session {
+                            if !cs.is_complete() {
+                                // when the transaction was stopped by the server
+                                // (SoC cap was reached), the status is Finishing.
+                                // The only way to get it back to a status which
+                                // would allow starting a new session is by unplugging
+                                // the EV first or by rebooting the charging point.
+                                // Finishing can also happen when the EV is unplugged
+                                warn!(
+                                    "## ending active session with id: {} \
                                 due to connector status: {:?}",
-                                cs.session_id(),
-                                status.status,
-                            );
-                            cs.stop(status_ts, cs.last_energy(), ChargePointStatus::Finishing);
-                            self.log_session_progress();
+                                    cs.session_id(),
+                                    status.status,
+                                );
+                                cs.stop(status_ts, cs.last_energy(), ChargePointStatus::Finishing);
+                                self.log_session_progress();
+                            } else {
+                                cs.set_state(status.status.clone());
+                                self.log_session_progress();
+                            }
                         }
                     }
                     ChargePointStatus::Preparing
@@ -223,9 +226,7 @@ impl Evse {
                         // the EV is not charging due to EVSE not providing
                         // energy (e.g. charging period with power limit set to 0)
                         // however, the session can still be restarted
-                        if let Some(ref mut cs) = self.charging_session
-                            && !cs.is_complete()
-                        {
+                        if let Some(ref mut cs) = self.charging_session {
                             // we can't ensure this is the same transaction
                             // and can only hope we got at least one MeterValue
                             // with the transaction id before getting this
