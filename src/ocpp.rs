@@ -60,7 +60,6 @@ impl OcppInterface {
                 }
 
                 if let Some(pending_response) = self.pending_response.take() {
-                    trace!("<< sending response {pending_response:?}");
                     match parse::serialize_message(&pending_response) {
                         Ok(response) => return Some(response),
                         Err(err) => {
@@ -371,7 +370,7 @@ impl OcppInterface {
 
             for action in actions.into_iter() {
                 self.send_action_id += 1;
-                let call = Call::new(format!("{}.occp-server-test", self.send_action_id), action);
+                let call = Call::new(format!("{}.ocpp-server-test", self.send_action_id), action);
                 match self
                     .call_response_tracker
                     .send_call(call)

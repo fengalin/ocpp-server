@@ -82,7 +82,7 @@ impl<'a> Database<'a> {
         self.get_last_charging_session_priv(bms, false)
     }
 
-    /// Get last charging session, an dadd a new reference snapshot if applicable
+    /// Get last charging session, and add a new reference snapshot if applicable
     pub fn get_last_charging_session(&self, bms: &Bms) -> anyhow::Result<Option<ChargingSession>> {
         self.get_last_charging_session_priv(bms, true)
     }
@@ -180,7 +180,6 @@ impl<'a> Database<'a> {
     ) -> i32 {
         self.0
             .query_one::<i32, _, _>(
-                // FIXME RETURNING id?
                 "INSERT INTO charging_session (state, transaction_id)
                     VALUES (:state, :transaction_id)
                     RETURNING id;",
@@ -203,7 +202,7 @@ impl<'a> Database<'a> {
         );
 
         if let Err(err) = res {
-            log::error!("could not terminate charging session: {err}");
+            log::error!("could not set charging session state: {err}");
         };
     }
 
@@ -335,7 +334,6 @@ impl<'a> Database<'a> {
         let schedule_id = self
             .0
             .query_one::<i32, _, _>(
-                // FIXME RETURNING id?
                 "INSERT INTO schedule (set_time, state)
                     VALUES (:set_time, :state)
                     RETURNING id;",
