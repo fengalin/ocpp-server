@@ -32,19 +32,14 @@ impl Dispatcher {
                     evse.refresh_charging_schedule();
                 }
             }
-            StopSession => {
-                evse.stop_current_session();
-            }
-            Reboot => {
-                evse.permanent_0w_set();
-                ocpp_if.push_command(CommandToChargingPoint::Reboot);
-            }
+            StopSession => evse.stop_current_session(),
+            Reboot => ocpp_if.push_command(&mut evse, CommandToChargingPoint::Reboot),
             SetServerIp(ip_address) => {
                 let server_ip = ip_address.get_ip_address().expect("checked by caller");
-                evse.permanent_0w_set();
-                ocpp_if.push_command(CommandToChargingPoint::SetServerAddress(format!(
-                    "ws://{server_ip}:9000"
-                )));
+                ocpp_if.push_command(
+                    &mut evse,
+                    CommandToChargingPoint::SetServerAddress(format!("ws://{server_ip}:9000")),
+                );
             }
         };
 
@@ -84,7 +79,7 @@ impl Dispatcher {
                         .await
                         .context("handling incoming cp message")?;
 
-                    for call in self.ocpp_if.pending_calls(&mut self.evse) {
+                    if let Some(call) = self.ocpp_if.pending_call(&mut self.evse) {
                         trace!("<< sending {call:?}");
                         if let Err(err) = self.ws_stream
                             .send(ts::Message::Text(call.into()))

@@ -24,7 +24,7 @@ const HEARTBEAT_INTERVAL_S: u32 = 3600;
 pub struct OcppInterface {
     send_action_id: usize,
     pending_response: Option<Message>,
-    pending_commands: VecDeque<CommandToChargingPoint>,
+    pending_actions: VecDeque<Action>,
     call_response_tracker: PendingCalls,
 }
 
@@ -33,13 +33,76 @@ impl OcppInterface {
         OcppInterface {
             send_action_id: 0,
             pending_response: None,
-            pending_commands: VecDeque::new(),
+            pending_actions: VecDeque::new(),
             call_response_tracker: PendingCalls::new(),
         }
     }
 
-    pub fn push_command(&mut self, command: CommandToChargingPoint) {
-        self.pending_commands.push_back(command);
+    pub fn push_command(&mut self, evse: &mut Evse, command: CommandToChargingPoint) {
+        use CommandToChargingPoint::*;
+        match command {
+            Reboot => {
+                info!("## queuing reset soft");
+                evse.permanent_0w_set();
+                // After a reset, the EVSE starts the last chaging plan that
+                // was set, regardless of the moment it was supposed to start.
+                // Set a 0 W permanent limit to make sure we don't start
+                // charging unexpectedly.
+                self.pending_actions.extend([
+                    Action::ClearChargingProfile(call::ClearChargingProfile {
+                        id: None,
+                        connector_id: None,
+                        charging_profile_purpose: None,
+                        stack_level: None,
+                    }),
+                    Action::SetChargingProfile(
+                        schedule::SetChargingProfile::builder(schedule::ChargingSchedule::new())
+                            .build(),
+                    ),
+                    Action::Reset(call::Reset {
+                        reset_type: ResetType::Soft,
+                    }),
+                ]);
+            }
+            SetServerAddress(address) => {
+                info!("## queuing set server address to {address}");
+                evse.permanent_0w_set();
+                // see comment about reboot above
+                self.pending_actions.extend([
+                    Action::ChangeConfiguration(call::ChangeConfiguration {
+                        key: "CS_URL".to_string(),
+                        value: address,
+                    }),
+                    Action::SetChargingProfile(
+                        schedule::SetChargingProfile::builder(schedule::ChargingSchedule::new())
+                            .build(),
+                    ),
+                    Action::Reset(call::Reset {
+                        reset_type: ResetType::Soft,
+                    }),
+                ]);
+            }
+            SetChargingSchedule(schedule) => {
+                info!("## queuing set charging profile");
+                self.pending_actions.extend([
+                    Action::ClearChargingProfile(call::ClearChargingProfile {
+                        id: None,
+                        connector_id: None,
+                        charging_profile_purpose: None,
+                        stack_level: None,
+                    }),
+                    Action::SetChargingProfile(
+                        schedule::SetChargingProfile::builder(schedule).build(),
+                    ),
+                ]);
+            }
+            StopTransaction(transaction_id) => {
+                info!("## queuing stop transaction {transaction_id}");
+                self.pending_actions.extend([Action::RemoteStopTransaction(
+                    call::RemoteStopTransaction { transaction_id },
+                )]);
+            }
+        }
     }
 
     /// Handles the incoming message
@@ -290,101 +353,40 @@ impl OcppInterface {
         }
     }
 
-    pub fn pending_calls(&mut self, evse: &mut Evse) -> Vec<String> {
-        let mut res = vec![];
-
-        for command in self
-            .pending_commands
-            .pop_front()
-            .into_iter()
-            .chain(evse.pop_command())
-        {
-            use CommandToChargingPoint::*;
-            let actions = match command {
-                Reboot => {
-                    info!("<< sending Reset Soft");
-                    evse.permanent_0w_set();
-                    // After a reset, the EVSE starts the last chaging plan that
-                    // was set, regardless of the moment it was supposed to start.
-                    // Set a 0 W permanent limit to make sure we don't start
-                    // charging unexpectedly.
-                    vec![
-                        Action::ClearChargingProfile(call::ClearChargingProfile {
-                            id: None,
-                            connector_id: None,
-                            charging_profile_purpose: None,
-                            stack_level: None,
-                        }),
-                        Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new(),
-                            )
-                            .build(),
-                        ),
-                        Action::Reset(call::Reset {
-                            reset_type: ResetType::Soft,
-                        }),
-                    ]
-                }
-                SetServerAddress(address) => {
-                    info!("<< setting server address to {address}");
-                    evse.permanent_0w_set();
-                    // see comment about reboot above
-                    vec![
-                        Action::ChangeConfiguration(call::ChangeConfiguration {
-                            key: "CS_URL".to_string(),
-                            value: address,
-                        }),
-                        Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new(),
-                            )
-                            .build(),
-                        ),
-                        Action::Reset(call::Reset {
-                            reset_type: ResetType::Soft,
-                        }),
-                    ]
-                }
-                SetChargingSchedule(schedule) => {
-                    info!("<< sending SetChargingProfile");
-                    vec![
-                        Action::ClearChargingProfile(call::ClearChargingProfile {
-                            id: None,
-                            connector_id: None,
-                            charging_profile_purpose: None,
-                            stack_level: None,
-                        }),
-                        Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(schedule).build(),
-                        ),
-                    ]
-                }
-                StopTransaction(transaction_id) => {
-                    info!("<< sending StopTransaction {transaction_id}");
-                    vec![Action::RemoteStopTransaction(call::RemoteStopTransaction {
-                        transaction_id,
-                    })]
-                }
-            };
-
-            for action in actions.into_iter() {
-                self.send_action_id += 1;
-                let call = Call::new(format!("{}.ocpp-server-test", self.send_action_id), action);
-                match self
-                    .call_response_tracker
-                    .send_call(call)
-                    .context("send_call")
-                {
-                    Ok(call) => res.push(call),
-                    Err(err) => {
-                        error!("skipping call due to error: {err}");
-                    }
-                }
-            }
+    /// Pops next pending call to be sent to charging point
+    ///
+    /// Calls are sent one at a time otherwise the charging point
+    /// ends up being confused, sometimes after a long moment.
+    pub fn pending_call(&mut self, evse: &mut Evse) -> Option<String> {
+        if let Some(command) = evse.pop_command() {
+            self.push_command(evse, command);
         }
 
-        res
+        let action = self.pending_actions.pop_front()?;
+        info!(
+            "<< sending {}",
+            match &action {
+                Action::ChangeConfiguration(_) => "change configuration",
+                Action::ClearChargingProfile(_) => "clear charging profile",
+                Action::Reset(_) => "reset",
+                Action::RemoteStopTransaction(_) => "remote stop transaction",
+                Action::SetChargingProfile(_) => "set charging profile",
+                _ => "(unexpected variant name)",
+            }
+        );
+        self.send_action_id += 1;
+        let call = Call::new(format!("{}.ocpp-server", self.send_action_id), action);
+        match self
+            .call_response_tracker
+            .send_call(call)
+            .context("send_call")
+        {
+            Ok(call) => Some(call),
+            Err(err) => {
+                error!("skipping call due to error: {err}");
+                None
+            }
+        }
     }
 }
 
