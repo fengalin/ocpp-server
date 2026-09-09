@@ -60,6 +60,8 @@ impl Dispatcher {
         mut ctrl_c: std::pin::Pin<&mut impl FusedFuture<Output = Result<(), std::io::Error>>>,
     ) -> anyhow::Result<()> {
         loop {
+            trace!("## dispatcher loop iter");
+
             futures::select_biased! {
                 _ = ctrl_c => {
                     warn!("shutting down due to SIGINT");
@@ -75,14 +77,15 @@ impl Dispatcher {
 
                     let msg = msg.inspect_err(|err| match err {
                         ts::Error::ConnectionClosed | ts::Error::Protocol(_) | ts::Error::Utf8(_) => (),
-                        other => error!("Error processing connection: {other}"),
+                        other => error!("cp websocket error: {other}"),
                     })?;
 
                     self.handle_incoming_ws_message(msg)
                         .await
-                        .context("handling incoming message")?;
+                        .context("handling incoming cp message")?;
 
                     for call in self.ocpp_if.pending_calls(&mut self.evse) {
+                        trace!("<< sending {call:?}");
                         if let Err(err) = self.ws_stream
                             .send(ts::Message::Text(call.into()))
                             .await
@@ -95,6 +98,8 @@ impl Dispatcher {
             }
         }
 
+        trace!("## dispatcher loop complete");
+
         Ok(())
     }
 
@@ -105,6 +110,7 @@ impl Dispatcher {
                     .ocpp_if
                     .handle_incoming_message(&mut self.evse, text.as_str())
                 {
+                    trace!("<< sending response {response:?}");
                     self.ws_stream
                         .send(ts::Message::Text(response.into()))
                         .await
@@ -117,6 +123,7 @@ impl Dispatcher {
             ts::Message::Ping(payload) => {
                 trace!(">> ping");
                 self.ws_stream.send(ts::Message::Pong(payload)).await?;
+                trace!("<< pong sent");
             }
             ts::Message::Close(reason) => {
                 warn!(">> websocket closed by peer: {reason:?}");
