@@ -522,12 +522,13 @@ impl From<enums::ChargePointStatus> for ChargingSessionState {
             Faulted => Error("Faulted".to_string()),
             Available => panic!("should not be called in this state"),
             Reserved => unimplemented!(),
+            enums::ChargePointStatus::Unknown(_) => ChargingSessionState::Unknown,
         }
     }
 }
 
-impl From<Option<enums::Reason>> for ChargingSessionState {
-    fn from(reason: Option<enums::Reason>) -> Self {
+impl From<Option<&enums::Reason>> for ChargingSessionState {
+    fn from(reason: Option<&enums::Reason>) -> Self {
         use ChargingSessionState::*;
         let Some(reason) = reason else {
             return Error("stopped for unknown reason".to_string());
@@ -545,6 +546,7 @@ impl From<Option<enums::Reason>> for ChargingSessionState {
             UnlockCommand => UnlockCommandFromServer,
             enums::Reason::Reboot => ChargingSessionState::Reboot,
             Other => Error("other".to_string()),
+            enums::Reason::Unknown(code) => Error(format!("unknown({code}")),
         }
     }
 }

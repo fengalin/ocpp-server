@@ -242,7 +242,9 @@ impl Evse {
                             self.log_session_progress();
                         }
                     }
-                    ChargePointStatus::Unavailable | ChargePointStatus::Reserved => (),
+                    _ => {
+                        warn!("unhandled charging point status: {:?}", status.status);
+                    }
                 }
             }
         }
@@ -312,7 +314,11 @@ impl Evse {
                     stop.meter_stop as f64 / 1_000.0,
                     stop.reason
                 );
-                cs.stop(stop.timestamp.inner(), stop.meter_stop, stop.reason)
+                cs.stop(
+                    stop.timestamp.inner(),
+                    stop.meter_stop,
+                    stop.reason.as_ref(),
+                )
             } else {
                 warn!(
                     "## transaction with id: {} stopped (expected {cur_transaction_id}), \
@@ -343,7 +349,7 @@ impl Evse {
             self.have_transaction_id(stop.transaction_id);
             ChargingSession::save_missing_stopped_session(
                 Some(stop.timestamp.inner()),
-                stop.reason,
+                stop.reason.as_ref(),
                 stop.meter_stop,
                 stop.transaction_id,
             );
