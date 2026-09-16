@@ -167,8 +167,9 @@ async fn main() -> anyhow::Result<()> {
     let accept_stream = listener.accept().fuse();
     pin_mut!(accept_stream);
 
-    futures::select_biased! {
-        _ = ctrl_c => {
+    tokio::select! {
+        biased;
+        _ = ctrl_c.as_mut() => {
             warn!("shutting down due to SIGINT");
         }
         accept_res = accept_stream => {
@@ -207,7 +208,6 @@ async fn main() -> anyhow::Result<()> {
                 error!("{peer}: {err:#}");
             }
         }
-        complete => (),
     }
 
     Ok(())
