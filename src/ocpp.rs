@@ -280,6 +280,9 @@ impl OcppInterface {
         unique_id: String,
         response: A::ResponseType,
     ) {
+        if let Some(prev) = self.pending_response.take() {
+            error!("un-sent previous response {prev:?}");
+        }
         match action.get_response(unique_id, response) {
             Ok(response) => {
                 self.pending_response = Some(response);
