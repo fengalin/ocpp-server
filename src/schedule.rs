@@ -415,6 +415,7 @@ impl ChargingPlan {
                         .and_local_timezone(Local)
                         .unwrap();
 
+                    // FIXME altenatively, warn from how much we would miss the SoC cap
                     if start > now + TimeDelta::minutes(2) {
                         // FIXME added a safety margin, needs more thinking + const / conf
                         break;
@@ -1066,13 +1067,11 @@ mod tests {
                     .build(),
             );
 
-        let schedule_id = Database::get().add_new_charging_schedule(&schedule);
+        let db = Database::get();
+        let schedule_id = db.add_new_charging_schedule(&schedule);
         schedule.id = schedule_id;
 
-        let last_schedule = Database::get()
-            .get_active_charging_schedule()
-            .unwrap()
-            .unwrap();
+        let last_schedule = db.get_active_charging_schedule().unwrap().unwrap();
 
         assert_eq!(schedule, last_schedule);
     }
