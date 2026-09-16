@@ -29,7 +29,8 @@ impl Dispatcher {
                 } else {
                     // no charging plan specified, re-apply last schedule if any,
                     // in case it was removed (e.g. due to a charging point reboot)
-                    evse.refresh_charging_schedule();
+                    // FIXME only do this if there's an outstanding charging period
+                    // evse.refresh_charging_schedule();
                 }
             }
             StopSession => {
