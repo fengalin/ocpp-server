@@ -62,8 +62,9 @@ impl Dispatcher {
         loop {
             trace!("## dispatcher loop iter");
 
-            futures::select_biased! {
-                _ = ctrl_c => {
+            tokio::select! {
+                biased;
+                _ = ctrl_c.as_mut() => {
                     warn!("shutting down due to SIGINT");
                     self.ws_stream.close(None).await.context("closing websocket")?;
                     let recv_res = self.ws_stream.next().await;
@@ -94,7 +95,7 @@ impl Dispatcher {
                         }
                     }
                 }
-                complete => break,
+                else => break,
             }
         }
 
