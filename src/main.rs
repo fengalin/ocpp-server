@@ -1,13 +1,9 @@
 use anyhow::{Context, bail};
 use clap::Parser;
-use futures::{pin_mut, prelude::*};
 use log::*;
-use std::{
-    io::Write,
-    net::{Ipv4Addr, SocketAddrV4},
-};
-use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
+use tokio::sync::broadcast;
+
+use std::io::Write;
 
 mod args;
 use args::{Args, Command};
@@ -131,15 +127,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
-    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
-
-    let ctrl_c = tokio::signal::ctrl_c().fuse();
-    pin_mut!(ctrl_c);
-
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bindind to {addr}"))?;
-    info!("Listening on: {addr}");
+    let dispatcher = Dispatcher::new(bms, &args, charging_plan).await?;
 
     match &args.command {
         None => {
@@ -164,51 +152,15 @@ async fn main() -> anyhow::Result<()> {
         _ => (),
     }
 
-    let accept_stream = listener.accept().fuse();
-    pin_mut!(accept_stream);
+    let (stop_tx, stop_rx) = broadcast::channel(8);
 
-    tokio::select! {
-        biased;
-        _ = ctrl_c.as_mut() => {
-            warn!("shutting down due to SIGINT");
-        }
-        accept_res = accept_stream => {
-            let Ok((stream, _)) = accept_res else {
-                bail!("TCP listener terminated");
-            };
-            let peer = stream.peer_addr().context("getting peer address")?;
-            let ws_stream = accept_async(stream).await.context("accepting ws stream")?;
+    let dispatcher_hdl = tokio::spawn(dispatcher.into_task(stop_rx));
 
-            info!("peer address {peer}");
+    let _ = tokio::signal::ctrl_c().await;
+    warn!("shutting down due to SIGINT");
+    let _ = stop_tx.send(());
 
-            let (last_charging_session, last_charging_schedule) = {
-                let db = Database::get();
-                (
-                    db.get_last_charging_session(&bms)
-                        .context("getting last charging session")?,
-                    db.get_active_charging_schedule()
-                        .context("getting last charging schedule")?,
-                )
-            };
-
-            let evse = Evse::new(
-                bms.clone(),
-                last_charging_session,
-                last_charging_schedule,
-            );
-
-            let mut dispatcher = Dispatcher::new(
-                ws_stream,
-                evse,
-                args.command.expect("not dry-run"),
-                charging_plan,
-            );
-
-            if let Err(err) = dispatcher.run_loop(ctrl_c.as_mut()).await {
-                error!("{peer}: {err:#}");
-            }
-        }
-    }
+    let _ = dispatcher_hdl.await;
 
     Ok(())
 }

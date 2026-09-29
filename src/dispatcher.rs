@@ -1,78 +1,119 @@
-use anyhow::{Context, bail};
-use futures::{future::FusedFuture, prelude::*};
-use log::*;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{WebSocketStream, tungstenite as ts};
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::time::Duration;
 
-use crate::{ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args};
+use anyhow::{Context, bail};
+use futures::prelude::*;
+use log::*;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
+use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
+
+use crate::{Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args};
+
+const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
-    ws_stream: WebSocketStream<TcpStream>,
-    evse: Evse,
+    command: Option<args::Command>,
+    charging_plan: Option<ChargingPlan>,
+    listener: TcpListener,
     ocpp_if: OcppInterface,
+    evse: Evse,
 }
 
 impl Dispatcher {
-    pub fn new(
-        ws_stream: WebSocketStream<TcpStream>,
-        mut evse: Evse,
-        command: args::Command,
+    pub async fn new(
+        bms: Bms,
+        args: &args::Args,
         charging_plan: Option<ChargingPlan>,
-    ) -> Self {
-        use args::Command::*;
-        let mut ocpp_if = OcppInterface::new();
-        match command {
-            Run => {
-                if let Some(charging_plan) = charging_plan {
-                    evse.set_charging_plan(charging_plan);
-                } else {
-                    // no charging plan specified, re-apply last schedule if any,
-                    // in case it was removed (e.g. due to a charging point reboot)
-                    // FIXME only do this if there's an outstanding charging period
-                    // evse.refresh_charging_schedule();
-                }
-            }
-            StopSession => {
-                evse.stop_current_session();
-            }
-            Reboot => {
-                evse.permanent_0w_set();
-                ocpp_if.push_command(CommandToChargingPoint::Reboot);
-            }
-            SetServerIp(ip_address) => {
-                let server_ip = ip_address.get_ip_address().expect("checked by caller");
-                evse.permanent_0w_set();
-                ocpp_if.push_command(CommandToChargingPoint::SetServerAddress(format!(
-                    "ws://{server_ip}:9000"
-                )));
-            }
-        };
+    ) -> anyhow::Result<Self> {
+        let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
-        Dispatcher {
-            ws_stream,
-            evse,
-            ocpp_if,
+        let listener = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bindind to {addr}"))?;
+        info!("Listening on: {addr}");
+
+        Ok(Dispatcher {
+            command: args.command.clone(),
+            charging_plan,
+            listener,
+            ocpp_if: OcppInterface::new(),
+            evse: Evse::new(bms),
+        })
+    }
+
+    pub async fn into_task(mut self, mut stop_rx: broadcast::Receiver<()>) {
+        tokio::select! {
+            biased;
+            _  = stop_rx.recv() => {
+                info!("shutting down due to stop request");
+            }
+            _ = self.accept() => (),
         }
     }
 
-    pub async fn run_loop(
-        &mut self,
-        mut ctrl_c: std::pin::Pin<&mut impl FusedFuture<Output = Result<(), std::io::Error>>>,
-    ) -> anyhow::Result<()> {
+    pub async fn accept(&mut self) -> anyhow::Result<()> {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, _)) => {
+                    if let Err(err) = self.listen(stream).await {
+                        warn!("error listening to OCPP ws: {err}");
+                    }
+                }
+                Err(err) => {
+                    warn!("error accepting OCPP ws: {err}");
+                }
+            }
+
+            tokio::time::sleep(RECONNECT).await;
+        }
+    }
+
+    pub async fn listen(&mut self, stream: TcpStream) -> anyhow::Result<()> {
+        let peer = stream.peer_addr().context("getting peer address")?;
+        let mut ws_stream = accept_async(stream).await.context("accepting ws stream")?;
+
+        info!("peer address {peer}");
+
+        // FIXME might want to refresh EVSE state
+
+        if let Some(command) = self.command.take() {
+            use args::Command::*;
+            match command {
+                Run => {
+                    if let Some(charging_plan) = self.charging_plan.take() {
+                        self.evse.set_charging_plan(charging_plan);
+                    } else {
+                        // no charging plan specified, re-apply last schedule if any,
+                        // in case it was removed (e.g. due to a charging point reboot)
+                        // FIXME only do this if there's an outstanding charging period
+                        // self.evse.refresh_charging_schedule();
+                    }
+                }
+                StopSession => self.evse.stop_current_session(),
+                Reboot => {
+                    self.evse.permanent_0w_set();
+                    self.ocpp_if.push_command(CommandToChargingPoint::Reboot);
+                }
+                SetServerIp(ip_address) => {
+                    let server_ip = ip_address.get_ip_address().expect("checked by caller");
+                    self.evse.permanent_0w_set();
+                    self.ocpp_if
+                        .push_command(CommandToChargingPoint::SetServerAddress(format!(
+                            "ws://{server_ip}:9000"
+                        )));
+                }
+            };
+        }
+
         loop {
             trace!("## dispatcher loop iter");
 
             tokio::select! {
                 biased;
-                _ = ctrl_c.as_mut() => {
-                    warn!("shutting down due to SIGINT");
-                    self.ws_stream.close(None).await.context("closing websocket")?;
-                    let recv_res = self.ws_stream.next().await;
-                    info!("client replied {recv_res:?}");
-                    return Ok(());
-                }
-                recv_res = self.ws_stream.next() => {
+
+                recv_res = ws_stream.next() => {
                     let Some(msg) = recv_res else {
                         bail!("websocket terminated");
                     };
@@ -82,30 +123,30 @@ impl Dispatcher {
                         other => error!("cp websocket error: {other}"),
                     })?;
 
-                    self.handle_incoming_ws_message(msg)
+                    self.handle_incoming_ws_message(&mut ws_stream, msg)
                         .await
                         .context("handling incoming cp message")?;
 
                     for call in self.ocpp_if.pending_calls(&mut self.evse) {
                         trace!("<< sending {call:?}");
-                        if let Err(err) = self.ws_stream
+                        ws_stream
                             .send(ts::Message::Text(call.into()))
                             .await
-                            .context("ws send") {
-                                error!("error sending call: {err}");
-                        }
+                            .context("ws send")?;
                     }
                 }
-                else => break,
+                else => {
+                    bail!("web socket terminated");
+                }
             }
         }
-
-        trace!("## dispatcher loop complete");
-
-        Ok(())
     }
 
-    async fn handle_incoming_ws_message(&mut self, msg: ts::Message) -> anyhow::Result<()> {
+    async fn handle_incoming_ws_message(
+        &mut self,
+        ws_stream: &mut WebSocketStream<TcpStream>,
+        msg: ts::Message,
+    ) -> anyhow::Result<()> {
         match msg {
             ts::Message::Text(text) => {
                 if let Some(response) = self
@@ -113,7 +154,7 @@ impl Dispatcher {
                     .handle_incoming_message(&mut self.evse, text.as_str())
                 {
                     trace!("<< sending response {response:?}");
-                    self.ws_stream
+                    ws_stream
                         .send(ts::Message::Text(response.into()))
                         .await
                         .context("sending response")?;
