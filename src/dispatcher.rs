@@ -121,11 +121,7 @@ impl Dispatcher {
             ts::Message::Binary(payload) => {
                 warn!(">> msg bin: {payload:?}");
             }
-            ts::Message::Ping(payload) => {
-                trace!(">> ping");
-                self.ws_stream.send(ts::Message::Pong(payload)).await?;
-                trace!("<< pong sent");
-            }
+            ts::Message::Ping(_) => trace!(">> ping"),
             ts::Message::Close(reason) => {
                 warn!(">> websocket closed by peer: {reason:?}");
                 return Ok(());
