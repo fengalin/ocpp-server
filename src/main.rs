@@ -85,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
                     "active charging schedule:\n{schedule}{}",
                     if !schedule.is_empty() {
                         format!(
-                            "\noutstanding: {}",
-                            schedule.outstanding(
+                            "\nremaining: {}",
+                            schedule.remaining(
                                 chrono::Local::now().naive_local(),
                                 bms.constant_power_loss
                             )
@@ -112,12 +112,12 @@ async fn main() -> anyhow::Result<()> {
             {
                 info!("Selected charging plan: {cp:?}");
                 if let Some(s) = cp.to_charging_schedule(&bms) {
-                    let outstanding =
-                        s.outstanding(chrono::Local::now().naive_local(), bms.constant_power_loss);
+                    let remaining =
+                        s.remaining(chrono::Local::now().naive_local(), bms.constant_power_loss);
                     info!(
-                        "outstanding: {outstanding}{}",
-                        if !outstanding.is_zero() {
-                            format!(", {}", SoC::Relative(outstanding.energy / bms.capacity))
+                        "remaining: {remaining}{}",
+                        if !remaining.is_zero() {
+                            format!(", {}", SoC::Relative(remaining.energy / bms.capacity))
                         } else {
                             "".to_string()
                         }

@@ -517,8 +517,8 @@ impl Evse {
             return;
         };
 
-        let outstg_sched = self.charging_schedule.as_ref().map(|s| {
-            s.outstanding(
+        let remain_sched = self.charging_schedule.as_ref().map(|s| {
+            s.remaining(
                 chrono::Local::now().naive_local(),
                 self.bms.constant_power_loss,
             )
@@ -536,7 +536,7 @@ impl Evse {
             // (less than 1% here) so we can start a new one without unplugging
             // FIXME could be an option
             // FIXME implement an optional intermediate SoC target for multi-period scheds
-            && outstg_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
+            && remain_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
         {
             info!(
                 "## Stopping session {}: {soc_progress}",
@@ -584,14 +584,14 @@ impl Evse {
         info!(
             "## session {cs} / {}{}",
             SoCProgress::from_soc_and_cap(cs.last_soc(), self.bms.soc_cap).cap(),
-            if let Some(outstg_sched) = self.charging_schedule.as_ref().map(|s| s.outstanding(
+            if let Some(remain_sched) = self.charging_schedule.as_ref().map(|s| s.remaining(
                 chrono::Local::now().naive_local(),
                 self.bms.constant_power_loss,
             )) {
                 format!(
-                    ", outstanding: {outstg_sched}{}",
-                    if !outstg_sched.is_zero() {
-                        format!(", {:.1} %", outstg_sched.energy / self.bms.capacity * 100.0)
+                    ", remaining: {remain_sched}{}",
+                    if !remain_sched.is_zero() {
+                        format!(", {:.1} %", remain_sched.energy / self.bms.capacity * 100.0)
                     } else {
                         "".to_string()
                     }
