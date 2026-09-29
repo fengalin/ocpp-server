@@ -59,17 +59,17 @@ impl fmt::Display for ChargingSchedulePeriod {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub struct OutstandingDurationEnergy {
+pub struct RemainingDurationEnergy {
     pub duration: Duration,
     pub energy: f64,
 }
-impl OutstandingDurationEnergy {
+impl RemainingDurationEnergy {
     fn zero() -> Self {
         Default::default()
     }
 
     pub fn is_zero(&self) -> bool {
-        *self == OutstandingDurationEnergy::zero()
+        *self == RemainingDurationEnergy::zero()
     }
 
     fn add(&mut self, delta: TimeDelta, active_power: f64) {
@@ -79,7 +79,7 @@ impl OutstandingDurationEnergy {
     }
 }
 
-impl fmt::Display for OutstandingDurationEnergy {
+impl fmt::Display for RemainingDurationEnergy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_zero() {
             return f.write_str("permanent 0 W (blocking)");
@@ -148,12 +148,12 @@ impl ChargingSchedule {
     }
 
     // FIXME energy that will be added also depends on the SoC and DPM profile
-    pub fn outstanding(
+    pub fn remaining(
         &self,
         from_instant: NaiveDateTime,
         constant_power_loss: u16,
-    ) -> OutstandingDurationEnergy {
-        let mut rem = OutstandingDurationEnergy::default();
+    ) -> RemainingDurationEnergy {
+        let mut rem = RemainingDurationEnergy::default();
         if !self.is_active() {
             return rem;
         }
@@ -1108,7 +1108,7 @@ mod tests {
 
         let before_period1 = period1_start - TimeDelta::minutes(30);
         assert_eq!(
-            OutstandingDurationEnergy {
+            RemainingDurationEnergy {
                 duration: period1_duration + period2_duration,
                 energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
                     * (period1_duration.num_seconds() as f64)
@@ -1119,13 +1119,13 @@ mod tests {
                         / 60.0
                         / 60.0
             },
-            schedule.outstanding(before_period1, CONST_POWER_LOSS),
+            schedule.remaining(before_period1, CONST_POWER_LOSS),
         );
 
         let during_period1 = period1_start + TimeDelta::minutes(30);
         let during_period1_dur = period1_start + period1_duration - during_period1;
         assert_eq!(
-            OutstandingDurationEnergy {
+            RemainingDurationEnergy {
                 duration: during_period1_dur + period2_duration,
                 energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
                     * (during_period1_dur.num_seconds() as f64)
@@ -1136,46 +1136,46 @@ mod tests {
                         / 60.0
                         / 60.0
             },
-            schedule.outstanding(during_period1, CONST_POWER_LOSS),
+            schedule.remaining(during_period1, CONST_POWER_LOSS),
         );
 
         let between_periods = period1_start + period1_duration + TimeDelta::minutes(30);
         assert!(between_periods < period2_start);
         assert_eq!(
-            OutstandingDurationEnergy {
+            RemainingDurationEnergy {
                 duration: period2_duration,
                 energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
                     * (period2_duration.num_seconds() as f64)
                     / 60.0
                     / 60.0
             },
-            schedule.outstanding(between_periods, CONST_POWER_LOSS),
+            schedule.remaining(between_periods, CONST_POWER_LOSS),
         );
 
         let during_period2 = period2_start + TimeDelta::minutes(30);
         let during_period2_dur = period2_start + period2_duration - during_period2;
         assert_eq!(
-            OutstandingDurationEnergy {
+            RemainingDurationEnergy {
                 duration: during_period2_dur,
                 energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
                     * (during_period2_dur.num_seconds() as f64)
                     / 60.0
                     / 60.0
             },
-            schedule.outstanding(during_period2, CONST_POWER_LOSS),
+            schedule.remaining(during_period2, CONST_POWER_LOSS),
         );
 
         let after_period2 = period2_start + period2_duration + TimeDelta::minutes(30);
         assert!(
             schedule
-                .outstanding(after_period2, CONST_POWER_LOSS)
+                .remaining(after_period2, CONST_POWER_LOSS)
                 .is_zero(),
         );
 
         schedule.inactivate();
         assert!(
             schedule
-                .outstanding(before_period1, CONST_POWER_LOSS)
+                .remaining(before_period1, CONST_POWER_LOSS)
                 .is_zero(),
         );
     }
