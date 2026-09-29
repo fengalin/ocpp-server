@@ -22,11 +22,17 @@ pub struct Evse {
 }
 
 impl Evse {
-    pub fn new(
-        bms: Bms,
-        last_charging_session: Option<ChargingSession>,
-        mut last_charging_schedule: Option<ChargingSchedule>,
-    ) -> Self {
+    pub fn new(bms: Bms) -> Self {
+        let (last_charging_session, mut last_charging_schedule) = {
+            let db = Database::get();
+            (
+                db.get_last_charging_session(&bms)
+                    .expect("valid db interface"),
+                db.get_active_charging_schedule()
+                    .expect("valid db interface"),
+            )
+        };
+
         let mut this = Evse {
             bms,
             last_known_tid: 0,
