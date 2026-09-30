@@ -73,7 +73,7 @@ impl OutstandingDurationEnergy {
     }
 
     fn add(&mut self, delta: TimeDelta, active_power: f64) {
-        assert!(delta.num_seconds() > 0);
+        assert!(delta.num_seconds() >= 0);
         self.duration += delta;
         self.energy += active_power * delta.num_seconds() as f64 / 60.0 / 60.0;
     }
