@@ -8,12 +8,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
-use crate::{Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args};
+use crate::{Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args, notification};
 
 const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
+    notif_tx: broadcast::Sender<notification::ChargeState>,
     command: Option<args::Command>,
     charging_plan: Option<ChargingPlan>,
     listener: TcpListener,
@@ -25,6 +26,7 @@ impl Dispatcher {
     pub async fn new(
         bms: Bms,
         args: &args::Args,
+        notif_tx: broadcast::Sender<notification::ChargeState>,
         charging_plan: Option<ChargingPlan>,
     ) -> anyhow::Result<Self> {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
@@ -35,11 +37,12 @@ impl Dispatcher {
         info!("Listening on: {addr}");
 
         Ok(Dispatcher {
+            notif_tx: notif_tx.clone(),
             command: args.command.clone(),
             charging_plan,
             listener,
-            ocpp_if: OcppInterface::new(),
-            evse: Evse::new(bms),
+            ocpp_if: OcppInterface::new(notif_tx.clone()),
+            evse: Evse::new(bms, notif_tx),
         })
     }
 
@@ -59,10 +62,12 @@ impl Dispatcher {
                 Ok((stream, _)) => {
                     if let Err(err) = self.listen(stream).await {
                         warn!("error listening to OCPP ws: {err}");
+                        self.notif_error();
                     }
                 }
                 Err(err) => {
                     warn!("error accepting OCPP ws: {err}");
+                    self.notif_error();
                 }
             }
 
@@ -135,9 +140,6 @@ impl Dispatcher {
                             .context("ws send")?;
                     }
                 }
-                else => {
-                    bail!("web socket terminated");
-                }
             }
         }
     }
@@ -165,8 +167,7 @@ impl Dispatcher {
             }
             ts::Message::Ping(_) => trace!(">> ping"),
             ts::Message::Close(reason) => {
-                warn!(">> websocket closed by peer: {reason:?}");
-                return Ok(());
+                bail!(">> websocket closed by peer: {reason:?}");
             }
             other => {
                 warn!(">> unhandled websocket message: {other:?}");
@@ -174,5 +175,12 @@ impl Dispatcher {
         }
 
         Ok(())
+    }
+
+    fn notif_error(&self) {
+        trace!("notifiying error");
+        if let Err(err) = self.notif_tx.send(notification::ChargeState::Error) {
+            error!("error sending notification: {err}");
+        }
     }
 }

@@ -14,14 +14,17 @@ use ocpp_rs::{
         typed_call_result::TypedCallResult,
     },
 };
+use tokio::sync::broadcast;
+
 use std::collections::VecDeque;
 
-use crate::{ChargingSchedule, Evse, measurements::*, schedule};
+use crate::{ChargingSchedule, Evse, measurements::*, notification, schedule};
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
 #[derive(Debug)]
 pub struct OcppInterface {
+    notif_tx: broadcast::Sender<notification::ChargeState>,
     send_action_id: usize,
     pending_response: Option<Message>,
     pending_commands: VecDeque<CommandToChargingPoint>,
@@ -29,8 +32,9 @@ pub struct OcppInterface {
 }
 
 impl OcppInterface {
-    pub fn new() -> Self {
+    pub fn new(notif_tx: broadcast::Sender<notification::ChargeState>) -> Self {
         OcppInterface {
+            notif_tx,
             send_action_id: 0,
             pending_response: None,
             pending_commands: VecDeque::new(),
@@ -50,12 +54,14 @@ impl OcppInterface {
 
         let Ok(msg) = parse::deserialize_to_message(msg) else {
             error!("Failed to deserialize message: {msg}");
+            self.notif_error();
             return None;
         };
         match msg {
             Message::Call(call) => {
                 if let Err(err) = self.handle_incoming_call(evse, call) {
                     error!("error handling incoming call: {err}");
+                    self.notif_error();
                     return None;
                 }
 
@@ -64,15 +70,26 @@ impl OcppInterface {
                         Ok(response) => return Some(response),
                         Err(err) => {
                             error!("Failed to serialize response: {err}, {pending_response:?}");
+                            self.notif_error();
                         }
                     }
                 }
             }
             Message::CallResult(call_result) => self.handle_incoming_call_result(evse, call_result),
-            Message::CallError(err) => error!("{err:?}"),
+            Message::CallError(err) => {
+                error!("{err:?}");
+                self.notif_error();
+            }
         }
 
         None
+    }
+
+    fn notif_error(&self) {
+        trace!("notifiying error");
+        if let Err(err) = self.notif_tx.send(notification::ChargeState::Error) {
+            error!("error sending notification: {err}");
+        }
     }
 
     fn handle_incoming_call(&mut self, evse: &mut Evse, call: Call) -> anyhow::Result<()> {
