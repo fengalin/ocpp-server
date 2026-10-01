@@ -19,10 +19,13 @@ use database::Database;
 mod evse;
 use evse::Evse;
 pub mod measurements;
+pub mod notification;
 mod ocpp;
 use ocpp::{CommandToChargingPoint, OcppInterface};
 pub mod schedule;
 pub use schedule::{ChargingPlan, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
+pub mod unix_socket;
+pub use unix_socket::UnixSocketNotifier;
 
 #[cfg(test)]
 pub mod tests;
@@ -127,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
-    let dispatcher = Dispatcher::new(bms, &args, charging_plan).await?;
+    let (notif_tx, notif_rx) = broadcast::channel(8);
+    let unix_socket_notif = UnixSocketNotifier::new(notif_rx)?;
+    let dispatcher = Dispatcher::new(bms, &args, notif_tx, charging_plan).await?;
 
     match &args.command {
         None => {
@@ -154,12 +159,14 @@ async fn main() -> anyhow::Result<()> {
 
     let (stop_tx, stop_rx) = broadcast::channel(8);
 
-    let dispatcher_hdl = tokio::spawn(dispatcher.into_task(stop_rx));
+    let unix_socket_notif_hdl = tokio::spawn(unix_socket_notif.into_task(stop_rx));
+    let dispatcher_hdl = tokio::spawn(dispatcher.into_task(stop_tx.subscribe()));
 
     let _ = tokio::signal::ctrl_c().await;
     warn!("shutting down due to SIGINT");
     let _ = stop_tx.send(());
 
+    let _ = unix_socket_notif_hdl.await;
     let _ = dispatcher_hdl.await;
 
     Ok(())
