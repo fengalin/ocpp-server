@@ -300,7 +300,7 @@ impl ChargingSession {
         }
 
         match (ref_snapshot_cap, self.bms.soc_cap) {
-            (Some(ref_soc_cap), Some(bms_soc_cap)) if ref_soc_cap < 1.0 && bms_soc_cap >= 1.0 => {
+            (Some(ref_soc_cap), Some(bms_soc_cap)) if ref_soc_cap < 1.0 && bms_soc_cap > 1.0 => {
                 warn!(
                     "disabling SoC cap for a recovered uncomplete session, \
                         make sure this is really what you intended to do"
@@ -1003,7 +1003,7 @@ mod tests {
         let corrected_ref_soc = corrected_initial_soc + 30.0 / BATTERY_CAPACITY as f64;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(corrected_initial_soc))
-            .soc_cap(1.0)
+            .soc_cap(1.01)
             .build();
         let mut recovered_session = Database::get()
             .get_last_charging_session(&bms)
@@ -1017,7 +1017,7 @@ mod tests {
             SoC::Absolute(corrected_initial_soc),
             recovered_session.bms().initial_soc,
         );
-        assert_eq!(None, recovered_session.bms().soc_cap,);
+        assert_eq!(None, recovered_session.bms().soc_cap);
         let last_snapshot = recovered_session.last_snapshot().unwrap();
         assert!(last_snapshot.is_reference);
         assert_eq!(SoC::Absolute(corrected_ref_soc), last_snapshot.soc);
