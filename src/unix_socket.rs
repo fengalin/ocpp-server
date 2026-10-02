@@ -7,18 +7,18 @@ use tokio::sync::broadcast;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::notification;
+use crate::notification::{self, ChargePointNotification};
 
 const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct UnixSocketNotifier {
     listener: UnixListener,
-    notif_rx: broadcast::Receiver<notification::ChargeState>,
+    notif_rx: broadcast::Receiver<ChargePointNotification>,
 }
 
 impl UnixSocketNotifier {
-    pub fn new(notif_rx: broadcast::Receiver<notification::ChargeState>) -> anyhow::Result<Self> {
+    pub fn new(notif_rx: broadcast::Receiver<ChargePointNotification>) -> anyhow::Result<Self> {
         let socket_path = Path::new(notification::UNIX_SOCKET_PATH);
         if socket_path.exists() {
             std::fs::remove_file(socket_path).context("unix socket")?;

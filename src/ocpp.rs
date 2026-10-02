@@ -18,13 +18,18 @@ use tokio::sync::broadcast;
 
 use std::collections::VecDeque;
 
-use crate::{ChargingSchedule, Evse, measurements::*, notification, schedule};
+use crate::{
+    ChargingSchedule, Evse,
+    measurements::*,
+    notification::{ChargePointConnectionState, ChargePointNotification},
+    schedule,
+};
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
 #[derive(Debug)]
 pub struct OcppInterface {
-    notif_tx: broadcast::Sender<notification::ChargeState>,
+    notif_tx: broadcast::Sender<ChargePointNotification>,
     send_action_id: usize,
     pending_response: Option<Message>,
     pending_commands: VecDeque<CommandToChargingPoint>,
@@ -32,7 +37,7 @@ pub struct OcppInterface {
 }
 
 impl OcppInterface {
-    pub fn new(notif_tx: broadcast::Sender<notification::ChargeState>) -> Self {
+    pub fn new(notif_tx: broadcast::Sender<ChargePointNotification>) -> Self {
         OcppInterface {
             notif_tx,
             send_action_id: 0,
@@ -87,7 +92,9 @@ impl OcppInterface {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self.notif_tx.send(notification::ChargeState::Error) {
+        if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
+            ChargePointConnectionState::Error,
+        )) {
             error!("error sending notification: {err}");
         }
     }
@@ -190,6 +197,11 @@ impl OcppInterface {
             }
             Action::Heartbeat(heartbeat) => {
                 info!(">> incoming {heartbeat:?}");
+                if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
+                    ChargePointConnectionState::Heartbeat,
+                )) {
+                    error!("error sending notification: {err}");
+                }
                 self.prepare_response(
                     heartbeat,
                     call.unique_id,
