@@ -300,7 +300,7 @@ impl ChargingSession {
         }
 
         match (ref_snapshot_cap, self.bms.soc_cap) {
-            (Some(ref_soc_cap), Some(bms_soc_cap)) if ref_soc_cap < 1.0 && bms_soc_cap >= 1.0 => {
+            (Some(ref_soc_cap), Some(bms_soc_cap)) if ref_soc_cap < 1.0 && bms_soc_cap > 1.0 => {
                 warn!(
                     "disabling SoC cap for a recovered uncomplete session, \
                         make sure this is really what you intended to do"
