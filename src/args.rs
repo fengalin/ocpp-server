@@ -28,7 +28,7 @@ pub struct Args {
 
     #[clap(
         long,
-        help = "State of Charge upper limit (%). Use 100 to discard previous SoC limit"
+        help = "State of Charge upper limit (%). Use more than 100 to discard previous SoC limit"
     )]
     pub soc_cap: Option<u8>,
 
