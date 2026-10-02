@@ -8,13 +8,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
-use crate::{Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args, notification};
+use crate::{
+    Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args,
+    notification::ChargePointNotification,
+};
 
 const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
-    notif_tx: broadcast::Sender<notification::ChargeState>,
+    notif_tx: broadcast::Sender<ChargePointNotification>,
     command: Option<args::Command>,
     charging_plan: Option<ChargingPlan>,
     listener: TcpListener,
@@ -26,7 +29,7 @@ impl Dispatcher {
     pub async fn new(
         bms: Bms,
         args: &args::Args,
-        notif_tx: broadcast::Sender<notification::ChargeState>,
+        notif_tx: broadcast::Sender<ChargePointNotification>,
         charging_plan: Option<ChargingPlan>,
     ) -> anyhow::Result<Self> {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
@@ -179,7 +182,7 @@ impl Dispatcher {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self.notif_tx.send(notification::ChargeState::Error) {
+        if let Err(err) = self.notif_tx.send(ChargePointNotification::Error) {
             error!("error sending notification: {err}");
         }
     }
