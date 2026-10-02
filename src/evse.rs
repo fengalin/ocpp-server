@@ -7,8 +7,10 @@ use std::collections::VecDeque;
 
 use crate::{
     Bms, ChargingPlan, ChargingSchedule, ChargingSession, ChargingSessionSnapshot,
-    ChargingSessionState, CommandToChargingPoint, Database, SoC, bms::SoCProgress, measurements::*,
-    notification,
+    ChargingSessionState, CommandToChargingPoint, Database, SoC,
+    bms::SoCProgress,
+    measurements::*,
+    notification::{self, ChargePointNotification},
 };
 
 #[derive(Debug)]
@@ -22,11 +24,11 @@ pub struct Evse {
     command_queue: VecDeque<CommandToChargingPoint>,
     charging_session: Option<ChargingSession>,
     charging_schedule: Option<ChargingSchedule>,
-    notif_tx: broadcast::Sender<notification::ChargeState>,
+    notif_tx: broadcast::Sender<ChargePointNotification>,
 }
 
 impl Evse {
-    pub fn new(bms: Bms, notif_tx: broadcast::Sender<notification::ChargeState>) -> Self {
+    pub fn new(bms: Bms, notif_tx: broadcast::Sender<ChargePointNotification>) -> Self {
         let (last_charging_session, mut last_charging_schedule) = {
             let db = Database::get();
             (
@@ -665,7 +667,7 @@ impl Evse {
 
     fn notif_state(&self, state: notification::ChargeState) {
         trace!("notifiying {state:?}");
-        if let Err(err) = self.notif_tx.send(state) {
+        if let Err(err) = self.notif_tx.send(ChargePointNotification::Charge(state)) {
             error!("error sending notification: {err}");
         }
     }
