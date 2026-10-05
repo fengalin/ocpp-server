@@ -42,19 +42,26 @@ impl UnixSocketNotifier {
     }
 
     pub async fn accept(&mut self) -> anyhow::Result<()> {
+        let mut log_accept_failure = true;
+
         loop {
             match self.listener.accept().await {
                 Ok((stream, _)) => {
+                    log_accept_failure = true;
+
                     if let Err(err) = self.serve(stream).await {
                         info!("error serving unix socket: {err}");
                     }
                 }
                 Err(err) => {
-                    warn!("error accepting unix socket: {err}");
+                    if log_accept_failure {
+                        log_accept_failure = false;
+                        warn!("error accepting unix socket: {err}");
+                    }
+
+                    tokio::time::sleep(RECONNECT).await;
                 }
             }
-
-            tokio::time::sleep(RECONNECT).await;
         }
     }
 

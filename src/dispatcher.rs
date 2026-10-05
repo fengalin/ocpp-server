@@ -8,10 +8,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
+use std::time::Duration;
+
 use crate::{
     Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args,
     notification::{ChargePointConnectionState, ChargePointNotification},
 };
+
+const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
@@ -66,17 +70,26 @@ impl Dispatcher {
     }
 
     pub async fn accept(&mut self) -> anyhow::Result<()> {
+        let mut log_accept_failure = true;
+
         loop {
             match self.listener.accept().await {
                 Ok((stream, _)) => {
+                    log_accept_failure = true;
+
                     if let Err(err) = self.listen(stream).await {
                         warn!("error listening to OCPP ws: {err}");
                         self.notif_error();
                     }
                 }
                 Err(err) => {
-                    warn!("error accepting OCPP ws: {err}");
-                    self.notif_error();
+                    if log_accept_failure {
+                        log_accept_failure = false;
+                        warn!("error accepting OCPP ws: {err}");
+                        self.notif_error();
+                    }
+
+                    tokio::time::sleep(RECONNECT).await;
                 }
             }
         }
