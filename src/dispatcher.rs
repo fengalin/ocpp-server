@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::time::Duration;
+use std::ops::ControlFlow;
 
 use anyhow::{Context, bail};
 use futures::prelude::*;
@@ -12,8 +12,6 @@ use crate::{
     Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args,
     notification::{ChargePointConnectionState, ChargePointNotification},
 };
-
-const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
@@ -63,7 +61,7 @@ impl Dispatcher {
         if let Some(mut ws_stream) = self.ws_stream.take()
             && let Err(err) = ws_stream.close(None).await.context("closing websocket")
         {
-            error!("{err}");
+            error!("{err:#}");
         }
     }
 
@@ -81,8 +79,6 @@ impl Dispatcher {
                     self.notif_error();
                 }
             }
-
-            tokio::time::sleep(RECONNECT).await;
         }
     }
 
@@ -135,9 +131,15 @@ impl Dispatcher {
                 other => error!("cp websocket error: {other}"),
             })?;
 
-            self.handle_incoming_ws_message(msg)
+            if self
+                .handle_incoming_ws_message(msg)
                 .await
-                .context("handling incoming cp message")?;
+                .context("handling incoming cp message")?
+                .is_break()
+            {
+                warn!("stopping listener loop further to message handling");
+                break;
+            }
 
             for call in self.ocpp_if.pending_calls(&mut self.evse) {
                 trace!("<< sending {call:?}");
@@ -149,9 +151,14 @@ impl Dispatcher {
                     .context("ws send")?;
             }
         }
+
+        Ok(())
     }
 
-    async fn handle_incoming_ws_message(&mut self, msg: ts::Message) -> anyhow::Result<()> {
+    async fn handle_incoming_ws_message(
+        &mut self,
+        msg: ts::Message,
+    ) -> anyhow::Result<ControlFlow<()>> {
         match msg {
             ts::Message::Text(text) => {
                 if let Some(response) = self
@@ -173,13 +180,16 @@ impl Dispatcher {
             ts::Message::Ping(_) => trace!(">> ping"),
             ts::Message::Close(reason) => {
                 warn!(">> websocket closed by peer: {reason:?}");
+                // forget it: we don't need to explicitely close it now
+                self.ws_stream = None;
+                return Ok(ControlFlow::Break(()));
             }
             other => {
                 warn!(">> unhandled websocket message: {other:?}");
             }
         }
 
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     fn notif_error(&self) {
