@@ -3,8 +3,13 @@ Description=OCPP server daemon
 
 [Service]
 User=ocpp
+Group=ocpp
 Type=simple
-ExecStart=/home/ocpp/bin/ocpp-server --short-logs run
+ExecStart=/home/ocpp/.local/bin/ocpp-server run
+RuntimeDirectory=charge_point
+UMask=002
+StandardOutput=append:/home/ocpp/server_out.log
+StandardError=append:/home/ocpp/server_err.log
 KillSignal=SIGINT
 Restart=on-failure
 RestartSec=10
