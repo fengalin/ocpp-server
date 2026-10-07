@@ -62,7 +62,12 @@ impl Args {
     pub fn check(&self) -> anyhow::Result<()> {
         use Command::*;
         match &self.command {
-            None | Some(Run) | Some(StopSession) | Some(Reboot) => (),
+            None
+            | Some(GetConfiguration)
+            | Some(Run)
+            | Some(StopSession)
+            | Some(Reboot)
+            | Some(SetMeterValueSampleInterval(_)) => (),
             Some(SetServerIp(cmd_args)) => {
                 let _ = cmd_args
                     .get_ip_address()
@@ -76,6 +81,8 @@ impl Args {
 
 #[derive(clap::Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    #[clap(about = "Get Charge Point Configuration")]
+    GetConfiguration,
     #[clap(about = "Run the server")]
     Run,
     #[clap(about = "Stop the active session")]
@@ -83,6 +90,8 @@ pub enum Command {
     #[clap(about = "Reboot the EVSE once connected. This will \
         replace any charging schedule with a permanent 0 W limit")]
     Reboot,
+    #[clap(about = "Change the MeterValueSampleInterval key")]
+    SetMeterValueSampleInterval(Interval),
     #[clap(about = "Change the server IP, this will also reboot and \
         replace any charging schedule with a permanent 0 W limit")]
     SetServerIp(ServerIp),
@@ -195,6 +204,13 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
             ChargingPlan::NoLimit => Ok(Some(crate::ChargingPlan::NoLimit)),
         }
     }
+}
+
+#[derive(clap::Parser, Clone, Debug, Default, PartialEq, Eq)]
+#[clap(about = "interval in seconds")]
+pub struct Interval {
+    #[clap(long, help = "interval in seconds", default_value_t = 60)]
+    pub interval: u16,
 }
 
 #[derive(clap::Parser, Clone, Debug, Default, PartialEq, Eq)]

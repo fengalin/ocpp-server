@@ -106,6 +106,10 @@ impl Dispatcher {
         if let Some(command) = self.command.take() {
             use args::Command::*;
             match command {
+                GetConfiguration => {
+                    self.ocpp_if
+                        .push_command(CommandToChargingPoint::GetConfiguration);
+                }
                 Run => {
                     if let Some(charging_plan) = self.charging_plan.take() {
                         self.evse.set_charging_plan(charging_plan);
@@ -120,6 +124,12 @@ impl Dispatcher {
                 Reboot => {
                     self.evse.permanent_0w_set();
                     self.ocpp_if.push_command(CommandToChargingPoint::Reboot);
+                }
+                SetMeterValueSampleInterval(val) => {
+                    self.ocpp_if
+                        .push_command(CommandToChargingPoint::SetMeterValueSampleInterval(
+                            val.interval,
+                        ));
                 }
                 SetServerIp(ip_address) => {
                     let server_ip = ip_address.get_ip_address().expect("checked by caller");

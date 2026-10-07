@@ -333,6 +333,12 @@ impl OcppInterface {
         {
             use CommandToChargingPoint::*;
             let actions = match command {
+                GetConfiguration => {
+                    info!("<< Getting Configuration");
+                    vec![Action::GetConfiguration(call::GetConfiguration {
+                        key: None,
+                    })]
+                }
                 Reboot => {
                     info!("<< sending Reset Soft");
                     evse.permanent_0w_set();
@@ -355,6 +361,19 @@ impl OcppInterface {
                         ),
                         Action::Reset(call::Reset {
                             reset_type: ResetType::Soft,
+                        }),
+                    ]
+                }
+                SetMeterValueSampleInterval(interval) => {
+                    info!("<< setting meter value sample interval to {interval}");
+                    const KEY: &str = "MeterValueSampleInterval";
+                    vec![
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: KEY.to_string(),
+                            value: interval.to_string(),
+                        }),
+                        Action::GetConfiguration(call::GetConfiguration {
+                            key: Some(vec![KEY.to_string()]),
                         }),
                     ]
                 }
@@ -422,8 +441,10 @@ impl OcppInterface {
 
 #[derive(Debug)]
 pub enum CommandToChargingPoint {
+    GetConfiguration,
     Reboot,
     SetChargingSchedule(ChargingSchedule),
+    SetMeterValueSampleInterval(u16),
     SetServerAddress(String),
     StopTransaction(i32),
 }
