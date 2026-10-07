@@ -413,7 +413,7 @@ impl Evse {
             Increasing(_) => {
                 let Some(transaction_id) = mv.transaction_id else {
                     debug!(
-                        "## MeterValue without transaction id, but incresing energy, \
+                        "## MeterValue without transaction id & incresing energy, \
                         waiting for next MeterValue"
                     );
                     return;
@@ -473,7 +473,7 @@ impl Evse {
             Stationnary(_) => {
                 let Some(transaction_id) = mv.transaction_id else {
                     debug!(
-                        "## MeterValue without transaction id, stationary \
+                        "## MeterValue without transaction id & stationary \
                         waiting for next MeterValue"
                     );
                     return;
@@ -525,13 +525,15 @@ impl Evse {
                 ));
             }
             Probation(_) => {
-                if let Some(transaction_id) = mv.transaction_id
-                    && let Some(ref cs) = self.charging_session
-                    && cs.transaction_id() == transaction_id
+                if let Some(ref cs) = self.charging_session
+                    && !cs.state().is_complete()
                     && let Some(last_snapshot) = cs.last_snapshot()
-                    && last_snapshot.energy != energy
+                    && last_snapshot.energy < energy
                 {
-                    // we are not up to date
+                    // note: the CP only provides one connector
+                    // so don't filter on whether this MeterValues
+                    // comes from connector 0 or 1, it's useful for us anyway
+                    // in this state
                     self.update_current_session(mv, energy);
                 }
 

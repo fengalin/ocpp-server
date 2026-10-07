@@ -459,11 +459,14 @@ pub enum ChargingSessionState {
 impl ChargingSessionState {
     pub fn is_complete(&self) -> bool {
         use ChargingSessionState::*;
-        // FIXME unsure about:
-        // * SuspendedByEv (probably same as SuspendedByEvse)
         matches!(
             self,
-            SoCCapReached | StoppedByUser | Reboot | UnlockCommandFromServer | Error(_)
+            SoCCapReached
+                | SuspendedByEv
+                | StoppedByUser
+                | Reboot
+                | UnlockCommandFromServer
+                | Error(_)
         )
     }
 }
