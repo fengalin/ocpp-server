@@ -30,6 +30,7 @@ const HEARTBEAT_INTERVAL_S: u32 = 3600;
 #[derive(Debug)]
 pub struct OcppInterface {
     notif_tx: broadcast::Sender<ChargePointNotification>,
+    can_send_actions: bool,
     send_action_id: usize,
     pending_response: Option<Message>,
     pending_commands: VecDeque<CommandToChargingPoint>,
@@ -40,6 +41,7 @@ impl OcppInterface {
     pub fn new(notif_tx: broadcast::Sender<ChargePointNotification>) -> Self {
         OcppInterface {
             notif_tx,
+            can_send_actions: false,
             send_action_id: 0,
             pending_response: None,
             pending_commands: VecDeque::new(),
@@ -123,6 +125,13 @@ impl OcppInterface {
                             reapplying charging schedule"
                     );
                     evse.refresh_charging_schedule();
+                }
+
+                // FIXME this is test for now to see if that improves CP stability
+                // wrt to sampled meter value & DPM notifications
+                // wait for connector 1 status before sending anything
+                if !self.can_send_actions {
+                    self.can_send_actions = status.connector_id > 0;
                 }
 
                 evse.have_charging_point_status(&status);
@@ -324,6 +333,10 @@ impl OcppInterface {
 
     pub fn pending_calls(&mut self, evse: &mut Evse) -> Vec<String> {
         let mut res = vec![];
+
+        if !self.can_send_actions {
+            return res;
+        }
 
         for command in self
             .pending_commands
