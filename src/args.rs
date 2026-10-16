@@ -24,19 +24,19 @@ pub struct Args {
         long,
         help = "initial State of Charge (%) at start of a session (upcoming or in progress)"
     )]
-    pub initial_soc: Option<u8>,
+    pub init: Option<u8>,
 
     #[clap(
         long,
         help = "State of Charge upper limit (%). Use more than 100 to discard previous SoC limit"
     )]
-    pub soc_cap: Option<u8>,
+    pub target: Option<u8>,
 
     #[clap(
         long,
         help = "which charging plan to apply (default: no changes to current plan)"
     )]
-    pub charging_plan: Option<ChargingPlan>,
+    pub plan: Option<ChargingPlan>,
 
     #[clap(
         long,
@@ -141,10 +141,10 @@ impl From<&Args> for crate::Bms {
         crate::Bms::builder(args.battery_capacity, args.constant_power_loss)
             .initial_soc(
                 // FIXME also support relative at some point
-                args.initial_soc
+                args.init
                     .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f64 / 100.0)),
             )
-            .soc_cap(args.soc_cap.map(|soc| soc as f64 / 100.0))
+            .soc_cap(args.target.map(|soc| soc as f64 / 100.0))
             .build()
     }
 }
@@ -159,7 +159,7 @@ pub enum ChargingPlan {
     OffPeakTomorrow,
     #[clap(help = "Compute a start time so the battery reaches SoC cap \
         as close as possible to stop time (needs to specify soc_cap & stop_time)")]
-    ReachSocCapBefore,
+    ReachSocBefore,
     #[clap(help = "Start ASAP")]
     NoLimit,
 }
@@ -168,7 +168,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
     // FIXME
     type Error = anyhow::Error;
     fn try_from(args: &Args) -> anyhow::Result<Self> {
-        let Some(charging_plan) = args.charging_plan else {
+        let Some(charging_plan) = args.plan else {
             return Ok(None);
         };
 
@@ -180,10 +180,10 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
             ChargingPlan::OffPeakTomorrow => Ok(Some(crate::ChargingPlan::OffPeakTomorrow {
                 power_limit: args.power_limit,
             })),
-            ChargingPlan::ReachSocCapBefore => {
+            ChargingPlan::ReachSocBefore => {
                 let mut err_msg = String::new();
-                if args.soc_cap.is_none() {
-                    err_msg.push_str("'reach-soc-cap-before' requires soc-cap to be specified");
+                if args.target.is_none() {
+                    err_msg.push_str("'reach-soc-before' requires SoC 'target' to be specified");
                 }
                 if let Some(ref end_time) = args.end_time {
                     match end_time.parse::<NaiveTime>() {
@@ -199,7 +199,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                             if !err_msg.is_empty() {
                                 err_msg.push('\n');
                             }
-                            err_msg.push_str("'reach-soc-cap-before' failed to parse end_time: ");
+                            err_msg.push_str("'reach-soc-before' failed to parse 'end_time': ");
                             err_msg.push_str(&err.to_string());
                         }
                     }
@@ -207,7 +207,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                     if !err_msg.is_empty() {
                         err_msg.push('\n');
                     }
-                    err_msg.push_str("'reach-soc-cap-before' requires soc-cap to be specified");
+                    err_msg.push_str("'reach-soc-before' requires SoC 'target' to be specified");
                 }
 
                 bail!(err_msg);
