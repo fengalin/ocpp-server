@@ -438,12 +438,12 @@ impl OcppInterface {
                         Action::ChangeConfiguration(call::ChangeConfiguration {
                             key: "METER_VALUES_ALIGNED_ADDITIONAL_DATA".to_string(),
                             // Only L1 & no MID for my CP
-                            value: "DPM.Voltage.L1, DPM.Power.Active.Import".to_string(),
+                            value: "DPM.Power.Active.Import, DPM.Voltage.L1".to_string(),
                         }),
                         Action::ChangeConfiguration(call::ChangeConfiguration {
                             key: "METER_VALUES_SAMPLED_ADDITIONAL_DATA".to_string(),
                             // No MID for my CP
-                            value: "DPM.Energy.Active.Import.Register, DPM.Power.Active.Import"
+                            value: "DPM.Energy.Active.Import.Register, DPM.Power.Active.Import, DPM.Voltage.L1"
                                 .to_string(),
                         }),
                     ]
