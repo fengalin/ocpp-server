@@ -67,7 +67,9 @@ impl Args {
             | Some(Run)
             | Some(StopSession)
             | Some(Reboot)
-            | Some(SetMeterValueSampleInterval(_)) => (),
+            | Some(ResetMeterValueConfiguration)
+            | Some(SetMeterValueConfiguration)
+            | Some(SetMeterValueAlignedInterval(_)) => (),
             Some(SetServerIp(cmd_args)) => {
                 let _ = cmd_args
                     .get_ip_address()
@@ -90,8 +92,12 @@ pub enum Command {
     #[clap(about = "Reboot the EVSE once connected. This will \
         replace any charging schedule with a permanent 0 W limit")]
     Reboot,
+    #[clap(about = "Reset the MeterValue related keys to their default values")]
+    ResetMeterValueConfiguration,
+    #[clap(about = "Set the MeterValue related keys to values appropriate for my CP")]
+    SetMeterValueConfiguration,
     #[clap(about = "Change the MeterValueSampleInterval key")]
-    SetMeterValueSampleInterval(Interval),
+    SetMeterValueAlignedInterval(Interval),
     #[clap(about = "Change the server IP, this will also reboot and \
         replace any charging schedule with a permanent 0 W limit")]
     SetServerIp(ServerIp),

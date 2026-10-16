@@ -125,11 +125,18 @@ impl Dispatcher {
                     self.evse.permanent_0w_set();
                     self.ocpp_if.push_command(CommandToChargingPoint::Reboot);
                 }
-                SetMeterValueSampleInterval(val) => {
+                ResetMeterValueConfiguration => {
                     self.ocpp_if
-                        .push_command(CommandToChargingPoint::SetMeterValueSampleInterval(
-                            val.interval,
-                        ));
+                        .push_command(CommandToChargingPoint::ResetMeterValueConfiguration);
+                }
+                SetMeterValueConfiguration => {
+                    self.ocpp_if
+                        .push_command(CommandToChargingPoint::SetMeterValueConfiguration);
+                }
+                SetMeterValueAlignedInterval(val) => {
+                    self.ocpp_if.push_command(
+                        CommandToChargingPoint::SetMeterValueAlignedInterval(val.interval),
+                    );
                 }
                 SetServerIp(ip_address) => {
                     let server_ip = ip_address.get_ip_address().expect("checked by caller");

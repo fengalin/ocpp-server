@@ -377,18 +377,83 @@ impl OcppInterface {
                         }),
                     ]
                 }
-                SetMeterValueSampleInterval(interval) => {
-                    info!("<< setting meter value sample interval to {interval}");
-                    const KEY: &str = "MeterValueSampleInterval";
+                ResetMeterValueConfiguration => {
+                    info!("<< resetting meter value configuration to defaults");
                     vec![
                         Action::ChangeConfiguration(call::ChangeConfiguration {
-                            key: KEY.to_string(),
-                            value: interval.to_string(),
+                            key: "ClockAlignedDataInterval".to_string(),
+                            // July 26 default: 900, current default: 4126
+                            value: 4126.to_string(),
                         }),
-                        Action::GetConfiguration(call::GetConfiguration {
-                            key: Some(vec![KEY.to_string()]),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "MeterValuesAlignedData".to_string(),
+                            value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Temperature, Voltage.L1, Voltage.L2, Voltage.L3".to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "MeterValueSampleInterval".to_string(),
+                            // July 26 default: 60, seen 150 after an update
+                            value: 150.to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "MeterValuesSampledData".to_string(),
+                            value: "Current.Export, Current.Import, Current.Offered, Energy.Active.Export.Register, Energy.Active.Import.Register, Energy.Reactive.Export.Register, Energy.Reactive.Import.Register, Energy.Active.Export.Interval, Energy.Active.Import.Interval, Energy.Reactive.Export.Interval, Energy.Reactive.Import.Interval, Frequency, Power.Active.Export, Power.Active.Import, Power.Factor, Power.Offered, Power.Reactive.Export, Power.Reactive.Import, RPM, SoC, Temperature, Voltage".to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "CLOCK_ALIGNED_ADDITIONAL_DATA_INTERVAL".to_string(),
+                            value: 3503.to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "METER_VALUES_ALIGNED_ADDITIONAL_DATA".to_string(),
+                            value: "DPM.Voltage.L1,DPM.Voltage.L2,DPM.Voltage.L3, MID.Voltage.L1,MID.Voltage.L2,MID.Voltage.L3,MID.Energy.Active.Import.Register".to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "METER_VALUES_SAMPLED_ADDITIONAL_DATA".to_string(),
+                            value: "DPM.Energy.Active.Import.Register,DPM.Power.Active.Import,MID.Energy.Active.Import.Register,MID.Power.Active.Import"
+                                .to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "METER_VALUE_SAMPLE_ADDITIONAL_INTERVAL".to_string(),
+                            value: 150.to_string(),
                         }),
                     ]
+                }
+                SetMeterValueConfiguration => {
+                    info!("<< setting meter value specific configuration");
+                    vec![
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "MeterValuesAlignedData".to_string(),
+                            // Only L1 for my CP
+                            value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Temperature, Voltage.L1".to_string(),
+                        }),
+                        // Note: could set to 60 just like it used to be
+                        // Action::ChangeConfiguration(call::ChangeConfiguration {
+                        //     key: "MeterValueSampleInterval".to_string(),
+                        //     value: 60.to_string(),
+                        // }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "MeterValuesSampledData".to_string(),
+                            // FIXME CP doesn't seem to return Power & SoC => remove if confirmed
+                            value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Frequency, Power.Active.Import, Power.Offered, SoC, Temperature, Voltage".to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "METER_VALUES_ALIGNED_ADDITIONAL_DATA".to_string(),
+                            // Only L1 & no MID for my CP
+                            value: "DPM.Voltage.L1, DPM.Power.Active.Import".to_string(),
+                        }),
+                        Action::ChangeConfiguration(call::ChangeConfiguration {
+                            key: "METER_VALUES_SAMPLED_ADDITIONAL_DATA".to_string(),
+                            // No MID for my CP
+                            value: "DPM.Energy.Active.Import.Register, DPM.Power.Active.Import"
+                                .to_string(),
+                        }),
+                    ]
+                }
+                SetMeterValueAlignedInterval(interval) => {
+                    info!("<< setting meter value clock aligned interval to {interval}");
+                    vec![Action::ChangeConfiguration(call::ChangeConfiguration {
+                        key: "ClockAlignedDataInterval".to_string(),
+                        value: interval.to_string(),
+                    })]
                 }
                 SetServerAddress(address) => {
                     info!("<< setting server address to {address}");
@@ -456,8 +521,10 @@ impl OcppInterface {
 pub enum CommandToChargingPoint {
     GetConfiguration,
     Reboot,
+    ResetMeterValueConfiguration,
     SetChargingSchedule(ChargingSchedule),
-    SetMeterValueSampleInterval(u16),
+    SetMeterValueConfiguration,
+    SetMeterValueAlignedInterval(u16),
     SetServerAddress(String),
     StopTransaction(i32),
 }
