@@ -416,7 +416,7 @@ impl ChargingPlan {
                         .unwrap();
 
                     // FIXME altenatively, warn from how much we would miss the SoC cap
-                    if start > now + TimeDelta::minutes(2) {
+                    if start + TimeDelta::minutes(2) > now {
                         // FIXME added a safety margin, needs more thinking + const / conf
                         break;
                     }
