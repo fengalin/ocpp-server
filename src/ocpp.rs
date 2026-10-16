@@ -346,6 +346,15 @@ impl OcppInterface {
         {
             use CommandToChargingPoint::*;
             let actions = match command {
+                ClearChargingProfile => {
+                    info!("<< Clearing Charging Profile");
+                    vec![Action::ClearChargingProfile(call::ClearChargingProfile {
+                        id: None,
+                        connector_id: None,
+                        charging_profile_purpose: None,
+                        stack_level: None,
+                    })]
+                }
                 GetConfiguration => {
                     info!("<< Getting Configuration");
                     vec![Action::GetConfiguration(call::GetConfiguration {
@@ -360,12 +369,6 @@ impl OcppInterface {
                     // Set a 0 W permanent limit to make sure we don't start
                     // charging unexpectedly.
                     vec![
-                        Action::ClearChargingProfile(call::ClearChargingProfile {
-                            id: None,
-                            connector_id: None,
-                            charging_profile_purpose: None,
-                            stack_level: None,
-                        }),
                         Action::SetChargingProfile(
                             schedule::SetChargingProfile::builder(
                                 schedule::ChargingSchedule::new(),
@@ -477,17 +480,9 @@ impl OcppInterface {
                 }
                 SetChargingSchedule(schedule) => {
                     info!("<< sending SetChargingProfile");
-                    vec![
-                        Action::ClearChargingProfile(call::ClearChargingProfile {
-                            id: None,
-                            connector_id: None,
-                            charging_profile_purpose: None,
-                            stack_level: None,
-                        }),
-                        Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(schedule).build(),
-                        ),
-                    ]
+                    vec![Action::SetChargingProfile(
+                        schedule::SetChargingProfile::builder(schedule).build(),
+                    )]
                 }
                 StopTransaction(transaction_id) => {
                     info!("<< sending StopTransaction {transaction_id}");
@@ -519,6 +514,7 @@ impl OcppInterface {
 
 #[derive(Debug)]
 pub enum CommandToChargingPoint {
+    ClearChargingProfile,
     GetConfiguration,
     Reboot,
     ResetMeterValueConfiguration,

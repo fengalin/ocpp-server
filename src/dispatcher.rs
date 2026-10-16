@@ -106,6 +106,10 @@ impl Dispatcher {
         if let Some(command) = self.command.take() {
             use args::Command::*;
             match command {
+                ClearChargingProfile => {
+                    self.ocpp_if
+                        .push_command(CommandToChargingPoint::ClearChargingProfile);
+                }
                 GetConfiguration => {
                     self.ocpp_if
                         .push_command(CommandToChargingPoint::GetConfiguration);
