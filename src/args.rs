@@ -63,6 +63,7 @@ impl Args {
         use Command::*;
         match &self.command {
             None
+            | Some(ClearChargingProfile)
             | Some(GetConfiguration)
             | Some(Run)
             | Some(StopSession)
@@ -83,6 +84,10 @@ impl Args {
 
 #[derive(clap::Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    #[clap(
+        about = "Clear the Charging Profile. Useful after switching fron another app, otherwise not needed"
+    )]
+    ClearChargingProfile,
     #[clap(about = "Get Charge Point Configuration")]
     GetConfiguration,
     #[clap(about = "Run the server")]
