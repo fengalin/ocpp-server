@@ -567,7 +567,7 @@ impl Evse {
             // (less than 1% here) so we can start a new one without unplugging
             // FIXME could be an option
             // FIXME implement an optional intermediate SoC target for multi-period scheds
-            && remain_sched.is_none_or(|outstg| outstg.energy > self.bms.capacity / 100.0)
+            && remain_sched.is_none_or(|remain| remain.energy as f32 > self.bms.capacity as f32 / 100.0)
         {
             info!(
                 "## Stopping session {}: {soc_progress}",
@@ -628,7 +628,10 @@ impl Evse {
                 format!(
                     ", remaining: {remain_sched}{}",
                     if !remain_sched.is_zero() {
-                        format!(", {:.1} %", remain_sched.energy / self.bms.capacity * 100.0)
+                        format!(
+                            ", {:.1} %",
+                            remain_sched.energy as f32 / self.bms.capacity as f32 * 100.0
+                        )
                     } else {
                         "".to_string()
                     }

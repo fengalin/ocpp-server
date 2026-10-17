@@ -7,19 +7,19 @@ use std::{
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct Bms {
-    pub capacity: f64,
-    pub constant_power_loss: u16,
-    pub initial_energy: Option<f64>,
-    pub current_energy: Option<f64>,
+    pub capacity: u32,
+    pub constant_power_loss: u32,
+    pub initial_energy: Option<u64>,
+    pub current_energy: Option<u64>,
     pub initial_soc: SoC,
     pub current_soc: SoC,
-    pub target_soc: Option<f64>,
+    pub target_soc: Option<f32>,
 }
 
 impl Bms {
-    pub fn builder(capacity: u32, constant_power_loss: u16) -> BmsBuilder {
+    pub fn builder(capacity: u32, constant_power_loss: u32) -> BmsBuilder {
         BmsBuilder(Bms {
-            capacity: capacity as f64,
+            capacity,
             constant_power_loss,
             initial_energy: None,
             current_energy: None,
@@ -34,36 +34,35 @@ impl Bms {
         let Some(initial_energy) = self.initial_energy else {
             return;
         };
-        let energy = energy as f64;
 
         if let Some(prev_energy) = self.current_energy {
-            if prev_energy > energy {
+            if energy == prev_energy {
+                return;
+            } else if prev_energy > energy {
                 error!(
                     "can't compute SoC progress: new energy: {:.3} kWh, \
-                    is greater than previous: {:.3} kWh",
-                    energy / 1_000.0,
-                    prev_energy / 1_000.0,
+                    is less than previous: {:.3} kWh",
+                    energy as f32 / 1_000.0,
+                    prev_energy as f32 / 1_000.0,
                 );
-                return;
-            } else if (energy - prev_energy).abs() < 1.0 {
                 return;
             }
         } else if initial_energy > energy {
             error!(
                 "can't compute SoC progress: new energy: {:.3} kWh, \
                 initial energy: {:.3} kWh",
-                energy / 1_000.0,
-                initial_energy / 1_000.0,
+                energy as f64 / 1_000.0,
+                initial_energy as f64 / 1_000.0,
             );
             return;
-        } else if (energy - initial_energy).abs() < 1.0 {
+        } else if energy == initial_energy {
             return;
         }
 
         let added_energy = energy - initial_energy;
 
         self.current_energy = Some(energy);
-        self.current_soc = self.initial_soc + (added_energy / self.capacity);
+        self.current_soc = self.initial_soc + (added_energy as f32 / self.capacity as f32);
     }
 
     pub fn soc_progress(&self) -> SoCProgress {
@@ -72,7 +71,7 @@ impl Bms {
 
     /// Computes the raw energy to add to reach the target SoC,
     /// not including constant power loss
-    pub fn energy_to_soc(&self, target_soc: SoC) -> Option<f64> {
+    pub fn target_soc_to_energy(&self, target_soc: SoC) -> Option<u32> {
         use SoC::*;
         let soc_to_add = match (self.current_soc, target_soc) {
             (Absolute(cur_soc), Absolute(target_soc)) => saturating_sub(target_soc, cur_soc),
@@ -80,7 +79,7 @@ impl Bms {
             _ => return None,
         };
 
-        Some(self.capacity * soc_to_add)
+        Some((self.capacity as f32 * soc_to_add) as u32)
     }
 
     pub fn target_soc(&self) -> SoC {
@@ -99,12 +98,16 @@ impl fmt::Display for Bms {
         f.write_fmt(format_args!(
             "cap.: {:.3} kWh, const loss: {} W, init energy: {} kWh, \
             cur enery: {}, init SoC: {} %, cur SoC: {}",
-            self.capacity / 1_000.0,
+            self.capacity as f32 / 1_000.0,
             self.constant_power_loss,
-            self.initial_energy
-                .map_or_else(|| "N/A".to_string(), |e| format!("{:.3}", e / 1_000.0)),
-            self.current_energy
-                .map_or_else(|| "N/A".to_string(), |e| format!("{:.3}", e / 1_000.0)),
+            self.initial_energy.map_or_else(
+                || "N/A".to_string(),
+                |e| format!("{:.3}", e as f64 / 1_000.0)
+            ),
+            self.current_energy.map_or_else(
+                || "N/A".to_string(),
+                |e| format!("{:.3}", e as f64 / 1_000.0)
+            ),
             self.initial_soc,
             SoCProgress::from_soc_and_cap(self.current_soc, self.target_soc),
         ))
@@ -114,11 +117,11 @@ impl fmt::Display for Bms {
 pub struct BmsBuilder(Bms);
 impl BmsBuilder {
     pub fn initial_energy(mut self, energy: u64) -> Self {
-        self.0.initial_energy = Some(energy as f64);
+        self.0.initial_energy = Some(energy);
         self
     }
     pub fn current_energy(mut self, energy: u64) -> Self {
-        self.0.current_energy = Some(energy as f64);
+        self.0.current_energy = Some(energy);
         self
     }
     pub fn initial_soc(mut self, soc: SoC) -> Self {
@@ -129,7 +132,7 @@ impl BmsBuilder {
         self.0.current_soc = soc;
         self
     }
-    pub fn target_soc(mut self, target_soc: impl Into<Option<f64>>) -> Self {
+    pub fn target_soc(mut self, target_soc: impl Into<Option<f32>>) -> Self {
         self.0.target_soc = target_soc.into();
         self
     }
@@ -141,7 +144,7 @@ impl BmsBuilder {
     }
 }
 
-fn saturating_sub(lhs: f64, rhs: f64) -> f64 {
+fn saturating_sub(lhs: f32, rhs: f32) -> f32 {
     if rhs >= lhs {
         return 0.0;
     }
@@ -152,12 +155,12 @@ fn saturating_sub(lhs: f64, rhs: f64) -> f64 {
 pub enum SoC {
     #[default]
     Unknown,
-    Absolute(f64),
-    Relative(f64),
+    Absolute(f32),
+    Relative(f32),
 }
 
 impl SoC {
-    pub fn new(is_absolute: bool, soc: impl Into<Option<f64>>) -> Self {
+    pub fn new(is_absolute: bool, soc: impl Into<Option<f32>>) -> Self {
         match soc.into() {
             Some(soc) if is_absolute => SoC::Absolute(soc),
             Some(soc) => SoC::Relative(soc),
@@ -165,14 +168,14 @@ impl SoC {
         }
     }
 
-    pub fn new_absolute(soc: impl Into<Option<f64>>) -> Self {
+    pub fn new_absolute(soc: impl Into<Option<f32>>) -> Self {
         match soc.into() {
             Some(soc) => SoC::Absolute(soc),
             None => SoC::Unknown,
         }
     }
 
-    pub fn new_relative(soc: impl Into<Option<f64>>) -> Self {
+    pub fn new_relative(soc: impl Into<Option<f32>>) -> Self {
         match soc.into() {
             Some(soc) => SoC::Relative(soc),
             None => SoC::Unknown,
@@ -191,7 +194,7 @@ impl SoC {
         matches!(self, SoC::Unknown)
     }
 
-    pub fn absolute(self) -> Option<f64> {
+    pub fn absolute(self) -> Option<f32> {
         let SoC::Absolute(soc) = self else {
             return None;
         };
@@ -199,7 +202,7 @@ impl SoC {
         Some(soc)
     }
 
-    pub fn relative(self) -> Option<f64> {
+    pub fn relative(self) -> Option<f32> {
         let SoC::Relative(soc) = self else {
             return None;
         };
@@ -207,7 +210,7 @@ impl SoC {
         Some(soc)
     }
 
-    pub fn inner(self) -> Option<f64> {
+    pub fn inner(self) -> Option<f32> {
         match self {
             SoC::Absolute(soc) => Some(soc),
             SoC::Relative(rel_soc) => Some(rel_soc),
@@ -248,9 +251,9 @@ impl SoC {
     }
 }
 
-impl ops::Add<f64> for SoC {
+impl ops::Add<f32> for SoC {
     type Output = SoC;
-    fn add(mut self, added_soc: f64) -> Self::Output {
+    fn add(mut self, added_soc: f32) -> Self::Output {
         match &mut self {
             SoC::Absolute(soc) => *soc += added_soc,
             SoC::Relative(rel_soc) => *rel_soc += added_soc,
@@ -260,9 +263,9 @@ impl ops::Add<f64> for SoC {
     }
 }
 
-impl ops::Sub<f64> for SoC {
+impl ops::Sub<f32> for SoC {
     type Output = SoC;
-    fn sub(mut self, soc_delta: f64) -> Self::Output {
+    fn sub(mut self, soc_delta: f32) -> Self::Output {
         match &mut self {
             SoC::Absolute(soc) => *soc -= soc_delta,
             SoC::Relative(rel_soc) => *rel_soc -= soc_delta,
@@ -285,7 +288,7 @@ impl cmp::PartialEq for SoC {
 
 impl fmt::Display for SoC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn fmt_soc(f: &mut fmt::Formatter<'_>, soc: f64) -> fmt::Result {
+        fn fmt_soc(f: &mut fmt::Formatter<'_>, soc: f32) -> fmt::Result {
             f.write_fmt(format_args!("{:.1} %", soc * 100.0))
         }
         match self {
@@ -302,21 +305,21 @@ impl fmt::Display for SoC {
 #[derive(Debug, Copy, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub enum SoCProgress {
     Unknown,
-    AbsoluteUncapped(f64),
-    AbsoluteCap(f64),
-    AbsoluteTargetNotReached { soc: f64, target: f64 },
-    AbsoluteTargetReached { soc: f64, target: f64 },
-    RelativeUncapped(f64),
-    RelativeCap(f64),
-    RelativeTargetNotReached { rel_soc: f64, target: f64 },
-    RelativeCapReached { rel_soc: f64, cap: f64 },
+    AbsoluteUncapped(f32),
+    AbsoluteCap(f32),
+    AbsoluteTargetNotReached { soc: f32, target: f32 },
+    AbsoluteTargetReached { soc: f32, target: f32 },
+    RelativeUncapped(f32),
+    RelativeCap(f32),
+    RelativeTargetNotReached { rel_soc: f32, target: f32 },
+    RelativeCapReached { rel_soc: f32, cap: f32 },
 }
 
 impl SoCProgress {
     pub fn new(
         is_absolute: bool,
-        soc: impl Into<Option<f64>>,
-        cap: impl Into<Option<f64>>,
+        soc: impl Into<Option<f32>>,
+        cap: impl Into<Option<f32>>,
     ) -> Self {
         let soc = soc.into().map(|soc| soc.clamp(0.0, 1.0));
         let cap = cap.into().map(|cap| cap.clamp(0.0, 1.0));
@@ -346,7 +349,7 @@ impl SoCProgress {
         }
     }
 
-    pub fn from_soc_and_cap(soc: SoC, cap: impl Into<Option<f64>>) -> Self {
+    pub fn from_soc_and_cap(soc: SoC, cap: impl Into<Option<f32>>) -> Self {
         Self::new(soc.is_absolute(), soc.inner(), cap)
     }
 
@@ -388,7 +391,7 @@ impl SoCProgress {
         }
     }
 
-    pub fn absolute_soc(self) -> Option<f64> {
+    pub fn absolute_soc(self) -> Option<f32> {
         self.soc().absolute()
     }
 }

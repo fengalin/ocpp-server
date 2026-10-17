@@ -9,7 +9,7 @@ use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 
 use crate::Database;
 
-const DEFAULT_LIMIT: f64 = 7_400.0;
+const DEFAULT_LIMIT: u32 = 7_400;
 const DEFAULT_NB_OF_PHASES: i32 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +22,7 @@ pub enum ChargingScheduleError {
 pub struct ChargingSchedulePeriod {
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
-    pub limit: f64,
+    pub limit: u32,
 }
 impl ChargingSchedulePeriod {
     pub fn builder(start: NaiveDateTime) -> ChargingSchedulePeriodBuilderNoEnd {
@@ -53,7 +53,7 @@ impl fmt::Display for ChargingSchedulePeriod {
         f.write_str(" -> ")?;
         f.write_str(&self.end.to_string())?;
         f.write_str(" (")?;
-        f.write_fmt(format_args!("{:.3} kW", self.limit / 1_000.0))?;
+        f.write_fmt(format_args!("{:.3} kW", self.limit as f32 / 1_000.0))?;
         f.write_char(')')
     }
 }
@@ -61,7 +61,7 @@ impl fmt::Display for ChargingSchedulePeriod {
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
 pub struct RemainingDurationEnergy {
     pub duration: Duration,
-    pub energy: f64,
+    pub energy: u32,
 }
 impl RemainingDurationEnergy {
     fn zero() -> Self {
@@ -72,10 +72,10 @@ impl RemainingDurationEnergy {
         *self == RemainingDurationEnergy::zero()
     }
 
-    fn add(&mut self, delta: TimeDelta, active_power: f64) {
+    fn add(&mut self, delta: TimeDelta, active_power: u32) {
         assert!(delta.num_seconds() >= 0);
         self.duration += delta;
-        self.energy += active_power * delta.num_seconds() as f64 / 60.0 / 60.0;
+        self.energy += active_power * delta.num_seconds() as u32 / 60 / 60;
     }
 }
 
@@ -96,7 +96,7 @@ impl fmt::Display for RemainingDurationEnergy {
             f.write_fmt(format_args!("+{mins:02}:{secs:02}",))?;
         }
 
-        f.write_fmt(format_args!(", {:.3} kWh", self.energy / 1_000.0))
+        f.write_fmt(format_args!(", {:.3} kWh", self.energy as f32 / 1_000.0))
     }
 }
 
@@ -151,7 +151,7 @@ impl ChargingSchedule {
     pub fn remaining(
         &self,
         from_instant: NaiveDateTime,
-        constant_power_loss: u16,
+        constant_power_loss: u32,
     ) -> RemainingDurationEnergy {
         let mut rem = RemainingDurationEnergy::default();
         if !self.is_active() {
@@ -164,13 +164,13 @@ impl ChargingSchedule {
             if from_instant > period.start && from_instant < period.end {
                 rem.add(
                     period.end - from_instant,
-                    period.limit - constant_power_loss as f64,
+                    period.limit - constant_power_loss,
                 );
                 continue;
             }
             rem.add(
                 period.end - period.start,
-                period.limit - constant_power_loss as f64,
+                period.limit - constant_power_loss,
             );
         }
 
@@ -249,10 +249,10 @@ impl fmt::Display for ChargingScheduleState {
 #[derive(Debug)]
 pub struct ChargingSchedulePeriodBuilderNoEnd {
     start: NaiveDateTime,
-    limit: f64,
+    limit: u32,
 }
 impl ChargingSchedulePeriodBuilderNoEnd {
-    pub fn limit(mut self, limit: f64) -> Self {
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = limit;
         self
     }
@@ -301,7 +301,7 @@ pub struct ChargingSchedulePeriodBuilder(ChargingSchedulePeriod);
 impl ChargingSchedulePeriodBuilder {
     #[allow(unused)]
     pub fn limit(mut self, limit: u32) -> Self {
-        self.0.limit = limit as f64;
+        self.0.limit = limit;
         self
     }
 
@@ -374,7 +374,7 @@ impl ChargingPlan {
                 deadline: end_time,
                 power_limit,
             } => {
-                let Some(energy_to_add) = bms.energy_to_soc(bms.target_soc()) else {
+                let Some(energy_to_add) = bms.target_soc_to_energy(bms.target_soc()) else {
                     error!(
                         "couldn't compute energy to add for {} to {}",
                         bms.current_soc,
@@ -383,13 +383,10 @@ impl ChargingPlan {
                     return None;
                 };
 
-                let available_power =
-                    power_limit.saturating_sub(bms.constant_power_loss as u32) as f64;
-                // FIXME check in args
-                assert!(available_power > 0.0);
+                let available_power = power_limit.saturating_sub(bms.constant_power_loss);
                 // FIXME would also need a ponderation in case of variations due to DPM
-                let duration_s = energy_to_add / available_power * 60.0 * 60.0;
-                let energy_needed = duration_s * (*power_limit as f64) / 60.0 / 60.0;
+                let duration_s = energy_to_add * 60 * 60 / available_power;
+                let energy_needed = duration_s * power_limit / 60 / 60;
                 // FIXME add extra duration as we get closer to 100% SoC
 
                 let now = Local::now();
@@ -404,9 +401,9 @@ impl ChargingPlan {
                     \tduration {} mn",
                     bms.current_soc,
                     bms.target_soc(),
-                    energy_to_add / 1_000.0,
-                    energy_needed / 1_000.0,
-                    (1.0 - (energy_to_add / energy_needed)) * 100.0,
+                    energy_to_add as f32 / 1_000.0,
+                    energy_needed as f32 / 1_000.0,
+                    (1.0 - (energy_to_add as f32 / energy_needed as f32)) * 100.0,
                     duration.num_minutes(),
                 );
                 // compute in local time in order to avoid difference due to dst
@@ -944,26 +941,24 @@ mod tests {
     }
 
     #[test]
-    pub fn reach_soc_before() {
+    pub fn deadline() {
         use crate::SoC;
 
         crate::tests::init();
 
         const BATTERY_CAPACITY: u32 = 48_100;
         const POWER_LIMIT: u32 = 7_400;
-        const CONST_POWER_LOSS: u16 = 400;
-        const INITIAL_SOC: f64 = 0.30;
-        const TARGET_SOC: f64 = 0.60;
-        const ENERGY_TO_ADD: f64 = (TARGET_SOC - INITIAL_SOC) * BATTERY_CAPACITY as f64;
-        const DURATION_S: u64 = (60.0 * 60.0 * ENERGY_TO_ADD
-            / (POWER_LIMIT - CONST_POWER_LOSS as u32) as f64)
-            .round() as u64;
-        const HOURS_NEEDED_CEIL: u64 = DURATION_S.div_ceil(60 * 60);
+        const CONST_POWER_LOSS: u32 = 400;
+        const INITIAL_SOC: f32 = 0.30;
+        const TARGET_SOC: f32 = 0.60;
+        const ENERGY_TO_ADD: u32 = ((TARGET_SOC - INITIAL_SOC) * BATTERY_CAPACITY as f32) as u32;
+        const DURATION_S: u32 = ENERGY_TO_ADD * 60 * 60 / (POWER_LIMIT - CONST_POWER_LOSS);
 
         let now = Local::now();
 
-        let end_time_can_start_today = now + TimeDelta::hours(HOURS_NEEDED_CEIL as _);
-        let end_time_can_not_start_today = now + TimeDelta::hours((HOURS_NEEDED_CEIL - 2) as _);
+        let end_time_can_start_today = now + TimeDelta::seconds(DURATION_S as _);
+        let end_time_can_not_start_today =
+            now + TimeDelta::seconds(DURATION_S as _) - TimeDelta::minutes(2);
 
         // unknown initial SoC & SoC cap
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS).build();
@@ -1016,7 +1011,7 @@ mod tests {
             .build(),
         );
         ref_schedule.set_time = charging_schedule.set_time;
-        assert_eq!(ref_schedule, charging_schedule,);
+        assert_eq!(ref_schedule, charging_schedule);
 
         // known initial SOC, can't start today
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
@@ -1077,10 +1072,10 @@ mod tests {
     }
 
     #[test]
-    fn outstanding() {
+    fn remaining() {
         crate::tests::init();
 
-        const CONST_POWER_LOSS: u16 = 400;
+        const CONST_POWER_LOSS: u32 = 400;
 
         let period1_start = NaiveTime::from_hms_opt(1, 28, 00).unwrap();
         let period1_duration = TimeDelta::hours(2);
@@ -1110,14 +1105,14 @@ mod tests {
         assert_eq!(
             RemainingDurationEnergy {
                 duration: period1_duration + period2_duration,
-                energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
-                    * (period1_duration.num_seconds() as f64)
-                    / 60.0
-                    / 60.0
-                    + (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
-                        * (period2_duration.num_seconds() as f64)
-                        / 60.0
-                        / 60.0
+                energy: ((period1_limit as u64 - CONST_POWER_LOSS as u64)
+                    * (period1_duration.num_seconds() as u64)
+                    / 60
+                    / 60
+                    + (DEFAULT_LIMIT as u64 - CONST_POWER_LOSS as u64)
+                        * (period2_duration.num_seconds() as u64)
+                        / 60
+                        / 60) as u32
             },
             schedule.remaining(before_period1, CONST_POWER_LOSS),
         );
@@ -1127,14 +1122,14 @@ mod tests {
         assert_eq!(
             RemainingDurationEnergy {
                 duration: during_period1_dur + period2_duration,
-                energy: (period1_limit as f64 - CONST_POWER_LOSS as f64)
-                    * (during_period1_dur.num_seconds() as f64)
-                    / 60.0
-                    / 60.0
-                    + (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
-                        * (period2_duration.num_seconds() as f64)
-                        / 60.0
-                        / 60.0
+                energy: ((period1_limit as u64 - CONST_POWER_LOSS as u64)
+                    * (during_period1_dur.num_seconds() as u64)
+                    / 60
+                    / 60
+                    + (DEFAULT_LIMIT as u64 - CONST_POWER_LOSS as u64)
+                        * (period2_duration.num_seconds() as u64)
+                        / 60
+                        / 60) as u32
             },
             schedule.remaining(during_period1, CONST_POWER_LOSS),
         );
@@ -1144,10 +1139,10 @@ mod tests {
         assert_eq!(
             RemainingDurationEnergy {
                 duration: period2_duration,
-                energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
-                    * (period2_duration.num_seconds() as f64)
-                    / 60.0
-                    / 60.0
+                energy: ((DEFAULT_LIMIT as u64 - CONST_POWER_LOSS as u64)
+                    * (period2_duration.num_seconds() as u64)
+                    / 60
+                    / 60) as u32
             },
             schedule.remaining(between_periods, CONST_POWER_LOSS),
         );
@@ -1157,10 +1152,10 @@ mod tests {
         assert_eq!(
             RemainingDurationEnergy {
                 duration: during_period2_dur,
-                energy: (DEFAULT_LIMIT - CONST_POWER_LOSS as f64)
-                    * (during_period2_dur.num_seconds() as f64)
-                    / 60.0
-                    / 60.0
+                energy: ((DEFAULT_LIMIT as u64 - CONST_POWER_LOSS as u64)
+                    * (during_period2_dur.num_seconds() as u64)
+                    / 60
+                    / 60) as u32
             },
             schedule.remaining(during_period2, CONST_POWER_LOSS),
         );

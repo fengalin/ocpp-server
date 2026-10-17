@@ -12,11 +12,11 @@ pub struct ChargingSessionSnapshot {
     /// for added energy / soc calculation
     pub is_reference: bool,
     pub energy: u64,
-    pub power: Option<u64>,
-    pub l1_voltage: Option<u64>,
-    pub temperature: Option<u64>,
+    pub power: Option<u32>,
+    pub l1_voltage: Option<u16>,
+    pub temperature: Option<u16>,
     pub soc: SoC,
-    pub target_soc: Option<f64>,
+    pub target_soc: Option<f32>,
 }
 impl ChargingSessionSnapshot {
     pub fn new(timestamp: DateTime<Utc>, energy: u64) -> Self {
@@ -42,15 +42,15 @@ impl ChargingSessionSnapshotBuilder {
         self.0.is_reference = is_reference;
         self
     }
-    pub fn power(mut self, power: impl Into<Option<u64>>) -> Self {
+    pub fn power(mut self, power: impl Into<Option<u32>>) -> Self {
         self.0.power = power.into();
         self
     }
-    pub fn l1_voltage(mut self, l1_voltage: impl Into<Option<u64>>) -> Self {
+    pub fn l1_voltage(mut self, l1_voltage: impl Into<Option<u16>>) -> Self {
         self.0.l1_voltage = l1_voltage.into();
         self
     }
-    pub fn temperature(mut self, temperature: impl Into<Option<u64>>) -> Self {
+    pub fn temperature(mut self, temperature: impl Into<Option<u16>>) -> Self {
         self.0.temperature = temperature.into();
         self
     }
@@ -58,7 +58,7 @@ impl ChargingSessionSnapshotBuilder {
         self.0.soc = soc;
         self
     }
-    pub fn target_soc(mut self, target_soc: impl Into<Option<f64>>) -> Self {
+    pub fn target_soc(mut self, target_soc: impl Into<Option<f32>>) -> Self {
         self.0.target_soc = target_soc.into();
         self
     }
@@ -83,7 +83,7 @@ impl ChargingSession {
         let session_id = db.add_new_charging_session(ChargingSessionState::Preparing, tid);
 
         if bms.initial_energy.is_none() {
-            bms.initial_energy = Some(energy as f64);
+            bms.initial_energy = Some(energy);
         }
 
         let mut this = ChargingSession {
@@ -120,8 +120,8 @@ impl ChargingSession {
         let session_id = db.add_new_charging_session(state.clone(), transaction_id);
 
         if bms.initial_energy.is_none() {
-            bms.initial_energy = Some(start_energy as f64);
-            bms.current_energy = Some(start_energy as f64);
+            bms.initial_energy = Some(start_energy);
+            bms.current_energy = Some(start_energy);
         }
 
         let snapshot = ChargingSessionSnapshot::builder(
@@ -272,8 +272,8 @@ impl ChargingSession {
         let ref_snapshot_target = ref_snapshot.target_soc;
         let last_known_energy = self.snapshots.last().expect("at least one").energy;
 
-        self.bms.initial_energy = Some(first_energy as f64);
-        self.bms.current_energy = Some(last_known_energy as f64);
+        self.bms.initial_energy = Some(first_energy);
+        self.bms.current_energy = Some(last_known_energy);
 
         let mut add_reference_snapshot = false;
 
@@ -333,11 +333,10 @@ impl ChargingSession {
         let last_snapshot = self.last_snapshot().expect("at least one snapshot");
 
         if add_reference_snapshot {
-            let first_energy = first_energy as f64;
-            let last_snapshot_energy = last_snapshot.energy as f64;
-            if first_energy <= last_snapshot_energy {
+            if first_energy <= last_snapshot.energy {
                 let current_soc = self.bms.initial_soc
-                    + (last_snapshot_energy - first_energy) / self.bms.capacity;
+                    + ((((last_snapshot.energy - first_energy) as f64) / self.bms.capacity as f64)
+                        as f32);
 
                 let new_snapshot =
                     ChargingSessionSnapshot::builder(Utc::now(), last_snapshot.energy)
@@ -354,8 +353,8 @@ impl ChargingSession {
                 error!(
                     "FIXME: session: {}, first snapshot energy: {:.3} > last snapshot energy: {:.3}",
                     self.session_id,
-                    first_energy / 1_000.0,
-                    last_snapshot_energy / 1_000.0,
+                    first_energy as f64 / 1_000.0,
+                    last_snapshot.energy as f64 / 1_000.0,
                 );
             }
         }
@@ -428,7 +427,7 @@ impl ChargingSession {
         }
 
         let first_to_ref_energy = ref_energy - first_energy;
-        let soc_delta = (first_to_ref_energy as f64) / self.bms.capacity;
+        let soc_delta = (first_to_ref_energy as f32) / self.bms.capacity as f32;
 
         ref_snapshot.soc - soc_delta
     }
@@ -563,7 +562,7 @@ mod tests {
     use super::*;
 
     const BATTERY_CAPACITY: u32 = 48_100;
-    const CONST_POWER_LOSS: u16 = 400;
+    const CONST_POWER_LOSS: u32 = 400;
     const INITIAL_ENERGY: u64 = 100;
     const MAX_ADDED_ENERGY_FIRST_PERIOD: u64 = 25;
 
@@ -584,8 +583,8 @@ mod tests {
 
     fn session_with_soc_and_target() {
         let start_time = Utc::now();
-        let initial_soc = 0.3f64;
-        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+        let initial_soc = 0.3;
+        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(initial_soc))
@@ -612,7 +611,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::AbsoluteTargetNotReached {
-                soc: initial_soc + 10f64 / BATTERY_CAPACITY as f64,
+                soc: initial_soc + 10.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -636,7 +635,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::AbsoluteTargetNotReached {
-                soc: initial_soc + 20f64 / BATTERY_CAPACITY as f64,
+                soc: initial_soc + 20.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -669,7 +668,7 @@ mod tests {
         assert!(soc_progress.is_complete());
         assert_eq!(
             SoCProgress::AbsoluteTargetReached {
-                soc: initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64,
+                soc: initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -691,7 +690,7 @@ mod tests {
 
     fn session_unknown_initial_soc() {
         let start_time = Utc::now();
-        let target = MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+        let target = MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .target_soc(target)
@@ -713,7 +712,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::RelativeTargetNotReached {
-                rel_soc: 10f64 / BATTERY_CAPACITY as f64,
+                rel_soc: 10.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -728,7 +727,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::RelativeTargetNotReached {
-                rel_soc: 20f64 / BATTERY_CAPACITY as f64,
+                rel_soc: 20.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -755,7 +754,7 @@ mod tests {
         assert!(soc_progress.is_complete());
         assert_eq!(
             SoCProgress::RelativeCapReached {
-                rel_soc: MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64,
+                rel_soc: MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32,
                 cap: target,
             },
             soc_progress,
@@ -788,7 +787,7 @@ mod tests {
 
         assert_eq!(SoC::Unknown, cs.bms().initial_soc);
         assert_eq!(
-            SoCProgress::RelativeUncapped(10f64 / BATTERY_CAPACITY as f64),
+            SoCProgress::RelativeUncapped(10.0 / BATTERY_CAPACITY as f32),
             cs.add_snapshot(
                 ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 10)
                     .power(10)
@@ -798,7 +797,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            SoCProgress::RelativeUncapped(20f64 / BATTERY_CAPACITY as f64),
+            SoCProgress::RelativeUncapped(20.0 / BATTERY_CAPACITY as f32),
             cs.add_snapshot(
                 ChargingSessionSnapshot::builder(Utc::now(), INITIAL_ENERGY + 20)
                     .power(10)
@@ -840,9 +839,9 @@ mod tests {
 
     fn multi_period_session_with_soc_and_target() {
         let start_time = Utc::now();
-        let initial_soc = 0.3f64;
+        let initial_soc = 0.3;
         let mut target =
-            initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+            initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(initial_soc))
@@ -879,10 +878,7 @@ mod tests {
             .get_last_charging_session(&bms)
             .expect("can retrieve last session")
             .expect("last session exists");
-        assert_eq!(
-            Some(INITIAL_ENERGY as f64),
-            recovered_session.bms().initial_energy,
-        );
+        assert_eq!(Some(INITIAL_ENERGY), recovered_session.bms().initial_energy,);
         assert_eq!(
             SoC::Absolute(initial_soc),
             recovered_session.bms().initial_soc,
@@ -899,7 +895,7 @@ mod tests {
         );
         assert_eq!(
             SoCProgress::AbsoluteTargetNotReached {
-                soc: initial_soc + 30f64 / cs.bms().capacity,
+                soc: initial_soc + 30.0 / cs.bms().capacity as f32,
                 target,
             },
             soc_progress,
@@ -909,7 +905,7 @@ mod tests {
         // Simulate server going offline again,
         // then reconnecting without the session being suspended
         // this time, correcting initial SoC and removing the SoC cap
-        let corrected_initial_soc = initial_soc - 10f64 / BATTERY_CAPACITY as f64;
+        let corrected_initial_soc = initial_soc - 10.0 / BATTERY_CAPACITY as f32;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(corrected_initial_soc))
             .target_soc(100.0)
@@ -918,10 +914,7 @@ mod tests {
             .get_last_charging_session(&bms)
             .expect("can retrieve last session")
             .expect("last session exists");
-        assert_eq!(
-            Some(INITIAL_ENERGY as f64),
-            recovered_session.bms().initial_energy,
-        );
+        assert_eq!(Some(INITIAL_ENERGY), recovered_session.bms().initial_energy,);
         assert_eq!(
             SoC::Absolute(corrected_initial_soc),
             recovered_session.bms().initial_soc,
@@ -935,7 +928,7 @@ mod tests {
                 .build(),
         );
         assert_eq!(
-            SoCProgress::AbsoluteUncapped(corrected_initial_soc + 40f64 / BATTERY_CAPACITY as f64),
+            SoCProgress::AbsoluteUncapped(corrected_initial_soc + 40.0 / BATTERY_CAPACITY as f32),
             soc_progress,
         );
         assert!(!cs.last_snapshot().unwrap().is_reference);
@@ -943,7 +936,7 @@ mod tests {
 
     fn multi_period_session_unknown_initial_soc() {
         let start_time = Utc::now();
-        let mut target = MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+        let mut target = MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .target_soc(target)
@@ -979,10 +972,7 @@ mod tests {
             .get_last_charging_session(&bms)
             .expect("can retrieve last session")
             .expect("last session exists");
-        assert_eq!(
-            recovered_session.bms().initial_energy,
-            Some(INITIAL_ENERGY as f64)
-        );
+        assert_eq!(recovered_session.bms().initial_energy, Some(INITIAL_ENERGY));
         // recovered session started from an unknown reference SoC
         assert_eq!(SoC::Unknown, recovered_session.bms().initial_soc,);
         assert_eq!(Some(target), recovered_session.bms().target_soc);
@@ -996,7 +986,7 @@ mod tests {
         );
         assert_eq!(
             SoCProgress::RelativeTargetNotReached {
-                rel_soc: 30f64 / cs.bms().capacity,
+                rel_soc: 30.0 / cs.bms().capacity as f32,
                 target,
             },
             soc_progress,
@@ -1007,7 +997,7 @@ mod tests {
         // then reconnecting without the session being suspended
         // this time, correcting initial SoC and removing the SoC cap
         let corrected_initial_soc = 0.30;
-        let corrected_ref_soc = corrected_initial_soc + 30.0 / BATTERY_CAPACITY as f64;
+        let corrected_ref_soc = corrected_initial_soc + 30.0 / BATTERY_CAPACITY as f32;
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(corrected_initial_soc))
             .target_soc(1.01)
@@ -1016,10 +1006,7 @@ mod tests {
             .get_last_charging_session(&bms)
             .expect("can retrieve last session")
             .expect("last session exists");
-        assert_eq!(
-            Some(INITIAL_ENERGY as f64),
-            recovered_session.bms().initial_energy,
-        );
+        assert_eq!(Some(INITIAL_ENERGY), recovered_session.bms().initial_energy,);
         assert_eq!(
             SoC::Absolute(corrected_initial_soc),
             recovered_session.bms().initial_soc,
@@ -1038,7 +1025,7 @@ mod tests {
                 .build(),
         );
         let last_snapshot = recovered_session.last_snapshot().unwrap();
-        let mut expected_soc = corrected_ref_soc + 10f64 / recovered_session.bms().capacity;
+        let mut expected_soc = corrected_ref_soc + 10.0 / recovered_session.bms().capacity as f32;
         match soc_progress {
             SoCProgress::AbsoluteUncapped(cur_soc) => {
                 assert!((expected_soc - cur_soc).abs() < 0.00000000001);
@@ -1055,10 +1042,7 @@ mod tests {
             .get_last_charging_session(&bms)
             .expect("can retrieve last session")
             .expect("last session exists");
-        assert_eq!(
-            recovered_session.bms().initial_energy,
-            Some(INITIAL_ENERGY as f64)
-        );
+        assert_eq!(recovered_session.bms().initial_energy, Some(INITIAL_ENERGY));
         assert_eq!(
             SoC::Absolute(corrected_initial_soc),
             recovered_session.bms().initial_soc
@@ -1070,7 +1054,7 @@ mod tests {
                 .temperature(30)
                 .build(),
         );
-        expected_soc += 10f64 / recovered_session.bms().capacity;
+        expected_soc += 10.0 / recovered_session.bms().capacity as f32;
         match soc_progress {
             SoCProgress::AbsoluteUncapped(cur_soc) => {
                 assert!((expected_soc - cur_soc).abs() < 0.00000000001);
@@ -1082,8 +1066,8 @@ mod tests {
 
     /// Simulates receiving a MeterValue with active enery import
     fn missed_start_active_session_with_soc_and_target() {
-        let initial_soc = 0.3f64;
-        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+        let initial_soc = 0.3;
+        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(initial_soc))
@@ -1108,7 +1092,7 @@ mod tests {
         assert_eq!(last_snapshot.timestamp, current_time);
         assert_eq!(last_snapshot.energy, last_known_energy);
 
-        assert_eq!(Some(last_known_energy as f64), cs.bms().initial_energy);
+        assert_eq!(Some(last_known_energy), cs.bms().initial_energy);
         assert_eq!(SoC::Absolute(initial_soc), cs.bms().initial_soc);
         assert_eq!(Some(target), cs.bms().target_soc);
 
@@ -1134,7 +1118,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::AbsoluteTargetNotReached {
-                soc: initial_soc + 10f64 / BATTERY_CAPACITY as f64,
+                soc: initial_soc + 10.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,
@@ -1149,8 +1133,8 @@ mod tests {
     }
 
     fn missed_start_suspended_session_with_soc_and_target() {
-        let initial_soc = 0.3f64;
-        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f64 / BATTERY_CAPACITY as f64;
+        let initial_soc = 0.3;
+        let target = initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / BATTERY_CAPACITY as f32;
 
         let bms = Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(initial_soc))
@@ -1176,7 +1160,7 @@ mod tests {
         assert_eq!(last_snapshot.energy, current_energy);
 
         let cs_bms = cs.bms();
-        assert_eq!(Some(current_energy as f64), cs_bms.initial_energy);
+        assert_eq!(Some(current_energy), cs_bms.initial_energy);
         assert_eq!(SoC::Absolute(initial_soc), cs_bms.initial_soc);
         assert_eq!(Some(target), cs_bms.target_soc);
 
@@ -1199,7 +1183,7 @@ mod tests {
         assert!(!soc_progress.is_complete());
         assert_eq!(
             SoCProgress::AbsoluteTargetNotReached {
-                soc: initial_soc + 10f64 / BATTERY_CAPACITY as f64,
+                soc: initial_soc + 10.0 / BATTERY_CAPACITY as f32,
                 target,
             },
             soc_progress,

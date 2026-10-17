@@ -3,16 +3,16 @@ use ocpp_rs::v16::{data_types as v16_data_types, enums as v16_enums};
 use std::{cmp, fmt};
 
 /// Voltage floor step from which to report a difference when computing Eq
-const VOLTAGE_DIFF_STEP: u64 = 3;
+const VOLTAGE_DIFF_STEP: u16 = 3;
 /// Voltage offset to add when computing Eq, so the steps are centered around 230 V
-const VOLTAGE_DIFF_OFFSET: u64 = 2;
+const VOLTAGE_DIFF_OFFSET: u16 = 2;
 
 /// DPM energy rounding step from which to report a difference when computing Eq
 const DPM_ENERGY_DIFF_STEP: u64 = 1_000;
 /// DPM power rounding step from which to report a difference when computing Eq
-const DPM_POWER_DIFF_STEP: u64 = 500;
+const DPM_POWER_DIFF_STEP: u32 = 500;
 
-fn voltage_eq(lhs: u64, rhs: u64) -> bool {
+fn voltage_eq(lhs: u16, rhs: u16) -> bool {
     ((lhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
         == ((rhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
 }
@@ -22,9 +22,9 @@ pub struct MeterValueSelection {
     pub timestamp: DateTime<Utc>,
     pub transaction_id: Option<i32>,
     pub active_energy_import: Option<u64>,
-    pub active_power_import: Option<u64>,
-    pub voltage_l1: Option<u64>,
-    pub temperature: Option<u64>,
+    pub active_power_import: Option<u32>,
+    pub voltage_l1: Option<u16>,
+    pub temperature: Option<u16>,
 }
 
 impl MeterValueSelection {
@@ -41,11 +41,11 @@ impl MeterValueSelection {
                 Some(EnergyActiveImportRegister) => {
                     this.active_energy_import = mv.value.parse::<u64>().ok()
                 }
-                Some(PowerActiveImport) => this.active_power_import = mv.value.parse::<u64>().ok(),
+                Some(PowerActiveImport) => this.active_power_import = mv.value.parse::<u32>().ok(),
                 Some(Voltage) if mv.phase == Some(v16_enums::Phase::L1) => {
-                    this.voltage_l1 = mv.value.parse::<u64>().ok()
+                    this.voltage_l1 = mv.value.parse::<u16>().ok()
                 }
-                Some(Temperature) => this.temperature = mv.value.parse::<u64>().ok(),
+                Some(Temperature) => this.temperature = mv.value.parse::<u16>().ok(),
                 _ => (),
             }
         }
@@ -85,8 +85,8 @@ impl cmp::PartialEq for MeterValueSelection {
 #[derive(Debug, Default, Clone)]
 pub struct MeterValueObserver {
     prev_meter_val: Option<MeterValueSelection>,
-    prev_temp_mean: Option<f64>,
-    last_voltage: Option<u64>,
+    prev_temp_mean: Option<f32>,
+    last_voltage: Option<u16>,
 }
 
 impl MeterValueObserver {
@@ -123,7 +123,7 @@ impl MeterValueObserver {
 
         self.prev_meter_val = Some(mv.clone());
         let temp_mean = Option::zip(prev_mv.temperature, mv.temperature)
-            .map(|(prev_temp, temp)| (prev_temp as f64).midpoint(temp as f64));
+            .map(|(prev_temp, temp)| (prev_temp as f32).midpoint(temp as f32));
 
         let prev_temp_mean = std::mem::replace(&mut self.prev_temp_mean, temp_mean);
 
@@ -155,8 +155,8 @@ impl MeterValueObserver {
 pub struct DpmSelection {
     pub timestamp: Option<DateTime<Utc>>,
     pub active_energy_import: Option<u64>,
-    pub active_power_import: Option<u64>,
-    pub voltage_l1: Option<u64>,
+    pub active_power_import: Option<u32>,
+    pub voltage_l1: Option<u16>,
 }
 
 impl From<Dpm> for DpmSelection {
@@ -171,8 +171,8 @@ impl From<Dpm> for DpmSelection {
                 "Energy.Active.Import.Register" => {
                     this.active_energy_import = sv.value.parse::<u64>().ok()
                 }
-                "Power.Active.Import" => this.active_power_import = sv.value.parse::<u64>().ok(),
-                "Voltage" => this.voltage_l1 = sv.value.parse::<u64>().ok(),
+                "Power.Active.Import" => this.active_power_import = sv.value.parse::<u32>().ok(),
+                "Voltage" => this.voltage_l1 = sv.value.parse::<u16>().ok(),
                 _ => (),
             }
         }
@@ -186,7 +186,7 @@ fn dpm_energy_eq(lhs: u64, rhs: u64) -> bool {
         == ((rhs + DPM_ENERGY_DIFF_STEP / 2) / DPM_ENERGY_DIFF_STEP)
 }
 
-fn dpm_power_eq(lhs: u64, rhs: u64) -> bool {
+fn dpm_power_eq(lhs: u32, rhs: u32) -> bool {
     ((lhs + DPM_POWER_DIFF_STEP / 2) / DPM_POWER_DIFF_STEP)
         == ((rhs + DPM_POWER_DIFF_STEP / 2) / DPM_POWER_DIFF_STEP)
 }
@@ -213,7 +213,7 @@ impl fmt::Display for DpmSelection {
             self.active_energy_import
                 .map_or(f64::NAN, |v| v as f64 / 1_000.0),
             self.active_power_import
-                .map_or(f64::NAN, |v| v as f64 / 1_000.0),
+                .map_or(f32::NAN, |v| v as f32 / 1_000.0),
             self.voltage_l1.unwrap_or_default(),
         ))
     }

@@ -120,7 +120,10 @@ async fn main() -> anyhow::Result<()> {
                     info!(
                         "remaining: {remaining}{}",
                         if !remaining.is_zero() {
-                            format!(", {}", SoC::Relative(remaining.energy / bms.capacity))
+                            format!(
+                                ", {}",
+                                SoC::Relative(remaining.energy as f32 / bms.capacity as f32)
+                            )
                         } else {
                             "".to_string()
                         }

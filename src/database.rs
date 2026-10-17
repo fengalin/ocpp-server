@@ -56,7 +56,7 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 scheduleid INTEGER,
                 start STRING,
                 end STRING,
-                power_limit FLOAT,
+                power_limit INTEGER,
                 FOREIGN KEY (scheduleid) REFERENCES schedule(id)
             );
             CREATE INDEX schedule_period_schedule_id ON schedule_period (scheduleid);
@@ -131,16 +131,18 @@ impl<'a> Database<'a> {
             let timestamp = row.get_unwrap::<_, DateTime<Utc>>("timestamp");
             let is_reference = row.get_unwrap::<_, i64>("is_reference") == 1;
             let energy = row.get_unwrap::<_, i64>("energy") as u64;
-            let power = row.get_unwrap::<_, Option<i64>>("power").map(|p| p as u64);
+            let power = row.get_unwrap::<_, Option<i64>>("power").map(|p| p as u32);
             let l1_voltage = row
                 .get_unwrap::<_, Option<i64>>("l1_voltage")
-                .map(|v| v as u64);
+                .map(|v| v as u16);
             let temperature = row
                 .get_unwrap::<_, Option<i64>>("temperature")
-                .map(|p| p as u64);
+                .map(|p| p as u16);
             let is_absolute_soc = row.get_unwrap::<_, i64>("is_absolute_soc") != 0;
-            let soc = row.get_unwrap::<_, Option<f64>>("soc");
-            let target_soc = row.get_unwrap::<_, Option<f64>>("target_soc");
+            let soc = row.get_unwrap::<_, Option<f64>>("soc").map(|s| s as f32);
+            let target_soc = row
+                .get_unwrap::<_, Option<f64>>("target_soc")
+                .map(|t| t as f32);
 
             let cs = cs.get_or_insert_with(|| {
                 ChargingSession::from_database(
@@ -315,14 +317,14 @@ impl<'a> Database<'a> {
         {
             let start = row.get_unwrap::<_, DateTime<Utc>>("start");
             let end = row.get_unwrap::<_, DateTime<Utc>>("end");
-            let power_limit = row.get_unwrap::<_, f64>("power_limit");
+            let power_limit = row.get_unwrap::<_, i64>("power_limit");
 
             schedule.periods.insert(
                 start.naive_utc(),
                 ChargingSchedulePeriod {
                     start: start.naive_utc(),
                     end: end.naive_utc(),
-                    limit: power_limit,
+                    limit: power_limit.try_into().context("power limit")?,
                 },
             );
         }

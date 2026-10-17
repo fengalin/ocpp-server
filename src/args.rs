@@ -18,7 +18,7 @@ pub struct Args {
         help = "Constant power lost while charging (W)",
         default_value_t = 400
     )]
-    pub constant_power_loss: u16,
+    pub constant_power_loss: u32,
 
     #[clap(
         long,
@@ -142,9 +142,9 @@ impl From<&Args> for crate::Bms {
             .initial_soc(
                 // FIXME also support relative at some point
                 args.init
-                    .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f64 / 100.0)),
+                    .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f32 / 100.0)),
             )
-            .target_soc(args.target.map(|soc| soc as f64 / 100.0))
+            .target_soc(args.target.map(|soc| soc as f32 / 100.0))
             .build()
     }
 }
