@@ -319,8 +319,8 @@ pub enum ChargingPlan {
     OffPeakTomorrow {
         power_limit: u32,
     },
-    ReachSocCapBefore {
-        end_time: NaiveTime,
+    Deadline {
+        deadline: NaiveTime,
         power_limit: u32,
     },
     NoLimit,
@@ -370,15 +370,15 @@ impl ChargingPlan {
                         .build(),
                     ),
             ),
-            ReachSocCapBefore {
-                end_time,
+            Deadline {
+                deadline: end_time,
                 power_limit,
             } => {
-                let Some(energy_to_add) = bms.energy_to_soc(bms.soc_cap()) else {
+                let Some(energy_to_add) = bms.energy_to_soc(bms.target_soc()) else {
                     error!(
                         "couldn't compute energy to add for {} to {}",
                         bms.current_soc,
-                        bms.soc_cap(),
+                        bms.target_soc(),
                     );
                     return None;
                 };
@@ -403,7 +403,7 @@ impl ChargingPlan {
                     \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
                     bms.current_soc,
-                    bms.soc_cap(),
+                    bms.target_soc(),
                     energy_to_add / 1_000.0,
                     energy_needed / 1_000.0,
                     (1.0 - (energy_to_add / energy_needed)) * 100.0,
@@ -953,8 +953,8 @@ mod tests {
         const POWER_LIMIT: u32 = 7_400;
         const CONST_POWER_LOSS: u16 = 400;
         const INITIAL_SOC: f64 = 0.30;
-        const SOC_CAP: f64 = 0.60;
-        const ENERGY_TO_ADD: f64 = (SOC_CAP - INITIAL_SOC) * BATTERY_CAPACITY as f64;
+        const TARGET_SOC: f64 = 0.60;
+        const ENERGY_TO_ADD: f64 = (TARGET_SOC - INITIAL_SOC) * BATTERY_CAPACITY as f64;
         const DURATION_S: u64 = (60.0 * 60.0 * ENERGY_TO_ADD
             / (POWER_LIMIT - CONST_POWER_LOSS as u32) as f64)
             .round() as u64;
@@ -967,8 +967,8 @@ mod tests {
 
         // unknown initial SoC & SoC cap
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS).build();
-        let charging_schedule = ChargingPlan::ReachSocCapBefore {
-            end_time: end_time_can_start_today.time(),
+        let charging_schedule = ChargingPlan::Deadline {
+            deadline: end_time_can_start_today.time(),
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms);
@@ -976,10 +976,10 @@ mod tests {
 
         // unknown initial SoC
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
-            .soc_cap(SOC_CAP)
+            .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::ReachSocCapBefore {
-            end_time: end_time_can_start_today.time(),
+        let charging_schedule = ChargingPlan::Deadline {
+            deadline: end_time_can_start_today.time(),
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms);
@@ -989,8 +989,8 @@ mod tests {
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(INITIAL_SOC))
             .build();
-        let charging_schedule = ChargingPlan::ReachSocCapBefore {
-            end_time: end_time_can_start_today.time(),
+        let charging_schedule = ChargingPlan::Deadline {
+            deadline: end_time_can_start_today.time(),
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms);
@@ -999,10 +999,10 @@ mod tests {
         // known initial SoC, can start today
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(INITIAL_SOC))
-            .soc_cap(SOC_CAP)
+            .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::ReachSocCapBefore {
-            end_time: end_time_can_start_today.time(),
+        let charging_schedule = ChargingPlan::Deadline {
+            deadline: end_time_can_start_today.time(),
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms)
@@ -1021,10 +1021,10 @@ mod tests {
         // known initial SOC, can't start today
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .initial_soc(SoC::Absolute(INITIAL_SOC))
-            .soc_cap(SOC_CAP)
+            .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::ReachSocCapBefore {
-            end_time: end_time_can_not_start_today.time(),
+        let charging_schedule = ChargingPlan::Deadline {
+            deadline: end_time_can_not_start_today.time(),
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms)

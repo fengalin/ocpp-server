@@ -43,7 +43,7 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 temperature INTEGER,
                 is_absolute_soc INTERGER,
                 soc FLOAT,
-                soc_cap FLOAT,
+                target_soc FLOAT,
                 FOREIGN KEY (sessionid) REFERENCES charging_session(id)
             );
             CREATE INDEX charging_session_snapshot_session_id ON charging_session_snapshot (sessionid);
@@ -140,7 +140,7 @@ impl<'a> Database<'a> {
                 .map(|p| p as u64);
             let is_absolute_soc = row.get_unwrap::<_, i64>("is_absolute_soc") != 0;
             let soc = row.get_unwrap::<_, Option<f64>>("soc");
-            let soc_cap = row.get_unwrap::<_, Option<f64>>("soc_cap");
+            let target_soc = row.get_unwrap::<_, Option<f64>>("target_soc");
 
             let cs = cs.get_or_insert_with(|| {
                 ChargingSession::from_database(
@@ -158,7 +158,7 @@ impl<'a> Database<'a> {
                     .l1_voltage(l1_voltage)
                     .temperature(temperature)
                     .soc(SoC::new(is_absolute_soc, soc))
-                    .soc_cap(soc_cap)
+                    .target_soc(target_soc)
                     .build(),
             );
         }
@@ -228,7 +228,7 @@ impl<'a> Database<'a> {
                 temperature,
                 is_absolute_soc,
                 soc,
-                soc_cap
+                target_soc
             )
             VALUES (
                 :timestamp,
@@ -240,7 +240,7 @@ impl<'a> Database<'a> {
                 :temperature,
                 :is_absolute_soc,
                 :soc,
-                :soc_cap
+                :target_soc
             );
         ",
             named_params![
@@ -253,7 +253,7 @@ impl<'a> Database<'a> {
                 ":temperature": snapshot.temperature.map(|t| t as i64),
                 ":is_absolute_soc": snapshot.soc.is_absolute(),
                 ":soc": snapshot.soc.inner(),
-                ":soc_cap": snapshot.soc_cap,
+                ":target_soc": snapshot.target_soc,
             ],
         );
 

@@ -40,9 +40,9 @@ pub struct Args {
 
     #[clap(
         long,
-        help = "Charging plan end time - required for reach-soc-cap-before ('HH:MM')"
+        help = "Deadline Charging plan end time - required for reach-soc-cap-before ('HH:MM')"
     )]
-    pub end_time: Option<String>,
+    pub deadline: Option<String>,
 
     #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
     pub ocpp_port: u16,
@@ -144,7 +144,7 @@ impl From<&Args> for crate::Bms {
                 args.init
                     .map_or(SoC::Unknown, |soc| SoC::Absolute(soc as f64 / 100.0)),
             )
-            .soc_cap(args.target.map(|soc| soc as f64 / 100.0))
+            .target_soc(args.target.map(|soc| soc as f64 / 100.0))
             .build()
     }
 }
@@ -157,9 +157,9 @@ pub enum ChargingPlan {
     OffPeakToday,
     #[clap(help = "Off peak period Tomorrow")]
     OffPeakTomorrow,
-    #[clap(help = "Compute a start time so the battery reaches SoC cap \
-        as close as possible to stop time (needs to specify soc_cap & stop_time)")]
-    ReachSocBefore,
+    #[clap(help = "Compute a start time so the battery reaches SoC target \
+        as close as possible to stop time (needs to specify SoC target & deadline)")]
+    Deadline,
     #[clap(help = "Start ASAP")]
     NoLimit,
 }
@@ -180,17 +180,17 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
             ChargingPlan::OffPeakTomorrow => Ok(Some(crate::ChargingPlan::OffPeakTomorrow {
                 power_limit: args.power_limit,
             })),
-            ChargingPlan::ReachSocBefore => {
+            ChargingPlan::Deadline => {
                 let mut err_msg = String::new();
                 if args.target.is_none() {
-                    err_msg.push_str("'reach-soc-before' requires SoC 'target' to be specified");
+                    err_msg.push_str("'deadline' plan requires SoC 'target' to be specified");
                 }
-                if let Some(ref end_time) = args.end_time {
+                if let Some(ref end_time) = args.deadline {
                     match end_time.parse::<NaiveTime>() {
                         Ok(end_time) => {
                             if err_msg.is_empty() {
-                                return Ok(Some(crate::ChargingPlan::ReachSocCapBefore {
-                                    end_time,
+                                return Ok(Some(crate::ChargingPlan::Deadline {
+                                    deadline: end_time,
                                     power_limit: args.power_limit,
                                 }));
                             }
@@ -199,7 +199,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                             if !err_msg.is_empty() {
                                 err_msg.push('\n');
                             }
-                            err_msg.push_str("'reach-soc-before' failed to parse 'end_time': ");
+                            err_msg.push_str("'deadline' plan failed to parse 'deadline' time: ");
                             err_msg.push_str(&err.to_string());
                         }
                     }
@@ -207,7 +207,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                     if !err_msg.is_empty() {
                         err_msg.push('\n');
                     }
-                    err_msg.push_str("'reach-soc-before' requires SoC 'target' to be specified");
+                    err_msg.push_str("'deadline' plan requires 'deadline' time to be specified");
                 }
 
                 bail!(err_msg);

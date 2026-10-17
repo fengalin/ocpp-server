@@ -573,7 +573,7 @@ impl Evse {
                 "## Stopping session {}: {soc_progress}",
                 cs.transaction_id()
             );
-            cs.set_state(ChargingSessionState::SoCCapReached);
+            cs.set_state(ChargingSessionState::SoCTargetReached);
             self.command_queue
                 .push_back(CommandToChargingPoint::StopTransaction(cs.transaction_id()));
         }
@@ -623,7 +623,7 @@ impl Evse {
 
         info!(
             "## session {cs} / {}{}",
-            SoCProgress::from_soc_and_cap(cs.last_soc(), self.bms.soc_cap).cap(),
+            SoCProgress::from_soc_and_cap(cs.last_soc(), self.bms.target_soc).cap(),
             if let Some(remain_sched) = remain_sched {
                 format!(
                     ", remaining: {remain_sched}{}",
@@ -642,18 +642,18 @@ impl Evse {
         use notification::ChargeState;
         let charge_state = match *cs.state() {
             Preparing => ChargeState::Preparing,
-            Charging | SuspendedByEvse | SoCCapReached => {
+            Charging | SuspendedByEvse | SoCTargetReached => {
                 let charge_progress = notification::ChargeProgress {
                     soc: (cs.last_soc().absolute().unwrap_or_default().clamp(0.0, 1.0) * 100.0)
                         .round() as u8,
-                    target_soc: (self.bms.soc_cap.unwrap_or_default().clamp(0.0, 1.0) * 100.0)
+                    target_soc: (self.bms.target_soc.unwrap_or_default().clamp(0.0, 1.0) * 100.0)
                         .round() as u8,
                     seconds_left: remain_sched.map_or_default(|rs| rs.duration).num_seconds()
                         as u16,
                 };
                 match *cs.state() {
                     Charging => notification::ChargeState::Charging(charge_progress),
-                    SuspendedByEvse | SoCCapReached => {
+                    SuspendedByEvse | SoCTargetReached => {
                         notification::ChargeState::SuspendedEvse(charge_progress)
                     }
                     _ => unreachable!(),

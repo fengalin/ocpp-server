@@ -13,7 +13,7 @@ pub struct Bms {
     pub current_energy: Option<f64>,
     pub initial_soc: SoC,
     pub current_soc: SoC,
-    pub soc_cap: Option<f64>,
+    pub target_soc: Option<f64>,
 }
 
 impl Bms {
@@ -25,7 +25,7 @@ impl Bms {
             current_energy: None,
             initial_soc: SoC::Unknown,
             current_soc: SoC::Unknown,
-            soc_cap: None,
+            target_soc: None,
         })
     }
 
@@ -67,7 +67,7 @@ impl Bms {
     }
 
     pub fn soc_progress(&self) -> SoCProgress {
-        SoCProgress::from_soc_and_cap(self.current_soc, self.soc_cap)
+        SoCProgress::from_soc_and_cap(self.current_soc, self.target_soc)
     }
 
     /// Computes the raw energy to add to reach the target SoC,
@@ -83,13 +83,13 @@ impl Bms {
         Some(self.capacity * soc_to_add)
     }
 
-    pub fn soc_cap(&self) -> SoC {
+    pub fn target_soc(&self) -> SoC {
         use SoC::*;
 
         match self.current_soc {
-            Absolute(_) => SoC::new_absolute(self.soc_cap),
-            Relative(_) => SoC::new_relative(self.soc_cap),
-            Unknown => SoC::new_relative(self.soc_cap),
+            Absolute(_) => SoC::new_absolute(self.target_soc),
+            Relative(_) => SoC::new_relative(self.target_soc),
+            Unknown => SoC::new_relative(self.target_soc),
         }
     }
 }
@@ -106,7 +106,7 @@ impl fmt::Display for Bms {
             self.current_energy
                 .map_or_else(|| "N/A".to_string(), |e| format!("{:.3}", e / 1_000.0)),
             self.initial_soc,
-            SoCProgress::from_soc_and_cap(self.current_soc, self.soc_cap),
+            SoCProgress::from_soc_and_cap(self.current_soc, self.target_soc),
         ))
     }
 }
@@ -129,8 +129,8 @@ impl BmsBuilder {
         self.0.current_soc = soc;
         self
     }
-    pub fn soc_cap(mut self, soc_cap: impl Into<Option<f64>>) -> Self {
-        self.0.soc_cap = soc_cap.into();
+    pub fn target_soc(mut self, target_soc: impl Into<Option<f64>>) -> Self {
+        self.0.target_soc = target_soc.into();
         self
     }
     pub fn build(mut self) -> Bms {
@@ -304,11 +304,11 @@ pub enum SoCProgress {
     Unknown,
     AbsoluteUncapped(f64),
     AbsoluteCap(f64),
-    AbsoluteCapNotReached { soc: f64, cap: f64 },
-    AbsoluteCapReached { soc: f64, cap: f64 },
+    AbsoluteTargetNotReached { soc: f64, target: f64 },
+    AbsoluteTargetReached { soc: f64, target: f64 },
     RelativeUncapped(f64),
     RelativeCap(f64),
-    RelativeCapNotReached { rel_soc: f64, cap: f64 },
+    RelativeTargetNotReached { rel_soc: f64, target: f64 },
     RelativeCapReached { rel_soc: f64, cap: f64 },
 }
 
@@ -324,17 +324,20 @@ impl SoCProgress {
         use SoCProgress::*;
         if is_absolute {
             match (soc, cap) {
-                (Some(soc), Some(cap)) if soc < cap => AbsoluteCapNotReached { soc, cap },
-                (Some(soc), Some(cap)) => AbsoluteCapReached { soc, cap },
+                (Some(soc), Some(cap)) if soc < cap => {
+                    AbsoluteTargetNotReached { soc, target: cap }
+                }
+                (Some(soc), Some(cap)) => AbsoluteTargetReached { soc, target: cap },
                 (Some(soc), None) => AbsoluteUncapped(soc),
                 (None, Some(cap)) => AbsoluteCap(cap),
                 (None, None) => Unknown,
             }
         } else {
             match (soc, cap) {
-                (Some(rel_soc), Some(cap)) if rel_soc < cap => {
-                    RelativeCapNotReached { rel_soc, cap }
-                }
+                (Some(rel_soc), Some(cap)) if rel_soc < cap => RelativeTargetNotReached {
+                    rel_soc,
+                    target: cap,
+                },
                 (Some(rel_soc), Some(cap)) => RelativeCapReached { rel_soc, cap },
                 (Some(rel_soc), None) => RelativeUncapped(rel_soc),
                 (None, Some(cap)) => RelativeCap(cap),
@@ -349,7 +352,10 @@ impl SoCProgress {
 
     pub fn is_complete(self) -> bool {
         use SoCProgress::*;
-        matches!(self, AbsoluteCapReached { .. } | RelativeCapReached { .. })
+        matches!(
+            self,
+            AbsoluteTargetReached { .. } | RelativeCapReached { .. }
+        )
     }
 
     pub fn soc(self) -> SoC {
@@ -358,11 +364,11 @@ impl SoCProgress {
             Unknown => SoC::Unknown,
             AbsoluteUncapped(soc) => SoC::Absolute(soc),
             AbsoluteCap(_) => SoC::Unknown,
-            AbsoluteCapNotReached { soc, .. } => SoC::Absolute(soc),
-            AbsoluteCapReached { soc, .. } => SoC::Absolute(soc),
+            AbsoluteTargetNotReached { soc, .. } => SoC::Absolute(soc),
+            AbsoluteTargetReached { soc, .. } => SoC::Absolute(soc),
             RelativeUncapped(rel_soc) => SoC::Relative(rel_soc),
             RelativeCap(_) => SoC::Unknown,
-            RelativeCapNotReached { rel_soc, .. } => SoC::Relative(rel_soc),
+            RelativeTargetNotReached { rel_soc, .. } => SoC::Relative(rel_soc),
             RelativeCapReached { rel_soc, .. } => SoC::Relative(rel_soc),
         }
     }
@@ -373,11 +379,11 @@ impl SoCProgress {
             Unknown => SoC::Unknown,
             AbsoluteUncapped(_) => SoC::Unknown,
             AbsoluteCap(cap) => SoC::Absolute(cap),
-            AbsoluteCapNotReached { cap, .. } => SoC::Absolute(cap),
-            AbsoluteCapReached { cap, .. } => SoC::Absolute(cap),
+            AbsoluteTargetNotReached { target: cap, .. } => SoC::Absolute(cap),
+            AbsoluteTargetReached { target: cap, .. } => SoC::Absolute(cap),
             RelativeUncapped(_) => SoC::Unknown,
             RelativeCap(cap) => SoC::Relative(cap),
-            RelativeCapNotReached { cap, .. } => SoC::Relative(cap),
+            RelativeTargetNotReached { target: cap, .. } => SoC::Relative(cap),
             RelativeCapReached { cap, .. } => SoC::Relative(cap),
         }
     }
@@ -417,16 +423,16 @@ mod tests {
         assert_eq!(SoCProgress::new(true, None, Some(0.50)), AbsoluteCap(0.50));
         assert_eq!(
             SoCProgress::new(true, Some(0.42), Some(0.50)),
-            AbsoluteCapNotReached {
+            AbsoluteTargetNotReached {
                 soc: 0.42,
-                cap: 0.50
+                target: 0.50
             }
         );
         assert_eq!(
             SoCProgress::new(true, Some(0.50), Some(0.50)),
-            AbsoluteCapReached {
+            AbsoluteTargetReached {
                 soc: 0.50,
-                cap: 0.50
+                target: 0.50
             }
         );
 
@@ -438,9 +444,9 @@ mod tests {
         assert_eq!(SoCProgress::new(false, None, Some(0.50)), RelativeCap(0.50));
         assert_eq!(
             SoCProgress::new(false, Some(0.42), Some(0.50)),
-            RelativeCapNotReached {
+            RelativeTargetNotReached {
                 rel_soc: 0.42,
-                cap: 0.50
+                target: 0.50
             }
         );
         assert_eq!(
