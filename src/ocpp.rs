@@ -205,7 +205,7 @@ impl OcppInterface {
                 );
             }
             Action::Heartbeat(heartbeat) => {
-                info!(">> incoming {heartbeat:?}");
+                debug!(">> incoming {heartbeat:?}");
                 if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
                     ChargePointConnectionState::Heartbeat,
                 )) {
