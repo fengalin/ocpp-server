@@ -116,7 +116,7 @@ impl Evse {
             cs.transaction_id(),
         );
         self.command_queue
-            .push_back(CommandToChargingPoint::StopTransaction(cs.transaction_id()));
+            .push_back(CommandToChargingPoint::StopTransaction);
     }
 
     pub fn have_session_stopped_status(&mut self, accepted: bool) {
@@ -394,16 +394,27 @@ impl Evse {
         self.last_known_stop_energy = Some(stop.meter_stop);
     }
 
-    pub fn have_charging_point_meter_values(&mut self, mut mv: MeterValueSelection) {
+    pub fn have_charging_point_meter_values(
+        &mut self,
+        mut mv: MeterValueSelection,
+        tid: Option<i32>,
+    ) {
         self.meter_value_observer.consolidate(&mut mv);
 
         if self.meter_value_observer.pertinent_to_user(&mv) {
             info!(">> MeterValues {mv}");
+
+            if let Err(err) = self
+                .notif_tx
+                .send(ChargePointNotification::MeterValues(mv.clone()))
+            {
+                error!("error sending notification: {err}");
+            }
         } else {
             trace!(">> MeterValues {mv:?}");
         }
 
-        let Some(energy) = mv.active_energy_import else {
+        let Some(energy) = mv.energy else {
             return;
         };
 
@@ -411,7 +422,7 @@ impl Evse {
         self.energy_tracker.have_energy(energy);
         match self.energy_tracker {
             Increasing(_) => {
-                let Some(transaction_id) = mv.transaction_id else {
+                let Some(tid) = tid else {
                     debug!(
                         "## MeterValue without transaction id & incresing energy, \
                         waiting for next MeterValue"
@@ -420,13 +431,13 @@ impl Evse {
                 };
 
                 match self.charging_session.as_mut() {
-                    Some(cs) if cs.transaction_id() == transaction_id => {
+                    Some(cs) if cs.transaction_id() == tid => {
                         self.update_current_session(mv, energy);
                         return;
                     }
                     Some(cs) => {
                         warn!(
-                            "## MeterValues transaction id mismatch {transaction_id}, \
+                            "## MeterValues transaction id mismatch {tid}, \
                             expected {}",
                             cs.transaction_id()
                         );
@@ -458,20 +469,20 @@ impl Evse {
                 };
 
                 warn!(
-                    "## adding new charging session for {transaction_id}, \
+                    "## adding new charging session for {tid}, \
                     increasing start energy: {start_energy}"
                 );
-                self.have_transaction_id(transaction_id);
+                self.have_transaction_id(tid);
                 self.charging_session = Some(ChargingSession::with_state(
                     bms,
-                    transaction_id,
+                    tid,
                     ChargingSessionState::Preparing,
                     energy,
-                    mv.timestamp,
+                    mv.ts,
                 ));
             }
             Stationnary(_) => {
-                let Some(transaction_id) = mv.transaction_id else {
+                let Some(tid) = tid else {
                     debug!(
                         "## MeterValue without transaction id & stationary \
                         waiting for next MeterValue"
@@ -480,7 +491,7 @@ impl Evse {
                 };
 
                 match self.charging_session.as_mut() {
-                    Some(cs) if cs.transaction_id() == transaction_id => {
+                    Some(cs) if cs.transaction_id() == tid => {
                         if let Some(last_snapshot) = cs.last_snapshot()
                             && last_snapshot.energy != energy
                         {
@@ -491,7 +502,7 @@ impl Evse {
                     }
                     Some(cs) => {
                         warn!(
-                            "## MeterValues transaction id mismatch {transaction_id}, \
+                            "## MeterValues transaction id mismatch {tid}, \
                             expected {}",
                             cs.transaction_id()
                         );
@@ -503,7 +514,7 @@ impl Evse {
                     None => {
                         info!(
                             ">> MeterValues with stationnary energy \
-                            for unknown session: {transaction_id}"
+                            for unknown session: {tid}"
                         );
                     }
                 }
@@ -511,17 +522,17 @@ impl Evse {
                 self.last_known_stop_energy = Some(energy);
 
                 warn!(
-                    "## adding new charging session for {transaction_id}, \
+                    "## adding new charging session for {tid}, \
                     stationnary start energy: {:.3} kWh",
                     energy as f64 / 1_000.0
                 );
-                self.have_transaction_id(transaction_id);
+                self.have_transaction_id(tid);
                 self.charging_session = Some(ChargingSession::with_state(
                     self.bms.clone(),
-                    transaction_id,
+                    tid,
                     ChargingSessionState::Preparing,
                     energy,
-                    mv.timestamp,
+                    mv.ts,
                 ));
             }
             Probation(_) => {
@@ -555,9 +566,9 @@ impl Evse {
             )
         });
 
-        let snapshot = ChargingSessionSnapshot::builder(mv.timestamp, energy)
-            .power(mv.active_power_import)
-            .l1_voltage(mv.voltage_l1)
+        let snapshot = ChargingSessionSnapshot::builder(mv.ts, energy)
+            .power(mv.power)
+            .l1_voltage(mv.voltage)
             .temperature(mv.temperature)
             .build();
         let soc_progress = cs.add_snapshot(snapshot);
@@ -575,14 +586,14 @@ impl Evse {
             );
             cs.set_state(ChargingSessionState::SoCTargetReached);
             self.command_queue
-                .push_back(CommandToChargingPoint::StopTransaction(cs.transaction_id()));
+                .push_back(CommandToChargingPoint::StopTransaction);
         }
 
         self.notif_session_progress();
     }
 
     pub fn have_dpm_data(&mut self, dpm_data: DpmSelection) {
-        if dpm_data.active_power_import.is_some()
+        if dpm_data.power.is_some()
             && self
                 .last_dpm
                 .as_ref()
@@ -675,6 +686,10 @@ impl Evse {
         if let Err(err) = self.notif_tx.send(ChargePointNotification::Charge(state)) {
             error!("error sending notification: {err}");
         }
+    }
+
+    pub fn last_known_transaction_id(&mut self) -> i32 {
+        self.last_known_tid
     }
 
     fn have_transaction_id(&mut self, transaction_id: i32) {

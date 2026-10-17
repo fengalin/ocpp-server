@@ -1,9 +1,12 @@
 pub const UNIX_SOCKET_PATH: &str = "/run/charge_point/socket";
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+use crate::measurements::MeterValueSelection;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChargePointNotification {
     Charge(ChargeState),
     Connection(ChargePointConnectionState),
+    MeterValues(MeterValueSelection),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -47,6 +47,9 @@ pub struct Args {
     #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
     pub ocpp_port: u16,
 
+    #[clap(long, help = "port of the web server", default_value_t = 9080)]
+    pub webserver_port: u16,
+
     #[clap(
         long,
         help = "generate short logs: no timestamps, no modules. Suitable for a systemd unit"

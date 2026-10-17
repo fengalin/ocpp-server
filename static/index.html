@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f141a">
+<title>Charge Point</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">Charge Point <span class="draft-tag">draft</span></div>
+  <div class="topbar-right">
+    <span id="clock" class="clock"></span>
+    <span id="conn" class="conn" title="live connection"></span>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button class="tab active" data-tab="status">Status</button>
+  <button class="tab" data-tab="metrics">Metrics</button>
+  <button class="tab" data-tab="plan">Plan</button>
+  <button class="tab" data-tab="actions">Actions</button>
+  <button class="tab" data-tab="log">Log</button>
+</nav>
+
+<main>
+  <section id="tab-status" class="tabpane active">
+    <div class="status-row">
+      <div id="status-badge" class="status-badge">…</div>
+    </div>
+    <div class="card">
+      <div class="soc-labels">
+        <span id="soc-text">…</span>
+        <span id="soc-target"></span>
+      </div>
+      <div class="soc-bar">
+        <div id="soc-fill"></div>
+        <div id="soc-target-mark" class="hidden"></div>
+      </div>
+      <button id="stop-session-btn" class="btn danger block hidden" type="button">
+        ⏹ Stop charging session
+      </button>
+      <div class="tiles" id="tiles"></div>
+    </div>
+    <div id="plan-card" class="card hidden"></div>
+    <div id="session-card" class="card hidden"></div>
+    <div id="note" class="card draft-card"></div>
+  </section>
+
+  <section id="tab-metrics" class="tabpane">
+    <div class="controls">
+      <div id="scale-btns" class="seg"></div>
+      <div id="metric-toggles" class="seg"></div>
+    </div>
+    <div id="charts"></div>
+  </section>
+
+  <section id="tab-plan" class="tabpane">
+    <form class="card" id="plan-form" onsubmit="return false">
+      <h2>New charging plan</h2>
+      <div class="seg">
+        <label class="radio"><input type="radio" name="mode" id="mode-deadline" checked><span>By deadline</span></label>
+        <label class="radio"><input type="radio" name="mode" id="mode-asap"><span>As soon as possible</span></label>
+      </div>
+      <div class="field">
+        <label for="target">Target SoC: <span id="target-val">80 %</span></label>
+        <input type="range" id="target" min="5" max="100" step="1" value="80">
+      </div>
+      <div class="field" id="deadline-wrap">
+        <label for="deadline">Charging must finish by</label>
+        <input type="datetime-local" id="deadline">
+      </div>
+      <button id="plan-apply" class="btn primary" type="button">Apply plan</button>
+      <div id="plan-msg" class="msg"></div>
+    </form>
+    <div id="plan-active" class="card hidden"></div>
+    <div id="preview-panel" class="card hidden"></div>
+  </section>
+
+  <section id="tab-actions" class="tabpane">
+    <div class="card">
+      <h2>Charge point</h2>
+      <button id="act-stop-session" class="btn block" type="button">Stop charging session</button>
+      <button id="act-stop-plan" class="btn block" type="button">Stop plan</button>
+      <button id="act-set-meter-value-interval" class="btn block" type="button">Set MeterValue interval</button>
+      <button id="act-reset-meter-value-interval" class="btn block" type="button">Reset MeterValue interval</button>
+      <button id="act-reboot" class="btn block danger" type="button">Reboot charge point</button>
+      <div id="act-msg" class="msg"></div>
+    </div>
+  </section>
+
+  <section id="tab-log" class="tabpane">
+    <div id="log-list"></div>
+  </section>
+</main>
+
+<!-- Confirmation dialog -->
+<div id="confirm-overlay" class="overlay hidden">
+  <div class="confirm-dialog">
+    <div id="confirm-msg" class="confirm-msg"></div>
+    <div class="confirm-btns">
+      <button id="confirm-cancel" class="btn">Cancel</button>
+      <button id="confirm-ok" class="btn danger">Stop session</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

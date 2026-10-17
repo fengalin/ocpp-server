@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use clap::Parser;
 use log::*;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use std::io::Write;
 
@@ -26,6 +26,8 @@ pub mod schedule;
 pub use schedule::{ChargingPlan, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
 pub mod unix_socket;
 pub use unix_socket::UnixSocketNotifier;
+pub mod webserver;
+pub use webserver::Webserver;
 
 #[cfg(test)]
 pub mod tests;
@@ -134,8 +136,10 @@ async fn main() -> anyhow::Result<()> {
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
     let (notif_tx, notif_rx) = broadcast::channel(8);
-    let unix_socket_notif = UnixSocketNotifier::new(notif_rx)?;
-    let dispatcher = Dispatcher::new(bms, &args, notif_tx, charging_plan).await?;
+    let unix_socket_notif = UnixSocketNotifier::new(notif_tx.subscribe())?;
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let webserver = Webserver::new(&args, &bms, notif_rx, cmd_tx).await?;
+    let dispatcher = Dispatcher::new(bms, &args, notif_tx, cmd_rx, charging_plan).await?;
 
     match &args.command {
         None => {
@@ -164,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
     let unix_socket_notif_hdl = tokio::spawn(unix_socket_notif.into_task(stop_rx));
     let dispatcher_hdl = tokio::spawn(dispatcher.into_task(stop_tx.subscribe()));
+    let webserver_hdl = tokio::spawn(webserver.into_task(stop_tx.subscribe()));
 
     let _ = tokio::signal::ctrl_c().await;
     warn!("shutting down due to SIGINT");
@@ -171,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = unix_socket_notif_hdl.await;
     let _ = dispatcher_hdl.await;
+    let _ = webserver_hdl.await;
 
     Ok(())
 }

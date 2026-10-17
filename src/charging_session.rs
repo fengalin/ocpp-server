@@ -67,7 +67,7 @@ impl ChargingSessionSnapshotBuilder {
     }
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ChargingSession {
     session_id: i32,
     transaction_id: i32,
@@ -106,12 +106,11 @@ impl ChargingSession {
     /// Builds a ChargingSession in the specified state
     ///
     /// This is useful for cases where we missed the transaction start.
-    // FIXME set BMS initial enegery by caller
     pub fn with_state(
         mut bms: Bms,
         transaction_id: i32,
         state: impl Into<ChargingSessionState>,
-        start_energy: u64,
+        initial_energy: u64,
         timestamp: impl Into<Option<DateTime<Utc>>>,
     ) -> Self {
         let db = Database::get();
@@ -120,13 +119,13 @@ impl ChargingSession {
         let session_id = db.add_new_charging_session(state.clone(), transaction_id);
 
         if bms.initial_energy.is_none() {
-            bms.initial_energy = Some(start_energy);
-            bms.current_energy = Some(start_energy);
+            bms.initial_energy = Some(initial_energy);
+            bms.current_energy = Some(initial_energy);
         }
 
         let snapshot = ChargingSessionSnapshot::builder(
             timestamp.into().unwrap_or_else(Utc::now),
-            start_energy,
+            initial_energy,
         )
         .is_reference(true)
         .soc(bms.initial_soc)

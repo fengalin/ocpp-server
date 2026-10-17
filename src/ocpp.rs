@@ -164,7 +164,7 @@ impl OcppInterface {
                 let mut meter_val_selection: Vec<_> = action_mv
                     .meter_value
                     .iter()
-                    .map(|mv| MeterValueSelection::new(mv, action_mv.transaction_id))
+                    .map(|mv| MeterValueSelection::from(mv))
                     .collect();
 
                 // FIXME check if we need to handle possibly multiple items
@@ -173,7 +173,7 @@ impl OcppInterface {
                 }
 
                 if let Some(mv) = meter_val_selection.pop() {
-                    evse.have_charging_point_meter_values(mv);
+                    evse.have_charging_point_meter_values(mv, action_mv.transaction_id);
                 }
 
                 self.prepare_response(action_mv, call.unique_id, call_result::EmptyResponse {});
@@ -484,8 +484,9 @@ impl OcppInterface {
                         schedule::SetChargingProfile::builder(schedule).build(),
                     )]
                 }
-                StopTransaction(transaction_id) => {
-                    info!("<< sending StopTransaction {transaction_id}");
+                StopTransaction => {
+                    let transaction_id = evse.last_known_transaction_id();
+                    info!("<< sending StopTransaction for {transaction_id}");
                     vec![Action::RemoteStopTransaction(call::RemoteStopTransaction {
                         transaction_id,
                     })]
@@ -522,5 +523,5 @@ pub enum CommandToChargingPoint {
     SetMeterValueConfiguration,
     SetMeterValueAlignedInterval(u16),
     SetServerAddress(String),
-    StopTransaction(i32),
+    StopTransaction,
 }

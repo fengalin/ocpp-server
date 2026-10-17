@@ -1,2 +1,5 @@
 /target
-charging_sessions.sqlite
+/charging_sessions.sqlite
+/ui/node_modules
+/static/app.js
+/static/app.js.map
