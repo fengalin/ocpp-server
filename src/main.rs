@@ -134,7 +134,9 @@ async fn main() -> anyhow::Result<()> {
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
     let (notif_tx, notif_rx) = broadcast::channel(8);
-    let unix_socket_notif = UnixSocketNotifier::new(notif_rx)?;
+    let mut unix_socket_notif = UnixSocketNotifier::new(notif_rx)
+        .inspect_err(|err| error!("failed to create unix socket notifier: {err}"))
+        .ok();
     let dispatcher = Dispatcher::new(bms, &args, notif_tx, charging_plan).await?;
 
     match &args.command {
@@ -162,14 +164,18 @@ async fn main() -> anyhow::Result<()> {
 
     let (stop_tx, stop_rx) = broadcast::channel(8);
 
-    let unix_socket_notif_hdl = tokio::spawn(unix_socket_notif.into_task(stop_rx));
+    let unix_socket_notif_hdl = unix_socket_notif
+        .take()
+        .map(|unix_socket_notif| tokio::spawn(unix_socket_notif.into_task(stop_rx)));
     let dispatcher_hdl = tokio::spawn(dispatcher.into_task(stop_tx.subscribe()));
 
     let _ = tokio::signal::ctrl_c().await;
     warn!("shutting down due to SIGINT");
     let _ = stop_tx.send(());
 
-    let _ = unix_socket_notif_hdl.await;
+    if let Some(unix_socket_notif_hdl) = unix_socket_notif_hdl {
+        let _ = unix_socket_notif_hdl.await;
+    }
     let _ = dispatcher_hdl.await;
 
     Ok(())
