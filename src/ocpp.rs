@@ -164,7 +164,7 @@ impl OcppInterface {
                 let mut meter_val_selection: Vec<_> = action_mv
                     .meter_value
                     .iter()
-                    .map(|mv| MeterValueSelection::new(mv, action_mv.transaction_id))
+                    .map(|mv| MeterValueSelection::from(mv))
                     .collect();
 
                 // FIXME check if we need to handle possibly multiple items
@@ -173,7 +173,7 @@ impl OcppInterface {
                 }
 
                 if let Some(mv) = meter_val_selection.pop() {
-                    evse.have_charging_point_meter_values(mv);
+                    evse.have_charging_point_meter_values(mv, action_mv.transaction_id);
                 }
 
                 self.prepare_response(action_mv, call.unique_id, call_result::EmptyResponse {});
@@ -428,15 +428,11 @@ impl OcppInterface {
                             // Only L1 for my CP
                             value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Temperature, Voltage.L1".to_string(),
                         }),
-                        // Note: could set to 60 just like it used to be
-                        // Action::ChangeConfiguration(call::ChangeConfiguration {
-                        //     key: "MeterValueSampleInterval".to_string(),
-                        //     value: 60.to_string(),
-                        // }),
                         Action::ChangeConfiguration(call::ChangeConfiguration {
                             key: "MeterValuesSampledData".to_string(),
-                            // FIXME CP doesn't seem to return Power & SoC => remove if confirmed
-                            value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Frequency, Power.Active.Import, Power.Offered, SoC, Temperature, Voltage".to_string(),
+                            // CP doesn't return Power SoC & Voltage.L1 (also tried the default Voltage)
+                            // FIXME unsure what to do with Energy.Reactive.Import.Register, might want to remove it
+                            value: "Energy.Active.Import.Register, Energy.Reactive.Import.Register, Frequency, Power.Active.Import, Temperature, Voltage.L1".to_string(),
                         }),
                         Action::ChangeConfiguration(call::ChangeConfiguration {
                             key: "METER_VALUES_ALIGNED_ADDITIONAL_DATA".to_string(),
@@ -484,8 +480,9 @@ impl OcppInterface {
                         schedule::SetChargingProfile::builder(schedule).build(),
                     )]
                 }
-                StopTransaction(transaction_id) => {
-                    info!("<< sending StopTransaction {transaction_id}");
+                StopTransaction => {
+                    let transaction_id = evse.last_known_transaction_id();
+                    info!("<< sending StopTransaction for {transaction_id}");
                     vec![Action::RemoteStopTransaction(call::RemoteStopTransaction {
                         transaction_id,
                     })]
@@ -522,5 +519,5 @@ pub enum CommandToChargingPoint {
     SetMeterValueConfiguration,
     SetMeterValueAlignedInterval(u16),
     SetServerAddress(String),
-    StopTransaction(i32),
+    StopTransaction,
 }

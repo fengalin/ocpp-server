@@ -69,6 +69,11 @@ impl UnixSocketNotifier {
         let mut buf = vec![0; 1024];
         loop {
             let msg = self.notif_rx.recv().await.context("notif chan receiver")?;
+            // FIXME
+            match &msg {
+                ChargePointNotification::Charge(_) | ChargePointNotification::Connection(_) => (),
+                ChargePointNotification::MeterValues { .. } => continue,
+            }
 
             buf.clear();
             serde_json::to_writer(&mut buf, &msg)?;

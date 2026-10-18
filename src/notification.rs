@@ -1,9 +1,16 @@
 pub const UNIX_SOCKET_PATH: &str = "/run/charge_point/socket";
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+use crate::measurements::MeterValueSelection;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChargePointNotification {
     Charge(ChargeState),
     Connection(ChargePointConnectionState),
+    MeterValues {
+        meter_values: MeterValueSelection,
+        // FIXME could be type SoC once front end handles it properly
+        soc: Option<f32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

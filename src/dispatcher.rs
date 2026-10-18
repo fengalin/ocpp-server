@@ -5,7 +5,7 @@ use anyhow::{Context, bail};
 use futures::prelude::*;
 use log::*;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
 use std::time::Duration;
@@ -20,6 +20,7 @@ const RECONNECT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct Dispatcher {
     notif_tx: broadcast::Sender<ChargePointNotification>,
+    cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
     ws_stream: Option<WebSocketStream<TcpStream>>,
     command: Option<args::Command>,
     charging_plan: Option<ChargingPlan>,
@@ -33,6 +34,7 @@ impl Dispatcher {
         bms: Bms,
         args: &args::Args,
         notif_tx: broadcast::Sender<ChargePointNotification>,
+        cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
         charging_plan: Option<ChargingPlan>,
     ) -> anyhow::Result<Self> {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
@@ -44,6 +46,7 @@ impl Dispatcher {
 
         Ok(Dispatcher {
             notif_tx: notif_tx.clone(),
+            cmd_rx,
             ws_stream: None,
             command: args.command.clone(),
             charging_plan,
@@ -156,23 +159,35 @@ impl Dispatcher {
         loop {
             trace!("## dispatcher loop iter");
 
-            let Some(msg) = self.ws_stream.as_mut().unwrap().next().await else {
-                bail!("websocket terminated");
-            };
+            tokio::select! {
+                cmd_res = self.cmd_rx.recv() => {
+                    let Some(cmd) = cmd_res else {
+                        bail!("cmd chan terminated");
+                    };
 
-            let msg = msg.inspect_err(|err| match err {
-                ts::Error::ConnectionClosed | ts::Error::Protocol(_) | ts::Error::Utf8(_) => (),
-                other => error!("cp websocket error: {other}"),
-            })?;
+                    info!("pushing command {cmd:?}");
+                    self.ocpp_if.push_command(cmd);
+                }
+                ws_msg_res = self.ws_stream.as_mut().unwrap().next() => {
+                    let Some(msg) = ws_msg_res else {
+                        bail!("websocket terminated");
+                    };
 
-            if self
-                .handle_incoming_ws_message(msg)
-                .await
-                .context("handling incoming cp message")?
-                .is_break()
-            {
-                warn!("stopping listener loop further to message handling");
-                break;
+                    let msg = msg.inspect_err(|err| match err {
+                        ts::Error::ConnectionClosed | ts::Error::Protocol(_) | ts::Error::Utf8(_) => (),
+                        other => error!("cp websocket error: {other}"),
+                    })?;
+
+                    if self
+                        .handle_incoming_ws_message(msg)
+                        .await
+                        .context("handling incoming cp message")?
+                        .is_break()
+                    {
+                        warn!("stopping listener loop further to message handling");
+                        break;
+                    }
+                }
             }
 
             for call in self.ocpp_if.pending_calls(&mut self.evse) {
@@ -209,7 +224,7 @@ impl Dispatcher {
                 }
             }
             ts::Message::Binary(payload) => {
-                warn!(">> msg bin: {payload:?}");
+                warn!(">> bin msg: {payload:?}");
             }
             ts::Message::Ping(_) => trace!(">> ping"),
             ts::Message::Close(reason) => {

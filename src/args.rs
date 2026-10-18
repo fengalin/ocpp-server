@@ -47,6 +47,9 @@ pub struct Args {
     #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
     pub ocpp_port: u16,
 
+    #[clap(long, help = "port of the web server", default_value_t = 9080)]
+    pub webserver_port: u16,
+
     #[clap(
         long,
         help = "generate short logs: no timestamps, no modules. Suitable for a systemd unit"
@@ -191,6 +194,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                             if err_msg.is_empty() {
                                 return Ok(Some(crate::ChargingPlan::Deadline {
                                     deadline: end_time,
+                                    target_soc: args.target.expect("checked above") as f32 / 100.0,
                                     power_limit: args.power_limit,
                                 }));
                             }

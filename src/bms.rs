@@ -5,7 +5,7 @@ use std::{
     ops,
 };
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Bms {
     pub capacity: u32,
     pub constant_power_loss: u32,

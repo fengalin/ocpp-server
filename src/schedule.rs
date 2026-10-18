@@ -310,7 +310,8 @@ impl ChargingSchedulePeriodBuilder {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
 pub enum ChargingPlan {
     Blocking,
     OffPeakToday {
@@ -321,6 +322,7 @@ pub enum ChargingPlan {
     },
     Deadline {
         deadline: NaiveTime,
+        target_soc: f32,
         power_limit: u32,
     },
     NoLimit,
@@ -372,9 +374,15 @@ impl ChargingPlan {
             ),
             Deadline {
                 deadline: end_time,
+                target_soc,
                 power_limit,
             } => {
-                let Some(energy_to_add) = bms.target_soc_to_energy(bms.target_soc()) else {
+                // FIXME target_soc_to_energy: is flexible re. whether init SoC is known
+                // or not (Absolute / Relative). Added complexity is probably not worth it
+                // and we could require user to specify init SoC all the time
+                use super::SoC;
+                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
+                else {
                     error!(
                         "couldn't compute energy to add for {} to {}",
                         bms.current_soc,
@@ -960,32 +968,13 @@ mod tests {
         let end_time_can_not_start_today =
             now + TimeDelta::seconds(DURATION_S as _) - TimeDelta::minutes(2);
 
-        // unknown initial SoC & SoC cap
-        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS).build();
-        let charging_schedule = ChargingPlan::Deadline {
-            deadline: end_time_can_start_today.time(),
-            power_limit: POWER_LIMIT,
-        }
-        .to_charging_schedule(&bms);
-        assert_eq!(None, charging_schedule);
-
         // unknown initial SoC
         let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
             .target_soc(TARGET_SOC)
             .build();
         let charging_schedule = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
-            power_limit: POWER_LIMIT,
-        }
-        .to_charging_schedule(&bms);
-        assert_eq!(None, charging_schedule);
-
-        // unknown initial SoC cap
-        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
-            .initial_soc(SoC::Absolute(INITIAL_SOC))
-            .build();
-        let charging_schedule = ChargingPlan::Deadline {
-            deadline: end_time_can_start_today.time(),
+            target_soc: TARGET_SOC,
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms);
@@ -998,6 +987,7 @@ mod tests {
             .build();
         let charging_schedule = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
+            target_soc: TARGET_SOC,
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms)
@@ -1020,6 +1010,7 @@ mod tests {
             .build();
         let charging_schedule = ChargingPlan::Deadline {
             deadline: end_time_can_not_start_today.time(),
+            target_soc: TARGET_SOC,
             power_limit: POWER_LIMIT,
         }
         .to_charging_schedule(&bms)

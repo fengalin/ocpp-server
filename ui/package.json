@@ -1,0 +1,17 @@
+{
+  "name": "evcp-web-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --format=esm --outfile=../static/app.js",
+    "watch": "esbuild src/main.ts --bundle --format=esm --sourcemap --outfile=../static/app.js --watch"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}
