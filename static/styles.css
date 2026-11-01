@@ -121,7 +121,7 @@ body {
 }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
-main { padding: 16px; padding-bottom: 32px; }
+main { padding: 16px; padding-bottom: 32px; touch-action: pan-y; }
 
 .tabpane { display: none; }
 .tabpane.active { display: block; }
@@ -133,45 +133,18 @@ main { padding: 16px; padding-bottom: 32px; }
   padding: 14px 16px;
   margin-bottom: 14px;
 }
-#session-card { flex: 1; min-width: 0; }
 .draft-card { border-style: dashed; }
-
-.status-row {
-  display: flex;
-  gap: 14px;
-  align-items: stretch;
-  margin-bottom: 14px;
-}
-
-#session-card {
-  flex: 1;
-  min-width: 0;
-}
-
-@media (max-width: 719px) {
-  .status-row {
-    flex-direction: column;
-  }
-}
 
 .card h2 { margin: 0 0 10px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .card h3 { margin: 14px 0 6px; font-size: 14px; color: var(--muted); }
 
-.status-row {
-  display: flex;
-  gap: 14px;
-  align-items: stretch;
-  margin-bottom: 14px;
-}
-
-@media (max-width: 719px) {
-  .status-row {
-    flex-direction: column;
-  }
-}
-
 .status-badge {
-  display: inline-block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -186,9 +159,29 @@ main { padding: 16px; padding-bottom: 32px; }
   animation: pulse 2s ease-in-out infinite;
 }
 
+/* In-badge stop button: compact (the .btn min-height would stretch the badge).
+   ■ (U+25A0) instead of ⏹: no emoji presentation, so it renders as text and
+   picks up the red `color` like the border — ⏹ shows a fixed orange emoji
+   glyph on some platforms (e.g. Firefox Android). */
 #stop-session-btn {
-  margin-top: 12px;
-  margin-bottom: 4px;
+  min-height: 0;
+  min-width: 0;
+  padding: 3px 10px;
+  font-size: 18px;
+}
+
+/* Active-plan card stop button: hosted top-right of the card, absolute so it
+   never grows the header row (same compact recipe + ■ as the badge's stop
+   button). */
+#plan-card { position: relative; }
+#plan-stop-btn {
+  position: absolute;
+  top: 11px;
+  right: 14px;
+  min-height: 0;
+  min-width: 0;
+  padding: 3px 10px;
+  font-size: 18px;
 }
 
 @keyframes pulse {
@@ -268,10 +261,18 @@ main { padding: 16px; padding-bottom: 32px; }
 .btn.block { display: block; width: 100%; margin-bottom: 8px; }
 .btn:disabled { opacity: 0.5; }
 
+/* Spacing that holds even when all of the plan form's option fields are
+   hidden (the blocking / unlimited kinds show none). With any field visible,
+   the last one already provides the same 12px, so drop the extra margin. */
+#plan-apply { margin-top: 12px; }
+#plan-form:has(.field:not(.hidden)) #plan-apply { margin-top: 0; }
+
 .field { margin: 12px 0; }
 .field label { display: block; color: var(--muted); font-size: 14px; margin-bottom: 6px; }
 .field input[type="range"] { width: 100%; }
-.field input[type="datetime-local"], .select {
+.field input[type="datetime-local"],
+.field input[type="date"],
+.field input[type="time"], .select {
   width: 100%;
   min-height: 44px;
   padding: 8px 10px;
@@ -282,10 +283,53 @@ main { padding: 16px; padding-bottom: 32px; }
   font-size: 16px;
 }
 
+/* Date + time pick the deadline independently: on mobile each opens its own
+   picker, so changing the time does not require re-confirming the date. */
+.dt-row { display: flex; gap: 8px; }
+.dt-row input { flex: 1 1 0; min-width: 0; }
+
+.soc-row { display: flex; align-items: center; gap: 8px; }
+.soc-input { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.soc-row input {
+  flex: 0 0 auto;
+  /* type="text" + inputmode="numeric": no spinner on any browser, so one
+     width fits the 3-digit value everywhere (type="number" would reserve
+     ~40px for desktop spin buttons, which is why the field was unusable in
+     Firefox); the mobile keyboard is still numeric. */
+  width: 50px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 16px;
+}
+.soc-row .soc-chips { flex: 1 1 auto; margin-top: 0; }
+.soc-unit { color: var(--muted); font-size: 16px; }
+
+/* Preset chips: same recipe as the .btn buttons, but tight enough for four
+   to sit on one line next to the input on a ~390 px phone. */
+.soc-chips { margin-top: 8px; }
+.chip {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip:active { transform: scale(0.98); }
+.chip.active { border-color: var(--accent); color: var(--accent); }
+
 .radio { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; cursor: pointer; }
 .radio input { width: 20px; height: 20px; accent-color: var(--accent); }
 
-.msg { min-height: 22px; margin-top: 10px; font-size: 14px; }
+.msg { margin-top: 10px; font-size: 14px; }
+.msg:empty { display: none; }
 .msg.ok { color: var(--accent); }
 .msg.err { color: #e05a5a; }
 
@@ -301,7 +345,24 @@ main { padding: 16px; padding-bottom: 32px; }
 
 .chart-wrap { margin-bottom: 14px; }
 .chart-wrap h3 { margin: 0 0 6px; font-size: 14px; color: var(--muted); }
-.chart-box { height: 30vh; min-height: 180px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+.chart-box { position: relative; height: 30vh; min-height: 180px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+.chart-box canvas { display: block; }
+.chart-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px #0009;
+  transform: translateX(-50%);
+}
+.chart-tip .tip-val { font-weight: 600; }
+.chart-tip .tip-time { color: var(--muted); }
 
 .log-entry {
   display: flex;
@@ -320,7 +381,6 @@ main { padding: 16px; padding-bottom: 32px; }
   font-size: 13px;
   font-weight: 600;
 }
-.log-note { color: var(--muted); }
 
 @media (min-width: 720px) {
   main { max-width: 880px; margin: 0 auto; }

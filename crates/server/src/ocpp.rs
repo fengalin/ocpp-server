@@ -1,4 +1,6 @@
 use anyhow::Context;
+use charge_system_common_model::notification::{ChargePointConnectionState, Notification};
+use charge_system_common_model::{meter_value::MeterValueSelection, plan_model::ChargingPlan};
 use log::*;
 use ocpp_rs::{
     datetime::DateTimeWrapper,
@@ -18,18 +20,13 @@ use tokio::sync::broadcast;
 
 use std::collections::VecDeque;
 
-use crate::{
-    ChargingSchedule, Evse,
-    measurements::*,
-    notification::{ChargePointConnectionState, ChargePointNotification},
-    schedule,
-};
+use crate::{ChargingSchedule, Evse, measurements::*, schedule};
 
 const HEARTBEAT_INTERVAL_S: u32 = 3600;
 
 #[derive(Debug)]
 pub struct OcppInterface {
-    notif_tx: broadcast::Sender<ChargePointNotification>,
+    notif_tx: broadcast::Sender<Notification>,
     can_send_actions: bool,
     send_action_id: usize,
     pending_response: Option<Message>,
@@ -38,7 +35,7 @@ pub struct OcppInterface {
 }
 
 impl OcppInterface {
-    pub fn new(notif_tx: broadcast::Sender<ChargePointNotification>) -> Self {
+    pub fn new(notif_tx: broadcast::Sender<Notification>) -> Self {
         OcppInterface {
             notif_tx,
             can_send_actions: false,
@@ -94,9 +91,10 @@ impl OcppInterface {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
-            ChargePointConnectionState::Error,
-        )) {
+        if let Err(err) = self
+            .notif_tx
+            .send(Notification::Connection(ChargePointConnectionState::Error))
+        {
             error!("error sending notification: {err}");
         }
     }
@@ -164,7 +162,7 @@ impl OcppInterface {
                 let mut meter_val_selection: Vec<_> = action_mv
                     .meter_value
                     .iter()
-                    .map(|mv| MeterValueSelection::from(mv))
+                    .map(MeterValueSelection::from)
                     .collect();
 
                 // FIXME check if we need to handle possibly multiple items
@@ -206,7 +204,7 @@ impl OcppInterface {
             }
             Action::Heartbeat(heartbeat) => {
                 debug!(">> incoming {heartbeat:?}");
-                if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
+                if let Err(err) = self.notif_tx.send(Notification::Connection(
                     ChargePointConnectionState::Heartbeat,
                 )) {
                     error!("error sending notification: {err}");
@@ -371,7 +369,7 @@ impl OcppInterface {
                     vec![
                         Action::SetChargingProfile(
                             schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new(),
+                                schedule::ChargingSchedule::new_blocking(),
                             )
                             .build(),
                         ),
@@ -465,7 +463,7 @@ impl OcppInterface {
                         }),
                         Action::SetChargingProfile(
                             schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new(),
+                                schedule::ChargingSchedule::new_blocking(),
                             )
                             .build(),
                         ),
@@ -486,6 +484,11 @@ impl OcppInterface {
                     vec![Action::RemoteStopTransaction(call::RemoteStopTransaction {
                         transaction_id,
                     })]
+                }
+                // Local EVSE state updates, handled by the dispatcher — never
+                // pushed on the command queue, so they should not reach here.
+                SetInitialSoC(_) | SetChargingPlan(_) => {
+                    unreachable!("local EVSE command must be handled by the dispatcher")
                 }
             };
 
@@ -514,6 +517,13 @@ pub enum CommandToChargingPoint {
     ClearChargingProfile,
     GetConfiguration,
     Reboot,
+    // Local EVSE state update: sets the BMS initial SoC, the same way the CLI
+    // does. No OCPP call is involved.
+    SetInitialSoC(f32),
+    // Local EVSE state update: applies a charging plan to the BMS + DB and
+    // queues the SetChargingProfile, the same way the CLI does. No OCPP call
+    // is involved here either.
+    SetChargingPlan(ChargingPlan),
     ResetMeterValueConfiguration,
     SetChargingSchedule(ChargingSchedule),
     SetMeterValueConfiguration,

@@ -1,198 +1,73 @@
-//! Data model. Mirrors the structs the real OCPP server will expose, so the
-//! simulator in this draft can be swapped for the real data source later.
+//! Data model for the web/HTTP+SSE wire contract.
+//!
+//! **Only types pertinent to the web app itself are defined here**
+//! (`ServerState`, `PlanRequest`, ring limits). Everything shared with the
+//! server's other consumers — `Ts`, `MeterValueSelection`, the status /
+//! event-log types, the whole scheduling/charging-plan model plus its
+//! computation, and the notification stream itself (the SSE events of
+//! `GET /api/stream` are `charge_system_common_model::notification::Notification`s) —
+//! lives in `charge-system-common-model` and is used directly from there
+//! (no re-exports).
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Worst-case sample history kept in memory (~7 days at 10 s cadence).
-pub const MAX_METER_VALUES: usize = 65_000;
-/// Maximum kept status-change events.
-pub const MAX_EVENTS: usize = 1_000;
+use charge_system_common_model::{
+    bms::Bms,
+    model::Ts,
+    notification::ChargeStatus,
+    plan_model::{AppliedChargingPlan, PlanKind},
+};
 
-/// Charge point status (as reported by the user's server).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Status {
-    Available,
-    Preparing,
-    Charging,
-    SuspendedByEVSE,
-    Finished,
-    Rebooting,
-    Faulted,
-}
+/// Metric values kept in memory (a few days at the default ~150 s cadence).
+pub const MAX_METER_VALUES: usize = 2048;
+/// Status-change entries kept in the event log.
+pub const MAX_EVENTS: usize = 32;
 
-/// An ongoing (or just finished) charging session.
+/// Request body for `/api/plans/apply`.
+///
+/// `Serialize` is needed by the WASM front end (it builds the request); the
+/// server only ever deserializes it.
+///
+/// `kind` selects the plan: `Deadline` / `Asap` carry their options below,
+/// while `Blocking` and `Unlimited` have none (the fields are `None`).
+///
+/// `target_soc` is a *fraction* 0–1 (see [`Plan`]); the form's percent value
+/// is divided by 100 before sending (web-app/src/ui).
+///
+/// `initial_soc` is the *last known* state of charge at the start of the
+/// session (fraction 0–1), as set by the init-SoC widget — it is the seed for
+/// the server's SoC re-estimation (`plan::estimate_soc`), so a plan applied
+/// with a stale/unknown SoC is meaningless. `None` when the widget has never
+/// been set.
+///
+/// `power_limit` is the user-chosen grid power limit in W for the plan's
+/// charging period(s), as set by the power-limit widget in the plan form.
+/// It is clamped to the CP's `max_power` by `plan::compute`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
-    pub id: String,
-    pub start_ts: DateTime<Utc>,
-    pub status: Status,
-    pub initial_energy: u64,
-    pub initial_soc: Option<f32>,
-    pub cur_soc: Option<f32>,
-}
-
-/// One consecutive block of a charging plan. Periods with `power_limit == 0`
-/// (W) are intentional gaps (future TOU pause behaviour).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct ChargingPeriod {
-    pub start_at: DateTime<Utc>,
-    pub duration: u64,
-    pub power_limit: u32,
-}
-
-// FIXME remove
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlanKind {
-    /// Must reach the target SoC by `deadline`.
-    Deadline,
-    /// Start as soon as possible, stop at the target SoC.
-    Asap,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlanState {
-    Active,
-    Completed,
-    Cancelled,
-}
-
-/// What a plan will do, computed before it is applied. The UI shows exactly
-/// this; applying the plan stores these periods verbatim.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanPreview {
-    pub energy: u64,
-    pub soc_delta: f32,
-    pub soc_result: f32,
-    pub duration: u64,
-    pub completes_at: DateTime<Utc>,
-    pub feasible: bool,
-    /// Average power received by the battery, in W.
-    pub avg_battery: u32,
-    pub periods: Vec<ChargingPeriod>,
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Plan {
-    pub id: String,
-    pub kind: PlanKind,
-    pub start_at: DateTime<Utc>,
-    pub target_soc: f32,
-    pub deadline: Option<DateTime<Utc>>,
-    pub initial_soc: f32,
-    pub periods: Vec<ChargingPeriod>,
-    pub state: PlanState,
-    pub preview: PlanPreview,
-    pub created_ts: DateTime<Utc>,
-}
-
-impl Plan {
-    /// End of the last period.
-    pub fn end(&self) -> DateTime<Utc> {
-        self.periods
-            .iter()
-            .map(|p| p.start_at + chrono::Duration::seconds(p.duration as i64))
-            .max()
-            .unwrap_or(self.start_at)
-    }
-
-    /// Power limit in W at `ts`, or 0 when no period covers `ts`.
-    pub fn limit_at(&self, ts: DateTime<Utc>) -> u32 {
-        self.periods
-            .iter()
-            .find(|p| {
-                ts >= p.start_at && ts < p.start_at + chrono::Duration::seconds(p.duration as i64)
-            })
-            .map(|p| p.power_limit)
-            .unwrap_or(0)
-    }
-}
-
-/// Fixed characteristics of the real installation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Characteristics {
-    /// Battery capacity in Wh.
-    pub battery_capacity: u64,
-    pub max_power: u32,
-    pub static_loss: u32,
-}
-
-impl Default for Characteristics {
-    fn default() -> Self {
-        Self {
-            battery_capacity: 48_100,
-            max_power: 7400,
-            static_loss: 400,
-        }
-    }
-}
-
-/// Battery energy (Wh) needed to go from `from_soc` to `to_soc` (0 if not).
-pub fn battery_energy_needed(from_soc: f32, to_soc: f32, ch: &Characteristics) -> f64 {
-    ((to_soc - from_soc) as f64 / 100.0 * ch.battery_capacity as f64).max(0.0)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventLogEntry {
-    pub ts: DateTime<Utc>,
-    pub status: Status,
-    pub note: Option<String>,
-}
-
-/// Request body for `/api/plans/preview` and `/api/plans`.
-#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)] // catch typos / stale clients at the boundary
 pub struct PlanRequest {
     pub kind: PlanKind,
-    pub target_soc: f32,
-    pub deadline: Option<DateTime<Utc>>,
-}
-
-/// Snapshot of the active plan with live progress, as shown on the status tab.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LivePlan {
-    pub plan: Plan,
-    pub remaining_energy: u64,
-    pub remaining_time: u64,
-    pub eta: DateTime<Utc>,
+    #[serde(default)]
+    pub target_soc: Option<f32>,
+    #[serde(default)]
+    pub deadline: Option<Ts>,
+    #[serde(default)]
+    pub initial_soc: Option<f32>,
+    #[serde(default)]
+    pub power_limit: Option<u32>,
 }
 
 /// Full state returned by `GET /api/state`.
+///
+/// [frontend] `soc` is a *fraction* 0–1 (rendered `* 100` by the frontend).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)] // catch version skew between server and front end
 pub struct ServerState {
-    pub ts: DateTime<Utc>,
-    pub characteristics: Characteristics,
-    pub status: Status,
-    pub soc: Option<f32>,
-    pub session: Option<Session>,
-    pub active_plan: Option<LivePlan>,
-}
-
-/// Events pushed over `GET /api/stream` (SSE).
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "t")]
-pub enum StreamEvent {
-    // FIXME this is badly named & we should be able to
-    // differentiate meter_values collection resulting
-    // from a query on a ts range from a single meter_values + SoC sample
-    Sample {
-        meter_values: crate::measurements::MeterValueSelection,
-        soc: Option<f32>,
-    },
-    Status {
-        status: Status,
-        session: Option<Session>,
-    },
-    Plan,
-}
-
-impl StreamEvent {
-    pub fn name(&self) -> &str {
-        use StreamEvent::*;
-        match self {
-            Sample { .. } => "sample",
-            Status { .. } => "status",
-            Plan => "plan",
-        }
-    }
+    pub ts: Ts,
+    pub bms: Bms,
+    pub status: ChargeStatus,
+    /// The plan currently in effect on the EVSE (or `None`), with its
+    /// computed schedule, as notified by the server
+    /// (`Notification::ChargingPlan`).
+    pub charging_plan: Option<AppliedChargingPlan>,
 }

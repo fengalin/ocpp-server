@@ -3,8 +3,12 @@ use std::{
     fmt::{self, Write},
 };
 
+use charge_system_common_model::{
+    bms::{self, Bms, SoC},
+    plan_model::ChargingPlan,
+};
 use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 
 use crate::Database;
@@ -109,7 +113,7 @@ pub struct ChargingSchedule {
 }
 
 impl ChargingSchedule {
-    pub fn new() -> Self {
+    pub fn new_blocking() -> Self {
         Self::default()
     }
 
@@ -117,6 +121,160 @@ impl ChargingSchedule {
         ChargingSchedule {
             state: ChargingScheduleState::Inactive,
             ..Default::default()
+        }
+    }
+
+    /// Compute the OCPP charging schedule for `plan` from the BMS (the energy to
+    /// add, the duration at the net power limit, and which day to start on).
+    pub fn try_from_charging_plan(
+        plan: &ChargingPlan,
+        bms: &Bms,
+    ) -> Result<Option<ChargingSchedule>, String> {
+        // FIXME make off peak period configurable
+        use ChargingPlan::*;
+        match plan {
+            Blocking => Ok(Some(ChargingSchedule::new_blocking())),
+            OffPeakToday { power_limit } => Ok(Some(
+                ChargingSchedule::default()
+                    .add_period(
+                        ChargingSchedulePeriod::builder_starting_today(
+                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                        )
+                        .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
+                        .limit(*power_limit)
+                        .build(),
+                    )
+                    .add_period(
+                        ChargingSchedulePeriod::builder_starting_today(
+                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                        )
+                        .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
+                        .limit(*power_limit)
+                        .build(),
+                    ),
+            )),
+            OffPeakTomorrow { power_limit } => Ok(Some(
+                ChargingSchedule::default()
+                    .add_period(
+                        ChargingSchedulePeriod::builder_starting_tomorrow(
+                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
+                        )
+                        .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
+                        .limit(*power_limit)
+                        .build(),
+                    )
+                    .add_period(
+                        ChargingSchedulePeriod::builder_starting_tomorrow(
+                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
+                        )
+                        .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
+                        .limit(*power_limit)
+                        .build(),
+                    ),
+            )),
+            Deadline {
+                deadline: end_time,
+                target_soc,
+                power_limit,
+            } => {
+                // FIXME target_soc_to_energy: is flexible re. whether init SoC is known
+                // or not (Absolute / Relative). Added complexity is probably not worth it
+                // and we could require user to specify init SoC all the time
+                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
+                else {
+                    return Err(format!(
+                        "couldn't compute energy to add for {} to {}",
+                        bms.current_soc,
+                        bms.target()
+                    ));
+                };
+
+                let available_power = power_limit.saturating_sub(bms::STATIC_LOSS);
+                // FIXME would also need a ponderation in case of variations due to DPM
+                let duration_s = energy_to_add * 60 * 60 / available_power;
+                let energy_needed = duration_s * power_limit / 60 / 60;
+                // FIXME add extra duration as we get closer to 100% SoC
+
+                let now = Local::now();
+                let today = now.date_naive();
+                let mut start_day = today;
+                let mut start;
+                let duration = TimeDelta::seconds(duration_s as _);
+                info!(
+                    "preparing schedule for SoC {} to {}\n\
+                    \tenergy to add: {:.3} kWh\n\
+                    \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
+                    \tduration {} mn",
+                    bms.current_soc,
+                    bms.target(),
+                    energy_to_add as f32 / 1_000.0,
+                    energy_needed as f32 / 1_000.0,
+                    (1.0 - (energy_to_add as f32 / energy_needed as f32)) * 100.0,
+                    duration.num_minutes(),
+                );
+                // compute in local time in order to avoid difference due to dst
+                loop {
+                    start = (NaiveDateTime::new(start_day, *end_time) - duration)
+                        .and_local_timezone(Local)
+                        .unwrap();
+
+                    // FIXME altenatively, warn from how much we would miss the SoC cap
+                    if start + TimeDelta::minutes(2) > now {
+                        // FIXME added a safety margin, needs more thinking + const / conf
+                        break;
+                    }
+                    // charging would have needed to start earlier => select next day
+                    start_day += TimeDelta::days(1);
+                }
+                if start_day != today {
+                    warn!("charging schedule can't start today");
+                }
+
+                info!("charging schedule: {start} to {}", start + duration);
+
+                // FIXME add a charging plan to span off teak periods
+
+                Ok(Some(
+                    ChargingSchedule::default().add_period(
+                        ChargingSchedulePeriod::builder(start.naive_local())
+                            .duration(duration)
+                            .build(),
+                    ),
+                ))
+            }
+            Asap {
+                target_soc,
+                power_limit,
+            } => {
+                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
+                else {
+                    return Err(format!(
+                        "couldn't compute energy to add for {} to {}",
+                        bms.current_soc,
+                        bms.target(),
+                    ));
+                };
+
+                let available_power = power_limit.saturating_sub(bms::STATIC_LOSS);
+                let duration_s = energy_to_add * 60 * 60 / available_power;
+
+                let now = Local::now();
+                let duration = TimeDelta::seconds(duration_s as _);
+                info!(
+                    "asap charging schedule: {now} to {} (target SoC {:.1} %)",
+                    now + duration,
+                    *target_soc * 100.0
+                );
+
+                Ok(Some(
+                    ChargingSchedule::default().add_period(
+                        ChargingSchedulePeriod::builder(now.naive_local())
+                            .duration(duration)
+                            .build(),
+                    ),
+                ))
+            }
+            Unlimited => Ok(None),
         }
     }
 
@@ -307,145 +465,6 @@ impl ChargingSchedulePeriodBuilder {
 
     pub fn build(self) -> ChargingSchedulePeriod {
         self.0
-    }
-}
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum ChargingPlan {
-    Blocking,
-    OffPeakToday {
-        power_limit: u32,
-    },
-    OffPeakTomorrow {
-        power_limit: u32,
-    },
-    Deadline {
-        deadline: NaiveTime,
-        target_soc: f32,
-        power_limit: u32,
-    },
-    NoLimit,
-}
-
-impl ChargingPlan {
-    pub fn to_charging_schedule(&self, bms: &crate::Bms) -> Option<ChargingSchedule> {
-        // FIXME make off peak period configurable
-        use ChargingPlan::*;
-        match self {
-            Blocking => Some(ChargingSchedule::new()),
-            OffPeakToday { power_limit } => Some(
-                ChargingSchedule::new()
-                    .add_period(
-                        ChargingSchedulePeriod::builder_starting_today(
-                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
-                        )
-                        .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
-                        .limit(*power_limit)
-                        .build(),
-                    )
-                    .add_period(
-                        ChargingSchedulePeriod::builder_starting_today(
-                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
-                        )
-                        .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
-                        .limit(*power_limit)
-                        .build(),
-                    ),
-            ),
-            OffPeakTomorrow { power_limit } => Some(
-                ChargingSchedule::new()
-                    .add_period(
-                        ChargingSchedulePeriod::builder_starting_tomorrow(
-                            NaiveTime::from_hms_opt(1, 28, 00).unwrap(),
-                        )
-                        .end_time(NaiveTime::from_hms_opt(6, 58, 00).unwrap())
-                        .limit(*power_limit)
-                        .build(),
-                    )
-                    .add_period(
-                        ChargingSchedulePeriod::builder_starting_tomorrow(
-                            NaiveTime::from_hms_opt(13, 58, 00).unwrap(),
-                        )
-                        .end_time(NaiveTime::from_hms_opt(16, 28, 00).unwrap())
-                        .limit(*power_limit)
-                        .build(),
-                    ),
-            ),
-            Deadline {
-                deadline: end_time,
-                target_soc,
-                power_limit,
-            } => {
-                // FIXME target_soc_to_energy: is flexible re. whether init SoC is known
-                // or not (Absolute / Relative). Added complexity is probably not worth it
-                // and we could require user to specify init SoC all the time
-                use super::SoC;
-                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
-                else {
-                    error!(
-                        "couldn't compute energy to add for {} to {}",
-                        bms.current_soc,
-                        bms.target_soc(),
-                    );
-                    return None;
-                };
-
-                let available_power = power_limit.saturating_sub(bms.constant_power_loss);
-                // FIXME would also need a ponderation in case of variations due to DPM
-                let duration_s = energy_to_add * 60 * 60 / available_power;
-                let energy_needed = duration_s * power_limit / 60 / 60;
-                // FIXME add extra duration as we get closer to 100% SoC
-
-                let now = Local::now();
-                let today = now.date_naive();
-                let mut start_day = today;
-                let mut start;
-                let duration = TimeDelta::seconds(duration_s as _);
-                info!(
-                    "preparing schedule for SoC {} to {}\n\
-                    \tenergy to add: {:.3} kWh\n\
-                    \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
-                    \tduration {} mn",
-                    bms.current_soc,
-                    bms.target_soc(),
-                    energy_to_add as f32 / 1_000.0,
-                    energy_needed as f32 / 1_000.0,
-                    (1.0 - (energy_to_add as f32 / energy_needed as f32)) * 100.0,
-                    duration.num_minutes(),
-                );
-                // compute in local time in order to avoid difference due to dst
-                loop {
-                    start = (NaiveDateTime::new(start_day, *end_time) - duration)
-                        .and_local_timezone(Local)
-                        .unwrap();
-
-                    // FIXME altenatively, warn from how much we would miss the SoC cap
-                    if start + TimeDelta::minutes(2) > now {
-                        // FIXME added a safety margin, needs more thinking + const / conf
-                        break;
-                    }
-                    // charging would have needed to start earlier => select next day
-                    start_day += TimeDelta::days(1);
-                }
-                if start_day != today {
-                    warn!("charging schedule can't start today");
-                }
-
-                info!("charging schedule: {start} to {}", start + duration);
-
-                // FIXME add a charging plan to span off teak periods
-
-                Some(
-                    ChargingSchedule::new().add_period(
-                        ChargingSchedulePeriod::builder(start.naive_local())
-                            .duration(duration)
-                            .build(),
-                    ),
-                )
-            }
-            NoLimit => None,
-        }
     }
 }
 
@@ -640,7 +659,7 @@ mod tests {
         let period2_end = period2_start + period2_duration;
 
         let charging_schedule_today_hours = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .end_time(period1_end)
@@ -657,7 +676,7 @@ mod tests {
         .build_charging_schedule();
 
         let charging_schedule_today_duration = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .duration(period1_duration)
@@ -729,7 +748,7 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .duration(period1_duration)
@@ -791,7 +810,7 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .duration(period1_duration)
@@ -848,7 +867,7 @@ mod tests {
         let period2_duration = TimeDelta::hours(3);
 
         let charging_schedule = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .duration(period1_duration)
@@ -910,7 +929,7 @@ mod tests {
         let period2_duration = TimeDelta::minutes(30);
 
         let charging_schedule = SetChargingProfile::builder(
-            ChargingSchedule::new()
+            ChargingSchedule::new_blocking()
                 .add_period(
                     ChargingSchedulePeriod::builder_starting_today(period1_start)
                         .duration(period1_duration)
@@ -950,17 +969,15 @@ mod tests {
 
     #[test]
     pub fn deadline() {
-        use crate::SoC;
+        use crate::{SoC, bms};
 
         crate::tests::init();
 
-        const BATTERY_CAPACITY: u32 = 48_100;
-        const POWER_LIMIT: u32 = 7_400;
-        const CONST_POWER_LOSS: u32 = 400;
         const INITIAL_SOC: f32 = 0.30;
         const TARGET_SOC: f32 = 0.60;
-        const ENERGY_TO_ADD: u32 = ((TARGET_SOC - INITIAL_SOC) * BATTERY_CAPACITY as f32) as u32;
-        const DURATION_S: u32 = ENERGY_TO_ADD * 60 * 60 / (POWER_LIMIT - CONST_POWER_LOSS);
+        const ENERGY_TO_ADD: u32 =
+            ((TARGET_SOC - INITIAL_SOC) * bms::DEFAULT_CAPACITY as f32) as u32;
+        const DURATION_S: u32 = ENERGY_TO_ADD * 60 * 60 / bms::MAX_AVAILABLE_POWER;
 
         let now = Local::now();
 
@@ -969,60 +986,61 @@ mod tests {
             now + TimeDelta::seconds(DURATION_S as _) - TimeDelta::minutes(2);
 
         // unknown initial SoC
-        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+        let bms = Bms::builder(bms::DEFAULT_CAPACITY)
             .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::Deadline {
+        let plan = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
             target_soc: TARGET_SOC,
-            power_limit: POWER_LIMIT,
-        }
-        .to_charging_schedule(&bms);
-        assert_eq!(None, charging_schedule);
+            power_limit: bms::MAX_POWER,
+        };
+        assert!(ChargingSchedule::try_from_charging_plan(&plan, &bms).is_err());
 
         // known initial SoC, can start today
-        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+        let bms = Bms::builder(bms::DEFAULT_CAPACITY)
             .initial_soc(SoC::Absolute(INITIAL_SOC))
             .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::Deadline {
+        let plan = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
             target_soc: TARGET_SOC,
-            power_limit: POWER_LIMIT,
-        }
-        .to_charging_schedule(&bms)
-        .unwrap();
-        let mut ref_schedule = ChargingSchedule::new().add_period(
+            power_limit: bms::MAX_POWER,
+        };
+        let charging_schedule = ChargingSchedule::try_from_charging_plan(&plan, &bms)
+            .unwrap()
+            .unwrap();
+        let mut ref_schedule = ChargingSchedule::new_blocking().add_period(
             ChargingSchedulePeriod::builder(
                 end_time_can_start_today.naive_local() - TimeDelta::seconds(DURATION_S as _),
             )
             .duration(TimeDelta::seconds(DURATION_S as _))
-            .limit(POWER_LIMIT)
+            .limit(bms::MAX_POWER)
             .build(),
         );
         ref_schedule.set_time = charging_schedule.set_time;
         assert_eq!(ref_schedule, charging_schedule);
 
         // known initial SOC, can't start today
-        let bms = crate::Bms::builder(BATTERY_CAPACITY, CONST_POWER_LOSS)
+        let bms = Bms::builder(bms::DEFAULT_CAPACITY)
             .initial_soc(SoC::Absolute(INITIAL_SOC))
             .target_soc(TARGET_SOC)
             .build();
-        let charging_schedule = ChargingPlan::Deadline {
+        let plan = ChargingPlan::Deadline {
             deadline: end_time_can_not_start_today.time(),
             target_soc: TARGET_SOC,
-            power_limit: POWER_LIMIT,
-        }
-        .to_charging_schedule(&bms)
-        .unwrap();
-        let mut ref_schedule = ChargingSchedule::new().add_period(
+            power_limit: bms::MAX_POWER,
+        };
+        let charging_schedule = ChargingSchedule::try_from_charging_plan(&plan, &bms)
+            .unwrap()
+            .unwrap();
+        let mut ref_schedule = ChargingSchedule::new_blocking().add_period(
             ChargingSchedulePeriod::builder(
                 // needs to start tomorrow
                 (end_time_can_not_start_today + TimeDelta::days(1)).naive_local()
                     - TimeDelta::seconds(DURATION_S as _),
             )
             .duration(TimeDelta::seconds(DURATION_S as _))
-            .limit(POWER_LIMIT)
+            .limit(bms::MAX_POWER)
             .build(),
         );
         ref_schedule.set_time = charging_schedule.set_time;
@@ -1040,7 +1058,7 @@ mod tests {
         let period2_start = NaiveTime::from_hms_opt(13, 58, 00).unwrap();
         let period2_duration = TimeDelta::minutes(30);
 
-        let mut schedule = ChargingSchedule::new()
+        let mut schedule = ChargingSchedule::new_blocking()
             .add_period(
                 ChargingSchedulePeriod::builder_starting_today(period1_start)
                     .duration(period1_duration)
@@ -1075,7 +1093,7 @@ mod tests {
         let period2_start = NaiveTime::from_hms_opt(13, 58, 00).unwrap();
         let period2_duration = TimeDelta::hours(1);
 
-        let mut schedule = ChargingSchedule::new()
+        let mut schedule = ChargingSchedule::new_blocking()
             .add_period(
                 ChargingSchedulePeriod::builder_starting_today(period1_start)
                     .duration(period1_duration)

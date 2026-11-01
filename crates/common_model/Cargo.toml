@@ -1,0 +1,18 @@
+[package]
+name = "charge-system-common-model"
+# Standalone version/edition (NOT workspace-inherited): this crate is consumed
+# by an external repo (the OLED status app) via a git dependency, and cargo
+# builds a git dep in isolation — it reads only this manifest, so inherited
+# fields would break the build.
+version = "0.1.0"
+edition = "2024"
+
+[features]
+ocpp = ["dep:ocpp_rs"]
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+log = "0.4.33"
+ocpp_rs = { version = "0.4.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

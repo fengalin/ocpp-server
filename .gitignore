@@ -1,5 +1,3 @@
 /target
-/charging_sessions.sqlite
-/ui/node_modules
-/static/app.js
-/static/app.js.map
+/crates/server/charging_sessions.sqlite
+/static/wasm

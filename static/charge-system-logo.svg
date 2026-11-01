@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 190" role="img" aria-label="Charge System — your charge point, and everything that orbits it">
+  <!-- mark: "your charge point, and everything that orbits it" -->
+  <g transform="translate(52 22) scale(0.95)">
+    <ellipse cx="60" cy="60" rx="52" ry="20" transform="rotate(-24 60 60)"
+             fill="none" stroke="#8b98a5" stroke-width="2.5" opacity="0.55"/>
+    <circle cx="103" cy="35" r="4.5" fill="#5aa9e6"/>
+    <rect x="43" y="24" width="34" height="52" rx="8" fill="#2c313a"/>
+    <path d="M63.5 31 L52 49 h7 L55.5 66 L70 45 h-8 l7.5 -14 z" fill="#e6b45a"/>
+    <path d="M60 76 C60 88 74 84 74 96" fill="none" stroke="#2c313a"
+          stroke-width="6" stroke-linecap="round"/>
+    <rect x="36" y="96" width="28" height="6" rx="3" fill="#2c313a"/>
+    <circle cx="38" cy="106" r="3.5" fill="#4cc38a"/>
+  </g>
+  <!-- wordmark -->
+  <text x="200" y="88" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="46" font-weight="700" fill="#e8ecf1">Charge System</text>
+  <!-- tagline -->
+  <text x="202" y="124" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="19" fill="#8b98a5" font-style="italic">your charge point, and everything that orbits it</text>
+</svg>

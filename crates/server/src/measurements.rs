@@ -1,89 +1,17 @@
 use chrono::{DateTime, Local, Utc};
-use ocpp_rs::v16::{data_types as v16_data_types, enums as v16_enums};
 use std::{cmp, fmt};
 
-/// Voltage floor step from which to report a difference when computing Eq
-const VOLTAGE_DIFF_STEP: u16 = 3;
-/// Voltage offset to add when computing Eq, so the steps are centered around 230 V
-const VOLTAGE_DIFF_OFFSET: u16 = 2;
+// `MeterValueSelection` (and its OCPP conversion helper `voltage_eq`) live in
+// the shared `charge-system-common-model` crate — the EVSE's focused subset
+// of the OCPP `MeterValue`, also consumed by the web app and the external
+// OLED status app.
+use charge_system_common_model::meter_value::MeterValueSelection;
+use charge_system_common_model::meter_value::ocpp_impls::voltage_eq;
 
 /// DPM energy rounding step from which to report a difference when computing Eq
 const DPM_ENERGY_DIFF_STEP: u64 = 1_000;
 /// DPM power rounding step from which to report a difference when computing Eq
 const DPM_POWER_DIFF_STEP: u32 = 500;
-
-fn voltage_eq(lhs: u16, rhs: u16) -> bool {
-    ((lhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
-        == ((rhs + VOLTAGE_DIFF_OFFSET) / VOLTAGE_DIFF_STEP)
-}
-
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MeterValueSelection {
-    pub ts: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub energy: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub power: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub voltage: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<u16>,
-}
-
-impl MeterValueSelection {
-    pub fn is_informative(&self) -> bool {
-        self.power.is_some()
-            || self.energy.is_some()
-            || self.voltage.is_some()
-            || self.temperature.is_some()
-    }
-}
-
-impl<'a> From<&'a v16_data_types::MeterValue> for MeterValueSelection {
-    fn from(mv: &v16_data_types::MeterValue) -> Self {
-        let mut this = MeterValueSelection {
-            ts: mv.timestamp.inner(),
-            ..Default::default()
-        };
-
-        for mv in mv.sampled_value.iter() {
-            use v16_enums::Measurand::*;
-            match mv.measurand {
-                Some(EnergyActiveImportRegister) => this.energy = mv.value.parse::<u64>().ok(),
-                Some(PowerActiveImport) => this.power = mv.value.parse::<u32>().ok(),
-                Some(Voltage) if mv.phase == Some(v16_enums::Phase::L1) => {
-                    this.voltage = mv.value.parse::<u16>().ok()
-                }
-                Some(Temperature) => this.temperature = mv.value.parse::<u16>().ok(),
-                _ => (),
-            }
-        }
-
-        this
-    }
-}
-
-impl fmt::Display for MeterValueSelection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!(
-            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {:.0} V, temp.: {:.0} °C",
-            self.ts.with_timezone(&Local),
-            self.energy.map_or(f64::NAN, |v| v as f64 / 1_000.0),
-            self.power.map_or(f64::NAN, |v| v as f64 / 1_000.0),
-            self.voltage.map_or(f64::NAN, |v| v as f64),
-            self.temperature.map_or(f64::NAN, |v| v as f64),
-        ))
-    }
-}
-
-impl cmp::PartialEq for MeterValueSelection {
-    #[allow(clippy::eq_op)]
-    fn eq(&self, other: &Self) -> bool {
-        self.energy == other.energy
-            && Option::zip(self.power, other.power).is_none_or(|(s, o)| s == o)
-            && Option::zip(self.voltage, other.voltage).is_none_or(|(s, o)| voltage_eq(s, o))
-    }
-}
 
 /// Meter Value Temperature observer
 /// Avoids logging when temperature fluctuates between two values
@@ -127,9 +55,14 @@ impl MeterValueObserver {
 
         let prev_temp_mean = std::mem::replace(&mut self.prev_temp_mean, temp_mean);
 
-        // FIXME this doesn't compare temperatures, add the eq code here if it's not needed elsewhere
-        if prev_mv == *mv {
-            return false;
+        if (prev_mv.energy.is_none() && mv.energy.is_some())
+            || Option::zip(prev_mv.energy, mv.energy).is_some_and(|(s, o)| s != o)
+            || (prev_mv.power.is_none() && mv.power.is_some())
+            || Option::zip(prev_mv.power, mv.power).is_some_and(|(s, o)| s != o)
+            || (self.last_voltage.is_none() && mv.voltage.is_some())
+            || Option::zip(self.last_voltage, mv.voltage).is_some_and(|(s, o)| !voltage_eq(s, o))
+        {
+            return true;
         }
 
         if let Some(prev_temp) = prev_mv.temperature
@@ -287,6 +220,7 @@ impl EnergyTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use charge_system_common_model::model::Ts;
 
     #[test]
     fn deserialize_dpm_data_clock() {
@@ -395,14 +329,14 @@ mod tests {
         // exact match
         assert_eq!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
@@ -413,14 +347,14 @@ mod tests {
         // exact match but one is missing power
         assert_eq!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: None,
                 voltage: Some(230),
@@ -431,14 +365,14 @@ mod tests {
         // timestamps are excluded from comparison
         assert_eq!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: Utc::now(),
+                ts: Ts::from_utc(Utc::now()),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
@@ -449,14 +383,14 @@ mod tests {
         // temperature are excluded from comparison
         assert_eq!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: Utc::now(),
+                ts: Ts::from_utc(Utc::now()),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
@@ -467,14 +401,14 @@ mod tests {
         // transction_id are excluded from comparison
         assert_eq!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: Utc::now(),
+                ts: Ts::from_utc(Utc::now()),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
@@ -485,14 +419,14 @@ mod tests {
         // different energy
         assert_ne!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_100),
                 power: Some(100),
                 voltage: Some(230),
@@ -503,14 +437,14 @@ mod tests {
         // different power
         assert_ne!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(110),
                 voltage: Some(230),
@@ -521,14 +455,14 @@ mod tests {
         // different voltage step
         assert_ne!(
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(230),
                 temperature: Some(26),
             },
             MeterValueSelection {
-                ts: now,
+                ts: Ts::from_utc(now),
                 energy: Some(1_000),
                 power: Some(100),
                 voltage: Some(232),
@@ -543,7 +477,7 @@ mod tests {
 
         // initial
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_000),
             power: Some(100),
             voltage: Some(230),
@@ -554,7 +488,7 @@ mod tests {
 
         // different energy
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_100),
             power: Some(100),
             voltage: Some(230),
@@ -565,7 +499,7 @@ mod tests {
 
         // different power
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_100),
             power: Some(110),
             voltage: Some(230),
@@ -576,7 +510,7 @@ mod tests {
 
         // same as previous (no log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_100),
             power: Some(110),
             voltage: None,
@@ -587,8 +521,8 @@ mod tests {
 
         // voltage, but no active power (no log, but consolidation on next MV)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
-            energy: Some(1_110),
+            ts: Ts::from_utc(Utc::now()),
+            energy: Some(1_100),
             power: None,
             voltage: Some(230),
             temperature: Some(26),
@@ -598,7 +532,7 @@ mod tests {
 
         // no voltage, but active power (consolidated voltage from MV and log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(10),
             voltage: None,
@@ -610,18 +544,18 @@ mod tests {
 
         // different voltage step, no active power (no log, but consolidation on next MV)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: None,
             voltage: Some(232),
             temperature: None,
         };
         mvo.consolidate(&mut mv);
-        assert!(!mvo.pertinent_to_user(&mv));
+        assert!(mvo.pertinent_to_user(&mv));
 
         // no voltage, but active power (consolidated voltage from MV and log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(10),
             voltage: None,
@@ -633,7 +567,7 @@ mod tests {
 
         // same as previous, different temperature (log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(110),
             voltage: Some(232),
@@ -644,7 +578,7 @@ mod tests {
 
         // same as previous, fluctuating temperature (no log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(110),
             voltage: None,
@@ -655,7 +589,7 @@ mod tests {
 
         // same as previous, fluctuating temperature again (no log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(110),
             voltage: None,
@@ -666,7 +600,7 @@ mod tests {
 
         // same as previous, raising temperature (log)
         let mut mv = MeterValueSelection {
-            ts: Utc::now(),
+            ts: Ts::from_utc(Utc::now()),
             energy: Some(1_110),
             power: Some(110),
             voltage: None,

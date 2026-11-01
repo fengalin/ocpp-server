@@ -1,0 +1,28 @@
+# Verification harness for the WASM front end.
+#
+# NOT part of the shipped server. It re-implements the front-end-facing HTTP
+# surface (JSON REST + SSE) using the SAME shared types
+# (`charge-system-web-model` / `charge-system-common-model`) and JSON wire
+# format as the server's webserver, and serves
+# `../static`. It feeds a small synthetic charging session so the UI has live
+# data to render. Used only to smoke-test the front end in a headless browser.
+#
+# It is a workspace member (shared lockfile / clippy) but excluded from
+# `default-members`, so a plain `cargo build`/`test`/`run` at the root targets
+# the real server.
+[package]
+name = "charge-system-web-mock"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = { version = "0.8.9", features = ["macros"] }
+charge-system-common-model.workspace = true
+charge-system-web-model.workspace = true
+chrono.workspace = true
+futures.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true

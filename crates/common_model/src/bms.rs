@@ -1,14 +1,18 @@
 use log::{error, info, warn};
 use std::{
-    cmp,
     fmt::{self, Write},
     ops,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+// FIXME make those a setting also they are not BMS related
+pub const DEFAULT_CAPACITY: u32 = 48_100;
+pub const MAX_POWER: u32 = 7_400;
+pub const STATIC_LOSS: u32 = 400;
+pub const MAX_AVAILABLE_POWER: u32 = MAX_POWER - STATIC_LOSS;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Bms {
     pub capacity: u32,
-    pub constant_power_loss: u32,
     pub initial_energy: Option<u64>,
     pub current_energy: Option<u64>,
     pub initial_soc: SoC,
@@ -17,10 +21,9 @@ pub struct Bms {
 }
 
 impl Bms {
-    pub fn builder(capacity: u32, constant_power_loss: u32) -> BmsBuilder {
+    pub fn builder(capacity: u32) -> BmsBuilder {
         BmsBuilder(Bms {
             capacity,
-            constant_power_loss,
             initial_energy: None,
             current_energy: None,
             initial_soc: SoC::Unknown,
@@ -30,7 +33,9 @@ impl Bms {
     }
 
     // FIXME could return a Result
-    pub fn have_energy(&mut self, energy: u64) {
+    /// Record a new meter energy reading (Wh) and re-estimate `current_soc`
+    /// from it (relative to `initial_energy`).
+    pub fn update_from_energy(&mut self, energy: u64) {
         let Some(initial_energy) = self.initial_energy else {
             return;
         };
@@ -82,7 +87,9 @@ impl Bms {
         Some((self.capacity as f32 * soc_to_add) as u32)
     }
 
-    pub fn target_soc(&self) -> SoC {
+    /// The `target_soc` field, as a [`SoC`] of the same kind as `current_soc`
+    /// (named `target` so it does not clash with the `target_soc` field).
+    pub fn target(&self) -> SoC {
         use SoC::*;
 
         match self.current_soc {
@@ -96,10 +103,9 @@ impl Bms {
 impl fmt::Display for Bms {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "cap.: {:.3} kWh, const loss: {} W, init energy: {} kWh, \
-            cur enery: {}, init SoC: {} %, cur SoC: {}",
+            "cap.: {:.3} kWh, init energy: {} kWh, \
+            cur energy: {}, init SoC: {} %, cur SoC: {}",
             self.capacity as f32 / 1_000.0,
-            self.constant_power_loss,
             self.initial_energy.map_or_else(
                 || "N/A".to_string(),
                 |e| format!("{:.3}", e as f64 / 1_000.0)
@@ -151,7 +157,10 @@ fn saturating_sub(lhs: f32, rhs: f32) -> f32 {
     lhs - rhs
 }
 
-#[derive(Debug, Default, Copy, Clone, serde::Deserialize, serde::Serialize)]
+/// State of charge: a *fraction* 0–1 (see the crate docs). `PartialEq` is
+/// exact (the old epsilon-0.01 impl was non-transitive and leaked into
+/// `Bms`'s derived `PartialEq`).
+#[derive(Debug, Default, Copy, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SoC {
     #[default]
     Unknown,
@@ -161,10 +170,10 @@ pub enum SoC {
 
 impl SoC {
     pub fn new(is_absolute: bool, soc: impl Into<Option<f32>>) -> Self {
-        match soc.into() {
-            Some(soc) if is_absolute => SoC::Absolute(soc),
-            Some(soc) => SoC::Relative(soc),
-            None => SoC::Unknown,
+        if is_absolute {
+            Self::new_absolute(soc)
+        } else {
+            Self::new_relative(soc)
         }
     }
 
@@ -195,21 +204,14 @@ impl SoC {
     }
 
     pub fn absolute(self) -> Option<f32> {
-        let SoC::Absolute(soc) = self else {
-            return None;
-        };
-
-        Some(soc)
+        self.is_absolute().then(|| self.inner()).flatten()
     }
 
     pub fn relative(self) -> Option<f32> {
-        let SoC::Relative(soc) = self else {
-            return None;
-        };
-
-        Some(soc)
+        self.is_relative().then(|| self.inner()).flatten()
     }
 
+    /// The inner fraction, for either kind (`None` when `Unknown`).
     pub fn inner(self) -> Option<f32> {
         match self {
             SoC::Absolute(soc) => Some(soc),
@@ -272,17 +274,6 @@ impl ops::Sub<f32> for SoC {
             SoC::Unknown => self = SoC::Relative(soc_delta),
         }
         self
-    }
-}
-
-impl cmp::PartialEq for SoC {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (SoC::Absolute(this), SoC::Absolute(other)) => (this - other).abs() < 0.01,
-            (SoC::Relative(this), SoC::Relative(other)) => (this - other).abs() < 0.01,
-            (SoC::Unknown, SoC::Unknown) => true,
-            _ => false,
-        }
     }
 }
 

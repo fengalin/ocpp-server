@@ -1,0 +1,10 @@
+[package]
+name = "charge-system-web-model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+charge-system-common-model.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true

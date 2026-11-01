@@ -5,11 +5,14 @@ use tokio::sync::{broadcast, mpsc};
 
 use std::io::Write;
 
+use charge_system_common_model::{
+    bms::{self, Bms, SoC},
+    plan_model::ChargingPlan,
+};
+
 mod args;
 use args::{Args, Command};
 
-mod bms;
-use bms::{Bms, SoC, SoCProgress};
 pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
 mod dispatcher;
@@ -19,11 +22,10 @@ use database::Database;
 mod evse;
 use evse::Evse;
 pub mod measurements;
-pub mod notification;
 mod ocpp;
 use ocpp::{CommandToChargingPoint, OcppInterface};
 pub mod schedule;
-pub use schedule::{ChargingPlan, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
+pub use schedule::{ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
 pub mod unix_socket;
 pub use unix_socket::UnixSocketNotifier;
 pub mod webserver;
@@ -64,11 +66,10 @@ async fn main() -> anyhow::Result<()> {
     {
         let db = Database::get();
 
-        match db.check_last_charging_session(&bms) {
+        match db.check_last_charging_session(&mut bms) {
             Ok(Some(session)) => {
                 info!("last known session:\n{session}");
                 if !session.is_complete() {
-                    bms = session.bms().clone();
                     info!("consolidated BMS:\n{bms}");
                 }
             }
@@ -91,10 +92,8 @@ async fn main() -> anyhow::Result<()> {
                     if !schedule.is_empty() {
                         format!(
                             "\nremaining: {}",
-                            schedule.remaining(
-                                chrono::Local::now().naive_local(),
-                                bms.constant_power_loss
-                            )
+                            schedule
+                                .remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS)
                         )
                     } else {
                         "".to_string()
@@ -116,31 +115,43 @@ async fn main() -> anyhow::Result<()> {
                 && let Some(cp) = cp
             {
                 info!("Selected charging plan: {cp:?}");
-                if let Some(s) = cp.to_charging_schedule(&bms) {
-                    let remaining =
-                        s.remaining(chrono::Local::now().naive_local(), bms.constant_power_loss);
-                    info!(
-                        "remaining: {remaining}{}",
-                        if !remaining.is_zero() {
-                            format!(
-                                ", {}",
-                                SoC::Relative(remaining.energy as f32 / bms.capacity as f32)
-                            )
-                        } else {
-                            "".to_string()
-                        }
-                    );
+                match ChargingSchedule::try_from_charging_plan(cp, &bms) {
+                    Ok(Some(s)) => {
+                        let remaining =
+                            s.remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS);
+                        info!(
+                            "remaining: {remaining}{}",
+                            if !remaining.is_zero() {
+                                format!(
+                                    ", {}",
+                                    SoC::Relative(remaining.energy as f32 / bms.capacity as f32)
+                                )
+                            } else {
+                                "".to_string()
+                            }
+                        );
+                    }
+                    Ok(None) => warn!("unlimited charging plan"),
+                    Err(err) => error!("couldn't compute charging schedule: {err}"),
                 }
             }
         })
         .inspect_err(|err| error!("Charging plan: {err}"))?;
 
-    let (notif_tx, notif_rx) = broadcast::channel(8);
+    // The shared notification channel fans out to the unix-socket notifier,
+    // the web server (recording task + one SSE subscriber per connection) and
+    // dispatcher/evse senders; each subscriber gets its own 64-slot window,
+    // a lagging consumer just resyncs from the REST snapshot.
+    let (notif_tx, _) = broadcast::channel(64);
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
+
+    // Both subscriptions below must be created BEFORE Dispatcher::new: Evse::new
+    // broadcasts a startup BmsUpdate during construction and a broadcast only
+    // buffers for receivers that already exist.
     let mut unix_socket_notif = UnixSocketNotifier::new(notif_tx.subscribe())
         .inspect_err(|err| error!("failed to create unix socket notifier: {err}"))
         .ok();
-    let webserver = Webserver::new(&args, &bms, notif_rx, cmd_tx).await?;
+    let webserver = Webserver::new(&args, notif_tx.clone(), cmd_tx).await?;
     let dispatcher = Dispatcher::new(bms, &args, notif_tx, cmd_rx, charging_plan).await?;
 
     match &args.command {
