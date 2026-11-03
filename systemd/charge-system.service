@@ -1,13 +1,13 @@
 [Unit]
-Description=OCPP server daemon
+Description=Charge System Server daemon
 
 [Service]
 User=ocpp
 Group=ocpp
 Type=simple
-ExecStart=/home/ocpp/.local/bin/ocpp-server run
+ExecStart=/home/ocpp/.local/bin/charge-system-server run
 WorkingDirectory=/home/ocpp/
-RuntimeDirectory=charge_point
+RuntimeDirectory=charge_system
 RuntimeDirectoryPreserve=true
 UMask=002
 StandardOutput=append:/home/ocpp/server_out.log

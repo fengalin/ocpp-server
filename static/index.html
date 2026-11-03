@@ -4,12 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f141a">
-<title>Charge Point</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="/charge-system.svg">
+<title>Charge System</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <header id="topbar">
-  <div class="brand">Charge Point <span class="draft-tag">draft</span></div>
+<div class="brand">Charge System <span class="draft-tag">draft</span></div>
   <div class="topbar-right">
     <span id="clock" class="clock"></span>
     <span id="conn" class="conn" title="live connection"></span>
@@ -18,16 +20,19 @@
 
 <nav id="tabs">
   <button class="tab active" data-tab="status">Status</button>
-  <button class="tab" data-tab="metrics">Metrics</button>
   <button class="tab" data-tab="plan">Plan</button>
+  <button class="tab" data-tab="metrics">Metrics</button>
   <button class="tab" data-tab="actions">Actions</button>
   <button class="tab" data-tab="log">Log</button>
 </nav>
 
 <main>
   <section id="tab-status" class="tabpane active">
-    <div class="status-row">
-      <div id="status-badge" class="status-badge">…</div>
+    <div id="status-badge" class="status-badge">
+      <span id="status-badge-text">…</span>
+      <button id="stop-session-btn" class="btn danger hidden" type="button" title="Stop charging session" aria-label="Stop charging session">
+        ■
+      </button>
     </div>
     <div class="card">
       <div class="soc-labels">
@@ -38,16 +43,32 @@
         <div id="soc-fill"></div>
         <div id="soc-target-mark" class="hidden"></div>
       </div>
-      <button id="stop-session-btn" class="btn danger block hidden" type="button">
-        ⏹ Stop charging session
-      </button>
       <div class="tiles" id="tiles"></div>
     </div>
-    <div id="plan-card" class="card hidden"></div>
-    <div id="session-card" class="card hidden"></div>
-    <!-- could be useful
-    <div id="note" class="card draft-card"></div>
-    -->
+    <div id="plan-card" class="card hidden">
+      <h2>Active plan</h2>
+      <div id="plan-card-body"></div>
+      <button id="plan-stop-btn" class="btn danger hidden" type="button" title="Stop active plan" aria-label="Stop active plan">■</button>
+    </div>
+    <div class="card" id="init-soc-card">
+      <div class="field">
+        <label for="init-soc">Initial SoC: <span id="init-soc-val">…</span></label>
+        <div class="soc-row">
+          <div class="soc-input">
+            <input type="text" inputmode="numeric" pattern="[0-9]*" id="init-soc" min="0" max="100" step="1" value="0" autocomplete="off">
+            <span class="soc-unit">%</span>
+          </div>
+          <div class="seg soc-chips" id="init-soc-chips">
+            <button type="button" class="chip" data-preset="20">20</button>
+            <button type="button" class="chip" data-preset="30">30</button>
+            <button type="button" class="chip" data-preset="40">40</button>
+            <button type="button" class="chip" data-preset="50">50</button>
+            <button type="button" class="chip" data-preset="60">60</button>
+          </div>
+        </div>
+        <div id="init-soc-note" class="muted"></div>
+      </div>
+    </div>
   </section>
 
   <section id="tab-metrics" class="tabpane">
@@ -63,22 +84,47 @@
   <section id="tab-plan" class="tabpane">
     <form class="card" id="plan-form" onsubmit="return false">
       <h2>New charging plan</h2>
-      <div class="seg">
-        <label class="radio"><input type="radio" name="mode" id="mode-deadline" checked><span>By deadline</span></label>
-        <label class="radio"><input type="radio" name="mode" id="mode-asap"><span>As soon as possible</span></label>
+      <div class="seg" id="plan-kind-chips">
+        <button type="button" class="chip active" data-preset="deadline">Deadline</button>
+        <button type="button" class="chip" data-preset="asap">ASAP</button>
+        <button type="button" class="chip" data-preset="blocking">Blocking</button>
+        <button type="button" class="chip" data-preset="unlimited">Unlimited</button>
       </div>
-      <div class="field">
-        <label for="target">Target SoC: <span id="target-val">80 %</span></label>
-        <input type="range" id="target" min="5" max="100" step="1" value="80">
+      <div class="field" id="target-wrap">
+        <label for="target">Target SoC: <span id="target-val">55 %</span></label>
+        <div class="soc-row">
+          <div class="soc-input">
+            <input type="text" inputmode="numeric" pattern="[0-9]*" id="target" min="0" max="100" step="1" value="55" autocomplete="off">
+            <span class="soc-unit">%</span>
+          </div>
+          <div class="seg soc-chips" id="target-chips">
+            <button type="button" class="chip" data-preset="55">55</button>
+            <button type="button" class="chip" data-preset="60">60</button>
+            <button type="button" class="chip" data-preset="80">80</button>
+            <button type="button" class="chip" data-preset="95">95</button>
+            <button type="button" class="chip" data-preset="100">100</button>
+          </div>
+        </div>
       </div>
       <div class="field" id="deadline-wrap">
-        <label for="deadline">Charging must finish by</label>
-        <input type="datetime-local" id="deadline">
+        <label>Charging must finish by</label>
+        <div class="dt-row">
+          <input type="date" id="deadline-date">
+          <input type="time" id="deadline-time">
+        </div>
+      </div>
+      <div class="field" id="power-limit-wrap">
+        <label>Power limit (grid power the plan may draw)</label>
+        <div class="seg soc-chips" id="power-limit-chips">
+          <button type="button" class="chip" data-preset="2300">2.3 kW</button>
+          <button type="button" class="chip" data-preset="3700">3.7 kW</button>
+          <button type="button" class="chip" data-preset="5000">5.0 kW</button>
+          <button type="button" class="chip" data-preset="7400">7.4 kW</button>
+        </div>
       </div>
       <button id="plan-apply" class="btn primary" type="button">Apply plan</button>
       <div id="plan-msg" class="msg"></div>
     </form>
-    <div id="plan-active" class="card hidden"></div>
     <div id="preview-panel" class="card hidden"></div>
   </section>
 
@@ -105,11 +151,23 @@
     <div id="confirm-msg" class="confirm-msg"></div>
     <div class="confirm-btns">
       <button id="confirm-cancel" class="btn">Cancel</button>
-      <button id="confirm-ok" class="btn danger">Stop session</button>
+      <button id="confirm-ok" class="btn danger">OK</button>
     </div>
   </div>
 </div>
 
-<script type="module" src="/app.js"></script>
+<script type="module">
+  import init from '/wasm/web_app.js';
+  // Surface a startup/panic failure on screen: a panicked wasm instance
+  // rejects this promise, and without a handler the death is silent.
+  init().catch((e) => {
+    console.error('wasm init failed', e);
+    const el = document.getElementById('plan-msg');
+    if (el) {
+      el.textContent = 'wasm init failed: ' + (e && e.message ? e.message : e);
+      el.className = 'msg err';
+    }
+  });
+</script>
 </body>
 </html>

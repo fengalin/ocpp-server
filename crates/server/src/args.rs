@@ -1,4 +1,8 @@
 use anyhow::{Context, bail};
+use charge_system_common_model::{
+    bms::{Bms, SoC},
+    plan_model::ChargingPlan as EvseChargingPlan,
+};
 use chrono::NaiveTime;
 
 use std::net::Ipv4Addr;
@@ -12,13 +16,6 @@ pub struct Args {
 
     #[clap(long, help = "charging plan power limit (W)", default_value_t = 7_400)]
     pub power_limit: u32,
-
-    #[clap(
-        long,
-        help = "Constant power lost while charging (W)",
-        default_value_t = 400
-    )]
-    pub constant_power_loss: u32,
 
     #[clap(
         long,
@@ -138,10 +135,9 @@ impl Args {
     }
 }
 
-impl From<&Args> for crate::Bms {
+impl From<&Args> for Bms {
     fn from(args: &Args) -> Self {
-        use crate::SoC;
-        crate::Bms::builder(args.battery_capacity, args.constant_power_loss)
+        Bms::builder(args.battery_capacity)
             .initial_soc(
                 // FIXME also support relative at some point
                 args.init
@@ -163,11 +159,11 @@ pub enum ChargingPlan {
     #[clap(help = "Compute a start time so the battery reaches SoC target \
         as close as possible to stop time (needs to specify SoC target & deadline)")]
     Deadline,
-    #[clap(help = "Start ASAP")]
-    NoLimit,
+    #[clap(help = "No plan in effect (no restriction on charging power)")]
+    Unlimited,
 }
 
-impl TryFrom<&Args> for Option<crate::ChargingPlan> {
+impl TryFrom<&Args> for Option<EvseChargingPlan> {
     // FIXME
     type Error = anyhow::Error;
     fn try_from(args: &Args) -> anyhow::Result<Self> {
@@ -176,11 +172,11 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
         };
 
         match charging_plan {
-            ChargingPlan::Blocking => Ok(Some(crate::ChargingPlan::Blocking)),
-            ChargingPlan::OffPeakToday => Ok(Some(crate::ChargingPlan::OffPeakToday {
+            ChargingPlan::Blocking => Ok(Some(EvseChargingPlan::Blocking)),
+            ChargingPlan::OffPeakToday => Ok(Some(EvseChargingPlan::OffPeakToday {
                 power_limit: args.power_limit,
             })),
-            ChargingPlan::OffPeakTomorrow => Ok(Some(crate::ChargingPlan::OffPeakTomorrow {
+            ChargingPlan::OffPeakTomorrow => Ok(Some(EvseChargingPlan::OffPeakTomorrow {
                 power_limit: args.power_limit,
             })),
             ChargingPlan::Deadline => {
@@ -192,7 +188,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
                     match end_time.parse::<NaiveTime>() {
                         Ok(end_time) => {
                             if err_msg.is_empty() {
-                                return Ok(Some(crate::ChargingPlan::Deadline {
+                                return Ok(Some(EvseChargingPlan::Deadline {
                                     deadline: end_time,
                                     target_soc: args.target.expect("checked above") as f32 / 100.0,
                                     power_limit: args.power_limit,
@@ -216,7 +212,7 @@ impl TryFrom<&Args> for Option<crate::ChargingPlan> {
 
                 bail!(err_msg);
             }
-            ChargingPlan::NoLimit => Ok(Some(crate::ChargingPlan::NoLimit)),
+            ChargingPlan::Unlimited => Ok(Some(EvseChargingPlan::Unlimited)),
         }
     }
 }

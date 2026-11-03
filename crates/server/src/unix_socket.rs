@@ -7,18 +7,18 @@ use tokio::sync::broadcast;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::notification::{self, ChargePointNotification};
+use charge_system_common_model::notification::{self, Notification};
 
 const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct UnixSocketNotifier {
     listener: UnixListener,
-    notif_rx: broadcast::Receiver<ChargePointNotification>,
+    notif_rx: broadcast::Receiver<Notification>,
 }
 
 impl UnixSocketNotifier {
-    pub fn new(notif_rx: broadcast::Receiver<ChargePointNotification>) -> anyhow::Result<Self> {
+    pub fn new(notif_rx: broadcast::Receiver<Notification>) -> anyhow::Result<Self> {
         let socket_path = Path::new(notification::UNIX_SOCKET_PATH);
         if socket_path.exists() {
             std::fs::remove_file(socket_path).context("unix socket")?;
@@ -69,10 +69,12 @@ impl UnixSocketNotifier {
         let mut buf = vec![0; 1024];
         loop {
             let msg = self.notif_rx.recv().await.context("notif chan receiver")?;
-            // FIXME
             match &msg {
-                ChargePointNotification::Charge(_) | ChargePointNotification::Connection(_) => (),
-                ChargePointNotification::MeterValues { .. } => continue,
+                Notification::Status(_)
+                | Notification::BmsUpdate(_)
+                | Notification::Connection(_)
+                | Notification::ChargingPlan(_) => (),
+                Notification::MeterValues(_) => continue,
             }
 
             buf.clear();

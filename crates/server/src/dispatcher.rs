@@ -10,16 +10,16 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
 use std::time::Duration;
 
-use crate::{
-    Bms, ChargingPlan, CommandToChargingPoint, Evse, OcppInterface, args,
-    notification::{ChargePointConnectionState, ChargePointNotification},
-};
+use charge_system_common_model::notification::{ChargePointConnectionState, Notification};
+use charge_system_common_model::{bms::Bms, plan_model::ChargingPlan};
+
+use crate::{CommandToChargingPoint, Evse, OcppInterface, args};
 
 const RECONNECT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Dispatcher {
-    notif_tx: broadcast::Sender<ChargePointNotification>,
+    notif_tx: broadcast::Sender<Notification>,
     cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
     ws_stream: Option<WebSocketStream<TcpStream>>,
     command: Option<args::Command>,
@@ -33,7 +33,7 @@ impl Dispatcher {
     pub async fn new(
         bms: Bms,
         args: &args::Args,
-        notif_tx: broadcast::Sender<ChargePointNotification>,
+        notif_tx: broadcast::Sender<Notification>,
         cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
         charging_plan: Option<ChargingPlan>,
     ) -> anyhow::Result<Self> {
@@ -41,7 +41,7 @@ impl Dispatcher {
 
         let listener = TcpListener::bind(addr)
             .await
-            .with_context(|| format!("bindind to {addr}"))?;
+            .with_context(|| format!("binding to {addr}"))?;
         info!("Listening on: {addr}");
 
         Ok(Dispatcher {
@@ -166,7 +166,18 @@ impl Dispatcher {
                     };
 
                     info!("pushing command {cmd:?}");
-                    self.ocpp_if.push_command(cmd);
+                    match cmd {
+                        // Local EVSE state updates, no OCPP call involved
+                        // (applied the same way as the CLI does).
+                        CommandToChargingPoint::SetInitialSoC(soc) => {
+                            self.evse.set_initial_soc(soc);
+                        }
+                        CommandToChargingPoint::SetChargingPlan(charging_plan) => {
+                            self.evse.set_charging_plan(charging_plan);
+                        }
+                        // OCPP commands to be sent to the charging point
+                        other => self.ocpp_if.push_command(other),
+                    }
                 }
                 ws_msg_res = self.ws_stream.as_mut().unwrap().next() => {
                     let Some(msg) = ws_msg_res else {
@@ -243,9 +254,10 @@ impl Dispatcher {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self.notif_tx.send(ChargePointNotification::Connection(
-            ChargePointConnectionState::Error,
-        )) {
+        if let Err(err) = self
+            .notif_tx
+            .send(Notification::Connection(ChargePointConnectionState::Error))
+        {
             error!("error sending notification: {err}");
         }
     }

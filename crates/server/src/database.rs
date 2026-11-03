@@ -6,9 +6,11 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard},
 };
 
+use charge_system_common_model::bms::{Bms, SoC};
+
 use crate::{
-    Bms, ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState, ChargingSession,
-    ChargingSessionSnapshot, ChargingSessionState, bms::SoC,
+    ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState, ChargingSession,
+    ChargingSessionSnapshot, ChargingSessionState,
 };
 
 static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
@@ -77,19 +79,22 @@ impl<'a> Database<'a> {
     /// Check last charging session, but don't persist any changes
     pub fn check_last_charging_session(
         &self,
-        bms: &Bms,
+        bms: &mut Bms,
     ) -> anyhow::Result<Option<ChargingSession>> {
         self.get_last_charging_session_priv(bms, false)
     }
 
     /// Get last charging session, and add a new reference snapshot if applicable
-    pub fn get_last_charging_session(&self, bms: &Bms) -> anyhow::Result<Option<ChargingSession>> {
+    pub fn get_last_charging_session(
+        &self,
+        bms: &mut Bms,
+    ) -> anyhow::Result<Option<ChargingSession>> {
         self.get_last_charging_session_priv(bms, true)
     }
 
     fn get_last_charging_session_priv(
         &self,
-        bms: &Bms,
+        bms: &mut Bms,
         apply_updates: bool,
     ) -> anyhow::Result<Option<ChargingSession>> {
         let Some((session_id, state, transaction_id)) = self
@@ -146,7 +151,7 @@ impl<'a> Database<'a> {
 
             let cs = cs.get_or_insert_with(|| {
                 ChargingSession::from_database(
-                    bms.clone(),
+                    bms.capacity,
                     session_id,
                     transaction_id,
                     state.parse().expect("infallible"),
@@ -166,10 +171,9 @@ impl<'a> Database<'a> {
         }
 
         if let Some(ref mut cs_mut) = cs
-            && let Some(new_ref_snapshot) = cs_mut.finalise_last_session_retrieval()
             && apply_updates
         {
-            self.add_charging_session_snapshot(session_id, new_ref_snapshot);
+            cs_mut.apply_bms_updates(self, bms);
         }
 
         Ok(cs)

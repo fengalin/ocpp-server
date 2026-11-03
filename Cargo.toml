@@ -1,20 +1,37 @@
-[package]
-name = "ocpp-server"
+# Virtual workspace root: no [package] here.
+#
+# Layout: all crates live flat under crates/ (rust-analyzer / ruff / tokio style).
+# `web-app` IS a member: the editor's rust-analyzer indexes the repo as one
+# workspace root, so web-app stays inside it. Cargo has no per-package
+# profiles, so its size-optimized release build uses the named `release-slim`
+# profile defined below (`wasm-pack build --profile release-slim`, see
+# AGENTS.md).
+#
+# Package selection at this directory:
+#   cargo build / test / run   -> crates/server only (default-members)
+#   cargo clippy --workspace   -> everything
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/server"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = []
-bundled-sqlite = ["rusqlite/bundled"]
+[workspace.dependencies]
+# internal
+charge-system-common-model = { path = "crates/common_model" }
+charge-system-web-model = { path = "crates/web_model" }
 
-[dependencies]
+# shared
 anyhow = "1.0.104"
-axum = "0.8.9"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 directories = "6.0.0"
 env_logger = "0.11.11"
 futures = "0.3.33"
+http = "1"
 log = "0.4.33"
 ocpp_rs = "0.4.1"
 rusqlite = { version = "0.40.2", features = ["chrono"] }
@@ -23,12 +40,17 @@ serde_json = "^1"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = "0.30.0"
-tower-http = { version = "0.7.1", features = ["fs"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header", "util"] }
 tracing = "0.1"
+axum = { version = "0.8.9", features = ["macros"] }
 
+# Size-optimized release build (wasm front end, ARM host): stays on the
+# default panic strategy because the wasm app's guard_panic relies on
+# catch_unwind — no `panic = "abort"` here. No `strip` either: with this
+# toolchain it makes rustc emit bulk-memory ops that wasm-pack's wasm-opt
+# invocation rejects.
 [profile.release-slim]
 inherits = "release"
-strip = "symbols"
+opt-level = "s"
 lto = "fat"
-panic = "abort"
 codegen-units = 1
