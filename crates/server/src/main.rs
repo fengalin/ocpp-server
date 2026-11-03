@@ -3,8 +3,6 @@ use clap::Parser;
 use log::*;
 use tokio::sync::{broadcast, mpsc};
 
-use std::io::Write;
-
 use charge_system_common_model::{
     bms::{self, Bms, SoC},
     plan_model::ChargingPlan,
@@ -36,29 +34,26 @@ pub mod tests;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::{filter::LevelFilter, prelude::*};
+
     let args = Args::parse();
     args.check()?;
 
-    let mut env_logger_builder = env_logger::builder();
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    let with_debug = env_filter
+        .max_level_hint()
+        .is_some_and(|l| l >= LevelFilter::DEBUG);
 
-    #[cfg(debug_assertions)]
-    env_logger_builder
-        .format_source_path(true)
-        .format_line_number(true);
-
-    if args.short_logs {
-        env_logger_builder
-            // when used as a systemd unit, timestamps are already logged
-            .format_timestamp(None)
-            // only keep the log level, not the crate/module
-            .format(|buf, record| writeln!(buf, "{}  {}", record.level(), record.args()));
-    }
-
-    env_logger_builder
-        .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
-        .try_init()
-        .unwrap();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_thread_ids(with_debug)
+                .with_line_number(with_debug),
+        )
+        .with(env_filter)
+        .init();
 
     let mut bms = Bms::from(&args);
     info!("User defined BMS:\n{bms}");
