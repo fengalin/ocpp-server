@@ -1,5 +1,5 @@
 use anyhow::Context;
-use charge_system_common_model::notification::{ChargePointConnectionState, Notification};
+use charge_system_common_model::notification::{ChargeSystemConnectionState, Notification};
 use charge_system_common_model::{meter_value::MeterValueSelection, plan_model::ChargingPlan};
 use log::*;
 use ocpp_rs::{
@@ -93,7 +93,7 @@ impl OcppInterface {
         trace!("notifiying error");
         if let Err(err) = self
             .notif_tx
-            .send(Notification::Connection(ChargePointConnectionState::Error))
+            .send(Notification::Connection(ChargeSystemConnectionState::Error))
         {
             error!("error sending notification: {err}");
         }
@@ -205,7 +205,7 @@ impl OcppInterface {
             Action::Heartbeat(heartbeat) => {
                 debug!(">> incoming {heartbeat:?}");
                 if let Err(err) = self.notif_tx.send(Notification::Connection(
-                    ChargePointConnectionState::Heartbeat,
+                    ChargeSystemConnectionState::Heartbeat,
                 )) {
                     error!("error sending notification: {err}");
                 }

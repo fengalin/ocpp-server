@@ -88,7 +88,7 @@ impl AppState {
                 let mut world = self.world.lock().await;
 
                 if let ChargeStatus::Charging(progress) | ChargeStatus::SuspendedEvse(progress) =
-                    &status
+                    status
                 {
                     // A charge-progress update carries the current SoC; apply
                     // it to the world BMS so `/api/state` and the frontend
@@ -99,7 +99,7 @@ impl AppState {
 
                 world.push_event(EventLogEntry {
                     ts: Ts::from_utc(Utc::now()),
-                    status: status.clone(),
+                    status: *status,
                 });
             }
             Notification::Connection(_) => (),

@@ -15,7 +15,7 @@ pub const UNIX_SOCKET_PATH: &str = "/run/charge_system/socket";
 pub enum Notification {
     BmsUpdate(Bms),
     Status(ChargeStatus),
-    Connection(ChargePointConnectionState),
+    Connection(ChargeSystemConnectionState),
     MeterValues(MeterValueSelection),
     /// A plan was applied on the EVSE (including the plan-less `Unlimited` and
     /// the default post-session `Blocking`, both with no periods): the
@@ -46,7 +46,7 @@ impl Notification {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChargeProgress {
     /// Current state of charge (fraction 0–1).
     pub soc: f32,
@@ -54,7 +54,7 @@ pub struct ChargeProgress {
     pub remaining_time: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChargeStatus {
     Available,
     Preparing,
@@ -68,7 +68,7 @@ pub enum ChargeStatus {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ChargePointConnectionState {
+pub enum ChargeSystemConnectionState {
     Heartbeat,
     MissedHeartbeat,
     ServerDisconnected,

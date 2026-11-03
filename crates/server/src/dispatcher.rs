@@ -10,7 +10,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite as ts};
 
 use std::time::Duration;
 
-use charge_system_common_model::notification::{ChargePointConnectionState, Notification};
+use charge_system_common_model::notification::{ChargeSystemConnectionState, Notification};
 use charge_system_common_model::{bms::Bms, plan_model::ChargingPlan};
 
 use crate::{CommandToChargingPoint, Evse, OcppInterface, args};
@@ -256,7 +256,7 @@ impl Dispatcher {
         trace!("notifiying error");
         if let Err(err) = self
             .notif_tx
-            .send(Notification::Connection(ChargePointConnectionState::Error))
+            .send(Notification::Connection(ChargeSystemConnectionState::Error))
         {
             error!("error sending notification: {err}");
         }

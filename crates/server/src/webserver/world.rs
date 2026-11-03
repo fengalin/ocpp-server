@@ -43,7 +43,7 @@ impl World {
     pub fn status(&self) -> ChargeStatus {
         self.events
             .back()
-            .map(|e| e.status.clone())
+            .map(|e| e.status)
             .unwrap_or(ChargeStatus::Available)
     }
 
