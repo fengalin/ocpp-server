@@ -494,7 +494,7 @@ impl OcppInterface {
 
             for action in actions.into_iter() {
                 self.send_action_id += 1;
-                let call = Call::new(format!("{}.ocpp-server-test", self.send_action_id), action);
+                let call = Call::new(format!("{}.charge-system", self.send_action_id), action);
                 match self
                     .call_response_tracker
                     .send_call(call)

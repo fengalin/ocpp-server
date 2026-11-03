@@ -192,7 +192,7 @@ fn evse_plan(req: &PlanRequest, now: DateTime<Utc>) -> Result<ChargingPlan, ApiE
 pub fn router(st: AppState) -> Router {
     Router::new()
         .route("/api/state", get(get_state))
-        .route("/api/metrics", get(get_samples))
+        .route("/api/metrics", get(get_meterics))
         .route("/api/events", get(get_events))
         .route("/api/plans/apply", post(apply_plan))
         .route("/api/plans/stop", post(stop_plan))
@@ -214,17 +214,13 @@ pub fn router(st: AppState) -> Router {
         .with_state(st)
 }
 
-// ---------------------------------------------------------------------
-// state + history
-// ---------------------------------------------------------------------
-
 async fn get_state(State(st): State<AppState>) -> Response {
     // Extract under the lock, serialize after releasing it.
     let state = st.world.lock().await.server_state();
     json(&state)
 }
 
-async fn get_samples(State(st): State<AppState>, Query(q): Query<MeterValuesQuery>) -> Response {
+async fn get_meterics(State(st): State<AppState>, Query(q): Query<MeterValuesQuery>) -> Response {
     let samples = {
         let w = st.world.lock().await;
         let from = q.from.unwrap_or(w.last_ts - chrono::Duration::hours(1));
@@ -267,10 +263,6 @@ async fn get_events(State(st): State<AppState>, Query(q): Query<EventsQuery>) ->
     };
     json(&events)
 }
-
-// ---------------------------------------------------------------------
-// plans + session + CP
-// ---------------------------------------------------------------------
 
 async fn apply_plan(
     State(st): State<AppState>,
@@ -350,10 +342,6 @@ async fn cp_reboot(State(st): State<AppState>) -> Result<Json<serde_json::Value>
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// ---------------------------------------------------------------------
-// draft-only simulator controls
-// ---------------------------------------------------------------------
-
 async fn set_meter_value_interval(
     State(st): State<AppState>,
     JsonBody(r): JsonBody<SetMeterValueSampleIntervalRequest>,
@@ -367,10 +355,6 @@ async fn set_meter_value_interval(
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
-
-// ---------------------------------------------------------------------
-// SSE
-// ---------------------------------------------------------------------
 
 async fn stream(State(st): State<AppState>) -> impl IntoResponse {
     // Each SSE connection gets its own subscriber on the shared notification
