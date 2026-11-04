@@ -16,9 +16,10 @@ use ocpp_rs::{
         typed_call_result::TypedCallResult,
     },
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::{ChargingSchedule, Evse, measurements::*, schedule};
 
@@ -530,4 +531,33 @@ pub enum CommandToChargingPoint {
     SetMeterValueAlignedInterval(u16),
     SetServerAddress(String),
     StopTransaction,
+}
+
+/// How long a web command may wait for room in the command queue before the
+/// request fails fast instead of hanging: the queue is only drained while the
+/// CP websocket is connected, so a full queue means the CP is disconnected (or
+/// stalled) and the command would otherwise pend forever.
+pub const CMD_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Sender side of the command queue to the charging point, with a bounded
+/// wait (see [`CMD_SEND_TIMEOUT`]) so callers fail fast when the dispatcher
+/// isn't draining the queue.
+#[derive(Debug, Clone)]
+pub struct CommandSender(mpsc::Sender<CommandToChargingPoint>);
+
+impl CommandSender {
+    pub fn new(tx: mpsc::Sender<CommandToChargingPoint>) -> Self {
+        Self(tx)
+    }
+
+    pub async fn send(
+        &self,
+        cmd: CommandToChargingPoint,
+    ) -> Result<(), mpsc::error::SendTimeoutError<CommandToChargingPoint>> {
+        self.0.send_timeout(cmd, CMD_SEND_TIMEOUT).await
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
 }

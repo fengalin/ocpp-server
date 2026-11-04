@@ -55,6 +55,25 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Queue a command for the CP with a bounded wait: a full queue means the CP
+/// is disconnected (or stalled) and the dispatcher isn't draining — fail with
+/// 503 so the client can retry once the CP reconnects, rather than hanging
+/// the request forever.
+async fn send_cmd(st: &AppState, cmd: CommandToChargingPoint) -> Result<(), ApiError> {
+    st.cmd_tx.send(cmd).await.map_err(|_| {
+        if st.cmd_tx.is_closed() {
+            ApiError::internal("command channel closed")
+        } else {
+            ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                msg: "command queue full: the charging point is not connected (or stalled); \
+                      retry once it reconnects"
+                    .to_string(),
+            }
+        }
+    })
+}
+
 /// Build a JSON REST response. The whole front-end data plane (REST bodies
 /// + SSE payloads) is JSON.
 fn json<T: serde::Serialize>(value: &T) -> Response {
@@ -275,10 +294,7 @@ async fn apply_plan(
     // queued for the charging point) and broadcasts a `ChargingPlan`
     // notification, which updates the webserver's world and reaches this page
     // through the SSE stream.
-    st.cmd_tx
-        .send(CommandToChargingPoint::SetChargingPlan(plan))
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(&st, CommandToChargingPoint::SetChargingPlan(plan)).await?;
     info!(kind = ?req.kind, target = ?req.target_soc, "plan applied");
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -290,12 +306,11 @@ async fn stop_plan(State(st): State<AppState>) -> Result<Json<serde_json::Value>
     // schedule, installs the permanent 0 W one) and the resulting
     // `ChargingPlan` notification updates the world and reaches this page
     // through the SSE stream.
-    st.cmd_tx
-        .send(CommandToChargingPoint::SetChargingPlan(
-            ChargingPlan::Blocking,
-        ))
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(
+        &st,
+        CommandToChargingPoint::SetChargingPlan(ChargingPlan::Blocking),
+    )
+    .await?;
     info!("plan stopped");
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -313,10 +328,7 @@ async fn set_init_soc(
         return Err(ApiError::bad_request("soc must be in [0, 1]"));
     }
 
-    st.cmd_tx
-        .send(CommandToChargingPoint::SetInitialSoC(req.soc))
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(&st, CommandToChargingPoint::SetInitialSoC(req.soc)).await?;
 
     // world will be updated on server notification if necessary
 
@@ -325,19 +337,13 @@ async fn set_init_soc(
 }
 
 async fn stop_session(State(st): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    st.cmd_tx
-        .send(CommandToChargingPoint::StopTransaction)
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(&st, CommandToChargingPoint::StopTransaction).await?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn cp_reboot(State(st): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    st.cmd_tx
-        .send(CommandToChargingPoint::Reboot)
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(&st, CommandToChargingPoint::Reboot).await?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -346,12 +352,11 @@ async fn set_meter_value_interval(
     State(st): State<AppState>,
     JsonBody(r): JsonBody<SetMeterValueSampleIntervalRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    st.cmd_tx
-        .send(CommandToChargingPoint::SetMeterValueAlignedInterval(
-            r.interval,
-        ))
-        .await
-        .map_err(ApiError::internal)?;
+    send_cmd(
+        &st,
+        CommandToChargingPoint::SetMeterValueAlignedInterval(r.interval),
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

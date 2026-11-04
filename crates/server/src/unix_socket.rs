@@ -1,8 +1,9 @@
-use anyhow::Context;
-use log::{error, info, warn};
+use anyhow::{Context, bail};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
+use tokio::time::timeout;
+use tracing::{error, info, warn};
 
 use std::path::Path;
 use std::time::Duration;
@@ -10,6 +11,9 @@ use std::time::Duration;
 use charge_system_common_model::notification::{self, Notification};
 
 const RECONNECT: Duration = Duration::from_secs(5);
+/// Bound on writes to the OLED status client: if it stops reading, drop it
+/// instead of blocking the accept loop forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct UnixSocketNotifier {
@@ -65,6 +69,9 @@ impl UnixSocketNotifier {
         }
     }
 
+    /// Serve a single client serially (the status app is the only client);
+    /// once it disconnects (or stalls past `WRITE_TIMEOUT`), go back to
+    /// `accept`.
     async fn serve(&mut self, mut stream: UnixStream) -> anyhow::Result<()> {
         let mut buf = vec![0; 1024];
         loop {
@@ -80,10 +87,12 @@ impl UnixSocketNotifier {
             buf.clear();
             serde_json::to_writer(&mut buf, &msg)?;
 
-            stream
-                .write(buf.as_slice())
-                .await
-                .context("writting to unix socket")?;
+            match timeout(WRITE_TIMEOUT, stream.write(buf.as_slice())).await {
+                Ok(res) => {
+                    res.context("writing to unix socket")?;
+                }
+                Err(_) => bail!("timed out writing to the unix socket client, dropping it"),
+            }
         }
     }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use log::{debug, warn};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast};
 
 use charge_system_common_model::{
     bms::{self, Bms},
@@ -13,7 +13,7 @@ use charge_system_common_model::{
     plan_model::ChargingPlan,
 };
 
-use crate::CommandToChargingPoint;
+use crate::CommandSender;
 
 use super::world::World;
 
@@ -24,14 +24,11 @@ pub struct AppState {
     // without keeping around a Receiver which would buffer messages
     // even if there are no consumers for them
     pub notif_tx: broadcast::Sender<Notification>,
-    pub cmd_tx: mpsc::Sender<CommandToChargingPoint>,
+    pub cmd_tx: CommandSender,
 }
 
 impl AppState {
-    pub fn new(
-        cmd_tx: mpsc::Sender<CommandToChargingPoint>,
-        notif_tx: broadcast::Sender<Notification>,
-    ) -> Self {
+    pub fn new(cmd_tx: CommandSender, notif_tx: broadcast::Sender<Notification>) -> Self {
         let world = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
         Self {
             world: Arc::new(Mutex::new(world)),

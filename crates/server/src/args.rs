@@ -44,6 +44,15 @@ pub struct Args {
     #[clap(long, help = "port of the OCPP server", default_value_t = 9000)]
     pub ocpp_port: u16,
 
+    #[clap(
+        long,
+        help = "drop the CP websocket connection when no message arrives within \
+                this many seconds (the CP pings every 40 s, so this only fires on \
+                a dead connection)",
+        default_value_t = 60
+    )]
+    pub ocpp_read_timeout: u16,
+
     #[clap(long, help = "port of the web server", default_value_t = 9080)]
     pub webserver_port: u16,
 

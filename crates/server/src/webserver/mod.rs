@@ -3,11 +3,11 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use anyhow::Context;
 use log::*;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use charge_system_common_model::notification::Notification;
 
-use crate::{CommandToChargingPoint, args};
+use crate::{CommandSender, args};
 
 mod api;
 mod state;
@@ -19,7 +19,7 @@ pub struct Webserver {
     listener: TcpListener,
     notif_tx: broadcast::Sender<Notification>,
     notif_rx: broadcast::Receiver<Notification>,
-    cmd_tx: mpsc::Sender<CommandToChargingPoint>,
+    cmd_tx: CommandSender,
 }
 
 impl Webserver {
@@ -28,7 +28,7 @@ impl Webserver {
         // we need the sender to subscribe to it when
         // new client connect, without buffering messages unnecessary
         notif_tx: broadcast::Sender<Notification>,
-        cmd_tx: mpsc::Sender<CommandToChargingPoint>,
+        cmd_tx: CommandSender,
     ) -> anyhow::Result<Self> {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.webserver_port);
 

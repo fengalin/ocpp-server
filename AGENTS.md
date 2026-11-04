@@ -201,11 +201,17 @@ a named workspace profile instead.
   contract — **`NoLimit` was renamed `Unlimited` (breaking: the JSON wire
   string changed)** and `Blocking` is now a server-applied state; the OLED
   repo must update its common_model git dep and handle both.
-- CP commands (`cmd_tx`) are consumed only inside the dispatcher's OCPP listen
-  loop — i.e. **only while the CP websocket is connected**. While the CP is
-  disconnected they queue in the mpsc (capacity 8) and flush on reconnect, so
-  apply/stop can take effect late (and the web server happily answers 200
-  before the command runs).
+- CP commands (`cmd_tx`, wrapped in `CommandSender`) are consumed only inside
+  the dispatcher's OCPP listen loop — i.e. **only while the CP websocket is
+  connected**. While the CP is disconnected they queue in the mpsc (capacity 8)
+  and flush on reconnect, so apply/stop can take effect late (and the web
+  server answers 200 before the command runs); once the queue is full, the
+  `send_timeout` (`CMD_SEND_TIMEOUT`, 5 s) makes the POST fail fast with 503
+  instead of hanging. The dispatcher bounds all CP websocket operations:
+  handshake 10 s, reads `--ocpp-read-timeout` (default 60 s, the CP pings
+  every 40 s), writes 3 × 10 s then the connection is dropped and undelivered
+  calls re-queued for the next connection; the unix-socket notifier drops a
+  client that doesn't read within 5 s.
 - The shared notification channel (`main.rs`, capacity 64) fans out to the
   unix-socket notifier, the recording task and one SSE subscriber per
   connection; each subscriber gets its own window, a lagging consumer

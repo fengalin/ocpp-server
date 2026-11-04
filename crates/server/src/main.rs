@@ -21,7 +21,7 @@ mod evse;
 use evse::Evse;
 pub mod measurements;
 mod ocpp;
-use ocpp::{CommandToChargingPoint, OcppInterface};
+use ocpp::{CommandSender, CommandToChargingPoint, OcppInterface};
 pub mod schedule;
 pub use schedule::{ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
 pub mod unix_socket;
@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
     let mut unix_socket_notif = UnixSocketNotifier::new(notif_tx.subscribe())
         .inspect_err(|err| error!("failed to create unix socket notifier: {err}"))
         .ok();
-    let webserver = Webserver::new(&args, notif_tx.clone(), cmd_tx).await?;
+    let webserver = Webserver::new(&args, notif_tx.clone(), CommandSender::new(cmd_tx)).await?;
     let dispatcher = Dispatcher::new(bms, &args, notif_tx, cmd_rx, charging_plan).await?;
 
     match &args.command {
