@@ -1072,7 +1072,7 @@ mod tests {
             );
 
         let db = Database::get();
-        let schedule_id = db.add_new_charging_schedule(&schedule);
+        let schedule_id = db.add_new_charging_schedule(&schedule).unwrap();
         schedule.id = schedule_id;
 
         let last_schedule = db.get_active_charging_schedule().unwrap().unwrap();

@@ -1,5 +1,5 @@
 use chrono::{Local, Utc};
-use log::*;
+use tracing::*;
 use ocpp_rs::v16::{call, enums::*};
 use tokio::sync::broadcast;
 
@@ -110,9 +110,11 @@ impl Evse {
     }
 
     pub fn set_charging_plan(&mut self, charging_plan: ChargingPlan) {
-        if let Some(mut prev_schedule) = self.charging_schedule.take() {
-            prev_schedule.inactivate();
-        };
+        // The previous schedule is inactivated together with the insert of
+        // the new one (see `apply_computed_schedule`), or on its own for the
+        // unlimited plan — either way exactly once.
+        let prev_schedule = self.charging_schedule.take();
+        let prev_schedule_id = prev_schedule.as_ref().map(|s| s.id);
 
         // The BMS target SoC mirrors the requested plan: plans with a charging
         // target set it (the web app and the webserver's world get it through
@@ -134,11 +136,16 @@ impl Evse {
         }
 
         match ChargingSchedule::try_from_charging_plan(&charging_plan, &self.bms) {
-            Ok(Some(schedule)) => self.apply_computed_schedule(charging_plan, schedule),
+            Ok(Some(schedule)) => {
+                self.apply_computed_schedule(charging_plan, schedule, prev_schedule_id)
+            }
             // An explicit `Unlimited` plan clears any profile installed on the
             // CP (unrestricted charging).
             Ok(None) => {
                 info!("## applying unlimited plan (no schedule)");
+                if let Some(mut prev) = prev_schedule {
+                    prev.inactivate();
+                }
                 self.command_queue
                     .push_back(CommandToChargingPoint::ClearChargingProfile);
                 self.notify_charging_plan(AppliedChargingPlan {
@@ -156,6 +163,7 @@ impl Evse {
                 self.apply_computed_schedule(
                     ChargingPlan::Blocking,
                     ChargingSchedule::new_blocking(),
+                    prev_schedule_id,
                 );
                 // Clients mirror the target from plan notifications (the one
                 // above would clear it for Blocking): carry the kept value in a
@@ -175,9 +183,18 @@ impl Evse {
     /// computed schedule. The caller inactivated the previous schedule and
     /// mirrored the BMS target (the Deadline/Asap variants carry it in the
     /// notification, so no BmsUpdate is needed here).
-    fn apply_computed_schedule(&mut self, plan: ChargingPlan, mut schedule: ChargingSchedule) {
+    fn apply_computed_schedule(
+        &mut self,
+        plan: ChargingPlan,
+        mut schedule: ChargingSchedule,
+        prev_schedule_id: Option<i32>,
+    ) {
         let periods = schedule_periods(&schedule);
-        schedule.id = Database::get().add_new_charging_schedule(&schedule);
+        // Inactivate the previous schedule and persist the new one (with its
+        // periods) in a single transaction.
+        schedule.id = Database::get()
+            .replace_charging_schedule(prev_schedule_id, &schedule)
+            .expect("persist charging schedule");
         self.charging_schedule = Some(schedule.clone());
         self.command_queue
             .push_back(CommandToChargingPoint::SetChargingSchedule(schedule));
@@ -198,10 +215,11 @@ impl Evse {
         };
 
         info!("## refreshing charging schedule");
-        schedule.inactivate();
-
+        let old_id = schedule.id;
         schedule.reset_set_time();
-        schedule.id = Database::get().add_new_charging_schedule(&schedule);
+        schedule.id = Database::get()
+            .replace_charging_schedule(Some(old_id), &schedule)
+            .expect("persist refreshed charging schedule");
         self.charging_schedule = Some(schedule.clone());
 
         self.command_queue
@@ -752,11 +770,11 @@ impl Evse {
     /// This can occur on reboot for instance
     // FIXME re-set the charging schedule after boot instead
     pub fn permanent_0w_set(&mut self) {
-        if let Some(mut schedule) = self.charging_schedule.take() {
-            schedule.inactivate();
-        };
+        let prev_id = self.charging_schedule.take().map(|s| s.id);
         let mut schedule = ChargingSchedule::new_blocking();
-        schedule.id = Database::get().add_new_charging_schedule(&schedule);
+        schedule.id = Database::get()
+            .replace_charging_schedule(prev_id, &schedule)
+            .expect("persist permanent 0 W schedule");
         self.charging_schedule = Some(schedule);
     }
 

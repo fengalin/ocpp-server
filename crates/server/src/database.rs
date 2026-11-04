@@ -5,6 +5,7 @@ use std::{
     fs,
     sync::{LazyLock, Mutex, MutexGuard},
 };
+use tracing::error;
 
 use charge_system_common_model::bms::{Bms, SoC};
 
@@ -73,7 +74,14 @@ pub struct Database<'a>(MutexGuard<'a, Connection>);
 
 impl<'a> Database<'a> {
     pub fn get() -> Self {
-        Database(DATABASE.lock().unwrap())
+        Database(DATABASE.lock().unwrap_or_else(|err| {
+            // A panic while the guard was held poisons the mutex. The
+            // connection itself is still consistent (each statement is
+            // atomic and rusqlite rolls back an open transaction on drop),
+            // so recover loudly instead of panicking on every later access.
+            error!("database mutex was poisoned by a panic; recovering the connection");
+            err.into_inner()
+        }))
     }
 
     /// Check last charging session, but don't persist any changes
@@ -179,49 +187,45 @@ impl<'a> Database<'a> {
         Ok(cs)
     }
 
-    pub fn add_new_charging_session(
+    fn insert_session(
+        conn: &Connection,
+        state: &ChargingSessionState,
+        transaction_id: i32,
+    ) -> anyhow::Result<i32> {
+        Ok(conn.query_one::<i32, _, _>(
+            "INSERT INTO charging_session (state, transaction_id)
+                VALUES (:state, :transaction_id)
+                RETURNING id;",
+            named_params![
+                ":state": state.to_string(),
+                ":transaction_id": transaction_id as i64,
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Insert a new session and its first snapshot atomically: a session
+    /// without any snapshot would break recovery (`Evse::new` expects at
+    /// least one), so the two writes must commit or roll back together.
+    pub fn add_charging_session_with_snapshot(
         &self,
         state: ChargingSessionState,
         transaction_id: i32,
-    ) -> i32 {
-        self.0
-            .query_one::<i32, _, _>(
-                "INSERT INTO charging_session (state, transaction_id)
-                    VALUES (:state, :transaction_id)
-                    RETURNING id;",
-                named_params![
-                    ":state": state.to_string(),
-                    ":transaction_id": transaction_id as i64,
-                ],
-                |row| row.get(0),
-            )
-            .unwrap()
+        snapshot: &ChargingSessionSnapshot,
+    ) -> anyhow::Result<i32> {
+        let tx = self.0.unchecked_transaction()?;
+        let session_id = Self::insert_session(&tx, &state, transaction_id)?;
+        Self::insert_session_snapshot(&tx, session_id, snapshot)?;
+        tx.commit()?;
+        Ok(session_id)
     }
 
-    pub fn set_charging_session_state(&self, session_id: i32, state: &ChargingSessionState) {
-        let res = self.0.execute(
-            "UPDATE charging_session SET state = :state WHERE id = :session_id;",
-            named_params![
-                ":state": state.to_string(),
-                ":session_id": session_id,
-            ],
-        );
-
-        if let Err(err) = res {
-            log::error!("could not set charging session state: {err}");
-        };
-    }
-
-    pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
-        self.set_charging_session_state(session_id, reason);
-    }
-
-    pub fn add_charging_session_snapshot(
-        &self,
+    fn insert_session_snapshot(
+        conn: &Connection,
         session_id: i32,
         snapshot: &ChargingSessionSnapshot,
-    ) {
-        let res = self.0.execute(
+    ) -> anyhow::Result<()> {
+        conn.execute(
             "
             INSERT INTO charging_session_snapshot
             (
@@ -261,11 +265,41 @@ impl<'a> Database<'a> {
                 ":soc": snapshot.soc.inner(),
                 ":target_soc": snapshot.target_soc,
             ],
-        );
+        )?;
+        Ok(())
+    }
 
-        if let Err(err) = res {
-            log::error!("could not insert charging session snapshot: {err}");
-        };
+    pub fn add_charging_session_snapshot(
+        &self,
+        session_id: i32,
+        snapshot: &ChargingSessionSnapshot,
+    ) -> anyhow::Result<()> {
+        Self::insert_session_snapshot(&self.0, session_id, snapshot)
+    }
+
+    fn update_session_state(
+        conn: &Connection,
+        session_id: i32,
+        state: &ChargingSessionState,
+    ) -> anyhow::Result<()> {
+        conn.execute(
+            "UPDATE charging_session SET state = :state WHERE id = :session_id;",
+            named_params![
+                ":state": state.to_string(),
+                ":session_id": session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_charging_session_state(&self, session_id: i32, state: &ChargingSessionState) {
+        if let Err(err) = Self::update_session_state(&self.0, session_id, state) {
+            error!("could not set charging session state: {err}");
+        }
+    }
+
+    pub fn stop_charging_session(&self, session_id: i32, reason: &ChargingSessionState) {
+        self.set_charging_session_state(session_id, reason);
     }
 
     pub fn get_active_charging_schedule(&self) -> anyhow::Result<Option<ChargingSchedule>> {
@@ -336,23 +370,23 @@ impl<'a> Database<'a> {
         Ok(Some(schedule))
     }
 
-    pub fn add_new_charging_schedule(&self, schedule: &ChargingSchedule) -> i32 {
-        let schedule_id = self
-            .0
-            .query_one::<i32, _, _>(
-                "INSERT INTO schedule (set_time, state)
-                    VALUES (:set_time, :state)
-                    RETURNING id;",
-                named_params![
-                    ":set_time": schedule.set_time,
-                    ":state": schedule.state.as_i32(),
-                ],
-                |row| row.get(0),
-            )
-            .unwrap();
+    fn insert_schedule(conn: &Connection, schedule: &ChargingSchedule) -> anyhow::Result<i32> {
+        let schedule_id = conn.query_one::<i32, _, _>(
+            "INSERT INTO schedule (set_time, state)
+                VALUES (:set_time, :state)
+                RETURNING id;",
+            named_params![
+                ":set_time": schedule.set_time,
+                ":state": schedule.state.as_i32(),
+            ],
+            |row| row.get(0),
+        )?;
 
+        // A schedule without its periods would be inconsistent (the periods
+        // are what `remaining()` computes from), so a period insert failure
+        // must fail the whole insert — hence `?` here, not a logged skip.
         for period in schedule.periods.values() {
-            let res = self.0.execute(
+            conn.execute(
                 "
                 INSERT INTO schedule_period
                 (scheduleid, start, end, power_limit)
@@ -369,27 +403,49 @@ impl<'a> Database<'a> {
                     ":end": period.end.and_utc(),
                     ":power_limit": period.limit,
                 ],
-            );
-
-            if let Err(err) = res {
-                log::error!("could not insert charging schedule period: {err}");
-            };
+            )?;
         }
 
-        schedule_id
+        Ok(schedule_id)
     }
 
-    pub fn inactivate_charging_schedule(&self, schedule_id: i32) {
-        let res = self.0.execute(
+    pub fn add_new_charging_schedule(
+        &self,
+        schedule: &ChargingSchedule,
+    ) -> anyhow::Result<i32> {
+        Self::insert_schedule(&self.0, schedule)
+    }
+
+    /// Inactivate the previous schedule and insert the new one (with its
+    /// periods) atomically, so a failure can't leave both or neither active.
+    pub fn replace_charging_schedule(
+        &self,
+        old_schedule_id: Option<i32>,
+        schedule: &ChargingSchedule,
+    ) -> anyhow::Result<i32> {
+        let tx = self.0.unchecked_transaction()?;
+        if let Some(id) = old_schedule_id {
+            Self::inactivate_schedule(&tx, id)?;
+        }
+        let schedule_id = Self::insert_schedule(&tx, schedule)?;
+        tx.commit()?;
+        Ok(schedule_id)
+    }
+
+    fn inactivate_schedule(conn: &Connection, schedule_id: i32) -> anyhow::Result<()> {
+        conn.execute(
             "UPDATE schedule SET state = :state WHERE id = :schedule_id;",
             named_params![
                 ":state": ChargingScheduleState::Inactive.as_i32(),
                 ":schedule_id": schedule_id,
             ],
-        );
+        )?;
+        Ok(())
+    }
 
-        if let Err(err) = res {
-            log::error!("could not inactivate charging schedule: {err}");
-        };
+    pub fn inactivate_charging_schedule(&self, schedule_id: i32) {
+        if let Err(err) = Self::inactivate_schedule(&self.0, schedule_id) {
+            error!("could not inactivate charging schedule: {err}");
+        }
     }
 }
