@@ -172,7 +172,7 @@ impl OcppInterface {
                 }
 
                 if let Some(mv) = meter_val_selection.pop() {
-                    evse.have_charging_point_meter_values(mv, action_mv.transaction_id);
+                    evse.have_charge_point_meter_values(mv, action_mv.transaction_id);
                 }
 
                 self.prepare_response(action_mv, call.unique_id, call_result::EmptyResponse {});
