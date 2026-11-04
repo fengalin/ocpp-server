@@ -32,6 +32,14 @@ impl Bms {
         })
     }
 
+    pub fn current_soc(&self) -> SoC {
+        if self.current_soc.is_unknown() {
+            return self.initial_soc;
+        }
+
+        self.current_soc
+    }
+
     // FIXME could return a Result
     /// Record a new meter energy reading (Wh) and re-estimate `current_soc`
     /// from it (relative to `initial_energy`).

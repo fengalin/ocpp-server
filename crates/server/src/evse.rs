@@ -1,7 +1,7 @@
-use chrono::{Local, Utc};
-use tracing::*;
+use chrono::{DateTime, Local, Utc};
 use ocpp_rs::v16::{call, enums::*};
 use tokio::sync::broadcast;
+use tracing::*;
 
 use std::collections::VecDeque;
 
@@ -462,33 +462,33 @@ impl Evse {
         //   permanent 0 W charging plan is applied.
         // * TODO check what happens after a reboot due to
         //   main power interuption.
-        let transaction_id = self.get_next_transaction_id();
-        let cs = ChargingSession::new(
-            &mut self.bms,
-            start.timestamp.inner(),
-            transaction_id,
-            start.meter_start,
-        );
+        let tid = self.get_next_transaction_id();
+        self.start_session(start.timestamp.inner(), tid, start.meter_start);
+
+        tid
+    }
+
+    pub fn start_session(&mut self, ts: DateTime<Utc>, tid: i32, energy: u64) {
+        let cs = ChargingSession::new(&mut self.bms, ts, tid, energy);
         info!(
-            "## starting transaction with id: {transaction_id}, timestamp: {}, \
-            meter start: {:.3} kWh",
-            start.timestamp.inner().with_timezone(&chrono::Local),
-            start.meter_start as f64 / 1_000.0,
+            timestamp = %ts.with_timezone(&chrono::Local),
+            tid,
+            "## starting session meter start: {:.3} kWh",
+            // FIXME need a wrapper to format energy & co for logs
+            energy as f64 / 1_000.0,
         );
         self.charging_session = Some(cs);
 
         // A new session changed the BMS (initial/current energy) — broadcast
         // it so clients' session-energy bookkeeping (current − initial) is
         // correct from the first status event.
-        info!("## broadcasting BMS update: {}", self.bms);
+        info!(bms = ?self.bms, "## broadcasting BMS update");
         if let Err(err) = self
             .notif_tx
             .send(Notification::BmsUpdate(self.bms.clone()))
         {
-            error!("error broadcasting BMS update: {err}");
+            error!(%err, "error broadcasting BMS update");
         }
-
-        transaction_id
     }
 
     /// Handles incoming stop transaction from charging point
@@ -551,7 +551,7 @@ impl Evse {
         self.last_known_stop_energy = Some(stop.meter_stop);
     }
 
-    pub fn have_charging_point_meter_values(
+    pub fn have_charge_point_meter_values(
         &mut self,
         mut mv: MeterValueSelection,
         tid: Option<i32>,
@@ -573,124 +573,84 @@ impl Evse {
     }
 
     fn maybe_have_energy(&mut self, mv: &MeterValueSelection, tid: Option<i32>) {
+        // expecting only one connector and one CP for this system
+        // and the CP sometimes doesn't send the sampled MVs (those which come with tid)
+        // so consider incoming energy significant for current charging session, if any
+
         if let Some(energy) = mv.energy {
             use EnergyTracker::*;
             self.energy_tracker.have_energy(energy);
             match self.energy_tracker {
                 Increasing(_) => {
-                    let Some(tid) = tid else {
-                        debug!(
-                            "## MeterValue without transaction id & increasing energy, \
-                            waiting for next MeterValue"
-                        );
-                        return;
-                    };
+                    if let Some(cs) = self.charging_session.as_mut() {
+                        if let Some(tid) = tid {
+                            if cs.transaction_id() == tid {
+                                self.update_current_session(mv, energy);
+                            } else {
+                                warn!(
+                                    received_tid = tid,
+                                    expected_tid = cs.transaction_id(),
+                                    "## Increasing energy & tid mismatch",
+                                );
+                                cs.set_state(ChargingSessionState::Error(
+                                    "transaction id mismatch".to_string(),
+                                ));
 
-                    match self.charging_session.as_mut() {
-                        Some(cs) if cs.transaction_id() == tid => {
+                                self.start_session(mv.ts.to_utc(), tid, energy);
+                                self.notif_session_progress();
+                            }
+                        } else {
+                            warn!(
+                                tid = cs.transaction_id(),
+                                "## Increasing energy & missing tid - updating current session anyway",
+                            );
                             self.update_current_session(mv, energy);
-                            return;
                         }
-                        Some(cs) => {
-                            warn!(
-                                "## MeterValues transaction id mismatch {tid}, \
-                                expected {}",
-                                cs.transaction_id()
-                            );
-                            cs.set_state(ChargingSessionState::Error(
-                                "transaction id mismatch".to_string(),
-                            ));
-                            self.notif_session_progress();
-                            self.charging_session = None;
-                        }
-                        None => {
-                            warn!(
-                                "## MeterValues with transaction id and increasing energy \
-                                for unknown session"
-                            );
-                        }
+                    } else if let Some(tid) = tid {
+                        warn!(tid, "## Increasing energy & tid for unknown session");
+
+                        self.start_session(mv.ts.to_utc(), tid, energy);
+                        self.notif_session_progress();
                     }
-
-                    // FIXME changes below operate on a copy...
-                    let mut bms = self.bms.clone();
-                    let start_energy = if let Some(last_stop_energy) = self.last_known_stop_energy {
-                        last_stop_energy
-                    } else {
-                        warn!(
-                            "## initial energy can not be determined, check the configured SoC, \
-                            SoC cap and charging schedule"
-                        );
-                        bms.initial_soc.update(SoC::Unknown);
-                        bms.current_soc.update(SoC::Unknown);
-                        energy
-                    };
-
-                    warn!(
-                        "## adding new charging session for {tid}, \
-                        increasing start energy: {start_energy}"
-                    );
-                    self.have_transaction_id(tid);
-                    self.charging_session = Some(ChargingSession::with_state(
-                        &mut bms,
-                        tid,
-                        ChargingSessionState::Preparing,
-                        energy,
-                        mv.ts.to_utc(),
-                    ));
                 }
                 Stationnary(_) => {
-                    let Some(tid) = tid else {
-                        debug!(
-                            "## MeterValue without transaction id & stationary \
-                            waiting for next MeterValue"
-                        );
-                        return;
-                    };
+                    if let Some(cs) = self.charging_session.as_mut() {
+                        if let Some(tid) = tid {
+                            if cs.transaction_id() == tid {
+                                if let Some(last_snapshot) = cs.last_snapshot()
+                                    && last_snapshot.energy != energy
+                                {
+                                    warn!("## Stationary energy, but session is not up to date");
+                                    self.update_current_session(mv, energy);
+                                }
+                            } else {
+                                warn!(
+                                    received_tid = tid,
+                                    expected_tid = cs.transaction_id(),
+                                    "## Stationary energy & tid mismatch",
+                                );
+                                cs.set_state(ChargingSessionState::Error(
+                                    "transaction id mismatch".to_string(),
+                                ));
 
-                    match self.charging_session.as_mut() {
-                        Some(cs) if cs.transaction_id() == tid => {
-                            if let Some(last_snapshot) = cs.last_snapshot()
-                                && last_snapshot.energy != energy
-                            {
-                                // energy meter is stationnary but we are not up to date
-                                self.update_current_session(mv, energy);
+                                self.start_session(mv.ts.to_utc(), tid, energy);
+                                self.notif_session_progress();
                             }
-                            return;
-                        }
-                        Some(cs) => {
+                        } else if let Some(last_snapshot) = cs.last_snapshot()
+                            && last_snapshot.energy != energy
+                        {
                             warn!(
-                                "## MeterValues transaction id mismatch {tid}, \
-                                expected {}",
-                                cs.transaction_id()
+                                expected_tid = cs.transaction_id(),
+                                "## Stationary energy & missing tid - updating session which is not up to date",
                             );
-                            cs.set_state(ChargingSessionState::Error(
-                                "transaction id mismatch".to_string(),
-                            ));
-                            self.notif_session_progress();
+                            self.update_current_session(mv, energy);
                         }
-                        None => {
-                            info!(
-                                ">> MeterValues with stationnary energy \
-                                for unknown session: {tid}"
-                            );
-                        }
+                    } else if let Some(tid) = tid {
+                        warn!(tid, "## Stationary energy with tid & for unknown session");
+
+                        self.start_session(mv.ts.to_utc(), tid, energy);
+                        self.notif_session_progress();
                     }
-
-                    self.last_known_stop_energy = Some(energy);
-
-                    warn!(
-                        "## adding new charging session for {tid}, \
-                        stationnary start energy: {:.3} kWh",
-                        energy as f64 / 1_000.0
-                    );
-                    self.have_transaction_id(tid);
-                    self.charging_session = Some(ChargingSession::with_state(
-                        &mut self.bms,
-                        tid,
-                        ChargingSessionState::Preparing,
-                        energy,
-                        mv.ts.to_utc(),
-                    ));
                 }
                 Probation(_) => {
                     if let Some(ref cs) = self.charging_session
@@ -698,10 +658,6 @@ impl Evse {
                         && let Some(last_snapshot) = cs.last_snapshot()
                         && last_snapshot.energy < energy
                     {
-                        // note: the CP only provides one connector
-                        // so don't filter on whether this MeterValues
-                        // comes from connector 0 or 1, it's useful for us anyway
-                        // in this state
                         self.update_current_session(mv, energy);
                     }
 

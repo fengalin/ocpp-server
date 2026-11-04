@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use tracing::{error, warn};
 use ocpp_rs::v16::enums;
 use std::{fmt, str};
+use tracing::{error, warn};
 
 use charge_system_common_model::bms::{Bms, SoC, SoCProgress};
 
@@ -80,21 +80,19 @@ pub struct ChargingSession {
 
 impl ChargingSession {
     pub fn new(bms: &mut Bms, timestamp: DateTime<Utc>, tid: i32, energy: u64) -> Self {
-        // FIXME handle this in caller
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(energy);
         }
+        bms.update_from_energy(energy);
 
         // Finalize the first snapshot against the BMS exactly like
         // `add_and_save_snapshot` does, so it can be persisted atomically
         // with the new session.
-        let mut snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
+        let snapshot = ChargingSessionSnapshot::builder(timestamp, energy)
             .is_reference(true)
-            .soc(bms.initial_soc)
+            .soc(bms.current_soc())
             .target_soc(bms.target_soc)
             .build();
-        bms.update_from_energy(snapshot.energy);
-        snapshot.soc = bms.current_soc;
 
         let session_id = Database::get()
             .add_charging_session_with_snapshot(ChargingSessionState::Preparing, tid, &snapshot)
@@ -121,22 +119,19 @@ impl ChargingSession {
     ) -> Self {
         let state = state.into();
 
-        // FIXME handle this in caller
         if bms.initial_energy.is_none() {
             bms.initial_energy = Some(initial_energy);
-            bms.current_energy = Some(initial_energy);
         }
+        bms.update_from_energy(initial_energy);
 
-        let mut snapshot = ChargingSessionSnapshot::builder(
+        let snapshot = ChargingSessionSnapshot::builder(
             timestamp.into().unwrap_or_else(Utc::now),
             initial_energy,
         )
         .is_reference(true)
-        .soc(bms.initial_soc)
+        .soc(bms.current_soc())
         .target_soc(bms.target_soc)
         .build();
-        bms.update_from_energy(snapshot.energy);
-        snapshot.soc = bms.current_soc;
 
         let session_id = Database::get()
             .add_charging_session_with_snapshot(state.clone(), transaction_id, &snapshot)
@@ -166,8 +161,8 @@ impl ChargingSession {
                 .build();
         // Session + first snapshot atomically (see
         // `Database::add_charging_session_with_snapshot`).
-        if let Err(err) = Database::get()
-            .add_charging_session_with_snapshot(state, transaction_id, &snapshot)
+        if let Err(err) =
+            Database::get().add_charging_session_with_snapshot(state, transaction_id, &snapshot)
         {
             error!("could not persist missing stopped session: {err}");
         }
