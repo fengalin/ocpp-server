@@ -164,7 +164,7 @@ pub(crate) fn on_meter_values(mv: MeterValueSelection) {
         if let Some(server) = s.server.as_mut()
             && let Some(energy) = energy
         {
-            server.bms.current_energy = Some(energy);
+            server.bms.update_energy(energy);
         }
         // Keep the visible window anchored to the newest MeterValues so all
         // graphs share the same timeframe. MeterValues are time-ordered, so cut
@@ -199,7 +199,7 @@ pub(crate) fn on_status(cs: ChargeStatus) {
         if let Some(ref mut srv) = s.server {
             srv.status = cs.clone();
             if let Some(p) = progress {
-                srv.bms.current_soc = bms::SoC::Absolute(p.soc);
+                srv.bms.sync_current_soc(bms::SoC::Absolute(p.soc));
             }
         }
     });

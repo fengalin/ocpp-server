@@ -159,7 +159,7 @@ impl<'a> Database<'a> {
 
             let cs = cs.get_or_insert_with(|| {
                 ChargingSession::from_database(
-                    bms.capacity,
+                    bms.capacity() as u32,
                     session_id,
                     transaction_id,
                     state.parse().expect("infallible"),
@@ -178,10 +178,21 @@ impl<'a> Database<'a> {
             );
         }
 
-        if let Some(ref mut cs_mut) = cs
+        if let Some(ref cs) = cs
             && apply_updates
         {
-            cs_mut.apply_bms_updates(self, bms);
+            if let Some(first) = cs.first_snapshot() {
+                if let Some(reference) = cs.last_reference_snapshot() {
+                    bms.init_from_db(first.energy, reference.energy, cs.initial_soc());
+                } else {
+                    error!(
+                        session_id = cs.session_id(),
+                        "FIXME: no reference snapshots",
+                    );
+                }
+            } else {
+                error!(session_id = cs.session_id(), "FIXME: no first snapshot");
+            }
         }
 
         Ok(cs)
@@ -409,10 +420,7 @@ impl<'a> Database<'a> {
         Ok(schedule_id)
     }
 
-    pub fn add_new_charging_schedule(
-        &self,
-        schedule: &ChargingSchedule,
-    ) -> anyhow::Result<i32> {
+    pub fn add_new_charging_schedule(&self, schedule: &ChargingSchedule) -> anyhow::Result<i32> {
         Self::insert_schedule(&self.0, schedule)
     }
 

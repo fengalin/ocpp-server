@@ -8,32 +8,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::bms::{self, Bms};
+use crate::bms::{self, Bms, SoC};
 use crate::model::Ts;
-use crate::plan_model::{
-    ChargingPeriod, LivePlan, Plan, PlanKind, PlanPreview, battery_energy_needed,
-};
-
-/// Grid power limit (W) needed to deliver `required_battery_power` (W) to the
-/// battery, clamped to the CP maximum.
-pub fn clamp_limit(required_battery_power: f64) -> u32 {
-    let limit = (required_battery_power + bms::STATIC_LOSS as f64).round() as u32;
-    limit.min(bms::MAX_POWER)
-}
-
-/// Estimate the current SoC from the last known initial SoC plus the energy
-/// delivered since the session started.
-///
-/// This is the shared re-estimation rule: the server applies it when the user
-/// corrects the initial SoC (mid-session), and the front end applies the same
-/// math client-side so the plan preview reacts instantly (the server's answer
-/// arrives through the state catch-up). SoC arguments are **fractions 0–1**;
-/// energies are Wh. `session_energy` is the session's delivered energy — on
-/// the wire that is `last energy sample − session.initial_energy`.
-pub fn estimate_soc(initial_soc: f32, session_energy: u64, bms: &Bms) -> f32 {
-    let delta = (session_energy as f64 / bms.capacity as f64).min(1.0) as f32;
-    (initial_soc + delta).clamp(0.0, 1.0)
-}
+use crate::plan_model::{ChargingPeriod, LivePlan, Plan, PlanKind, PlanPreview};
 
 /// Compute the preview for a plan.
 ///
@@ -50,7 +27,7 @@ pub fn compute(
 ) -> PlanPreview {
     if target_soc <= cur_soc {
         return PlanPreview {
-            energy: 0,
+            energy_needed: 0,
             soc_delta: 0.0,
             soc_result: cur_soc,
             duration: 0,
@@ -62,13 +39,16 @@ pub fn compute(
         };
     }
 
-    let energy = battery_energy_needed(cur_soc, target_soc, bms);
+    let energy_needed = bms
+        .target_soc_to_energy(SoC::Absolute(target_soc))
+        .expect("all absolute SoCs currently");
+
     let limit = limit.min(bms::MAX_POWER);
     if limit <= bms::STATIC_LOSS {
         // The grid limit wouldn't even cover the static loss: no power would
         // reach the battery (and the duration math below divides by zero).
         return PlanPreview {
-            energy: energy.round() as u64,
+            energy_needed,
             soc_delta: target_soc - cur_soc,
             soc_result: target_soc,
             duration: 0,
@@ -82,20 +62,21 @@ pub fn compute(
             )),
         };
     }
-    let battery_power = limit - bms::STATIC_LOSS;
+
+    let effective_power = limit - bms::STATIC_LOSS;
+    let duration = energy_needed as u64 * 60 * 60 / effective_power as u64;
 
     match kind {
         PlanKind::Asap => {
-            let duration = (energy / battery_power as f64 * 3600.0).round() as u64;
             let completes_at = now + Duration::seconds(duration as i64);
             PlanPreview {
-                energy: energy.round() as u64,
+                energy_needed,
                 soc_delta: target_soc - cur_soc,
                 soc_result: target_soc,
                 duration,
                 completes_at: Ts::from_utc(completes_at),
                 feasible: true,
-                avg_battery: battery_power,
+                avg_battery: effective_power,
                 periods: vec![ChargingPeriod {
                     start_at: Ts::from_utc(now),
                     duration,
@@ -110,7 +91,6 @@ pub fn compute(
             // battery power (charging at the limit, not spread over the whole
             // window); the single period ends exactly at the deadline.
             let deadline = deadline.unwrap_or(now + Duration::days(1));
-            let duration = (energy / battery_power as f64 * 3600.0).round() as u64;
             let start = deadline - Duration::seconds(duration as i64);
 
             let (start, feasible, note) = if start + Duration::minutes(2) <= now {
@@ -130,13 +110,13 @@ pub fn compute(
             };
 
             PlanPreview {
-                energy: energy.round() as u64,
+                energy_needed,
                 soc_delta: target_soc - cur_soc,
                 soc_result: target_soc,
                 duration,
                 completes_at: Ts::from_utc(start + Duration::seconds(duration as i64)),
                 feasible,
-                avg_battery: battery_power,
+                avg_battery: effective_power,
                 periods: vec![ChargingPeriod {
                     start_at: Ts::from_utc(start),
                     duration,
@@ -147,7 +127,7 @@ pub fn compute(
         }
         // Blocking / unlimited have no charging periods.
         PlanKind::Blocking | PlanKind::Unlimited => PlanPreview {
-            energy: 0,
+            energy_needed: 0,
             soc_delta: 0.0,
             soc_result: cur_soc,
             duration: 0,
@@ -162,19 +142,18 @@ pub fn compute(
 
 /// Live progress of an active plan, as shown on the status tab.
 pub fn live(plan: &Plan, bms: &Bms, is_charging: bool, now: DateTime<Utc>) -> LivePlan {
-    let soc = bms.current_soc.absolute().unwrap_or(plan.initial_soc);
+    let remaining_energy = bms
+        .target_soc_to_energy(SoC::Absolute(plan.target_soc))
+        .expect("all absolute SoCs currently");
 
-    // FIXME we'd need SocProgress here
-    let remaining = battery_energy_needed(soc, plan.target_soc, bms);
-    let battery_power = bms::MAX_AVAILABLE_POWER;
     let end = plan.end();
     let remaining_wall = (end - now).num_seconds().max(0) as u64;
     let is_charging = is_charging && plan.limit_at(now) > 0;
 
-    let (remaining_time, eta) = if remaining <= 0.0 {
+    let (remaining_time, eta) = if remaining_energy == 0 {
         (0, now)
     } else if is_charging {
-        let duration = (remaining / battery_power as f64 * 3600.0).round() as u64;
+        let duration = remaining_energy as u64 * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64;
         (
             duration,
             (now + Duration::seconds(duration as i64)).min(end),
@@ -185,7 +164,7 @@ pub fn live(plan: &Plan, bms: &Bms, is_charging: bool, now: DateTime<Utc>) -> Li
 
     LivePlan {
         plan: plan.clone(),
-        remaining_energy: remaining.round() as u64,
+        remaining_energy,
         remaining_time,
         eta: Ts::from_utc(eta),
     }
@@ -211,9 +190,9 @@ mod tests {
             bms::MAX_POWER,
             &bms(),
         );
-        let energy: f64 = 0.5 * 48_100.0; // Wh
-        assert_eq!(p.energy, energy.round() as u64);
-        let expected_duration = (energy / 7000.0 * 3600.0).round() as u64;
+        let energy = 48_100 / 2; // Wh
+        assert_eq!(p.energy_needed, energy);
+        let expected_duration = energy as u64 * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64;
         assert_eq!(p.duration, expected_duration);
         assert_eq!(p.periods.len(), 1);
         assert_eq!(p.periods[0].power_limit, 7400);
@@ -322,20 +301,8 @@ mod tests {
             bms::MAX_POWER,
             &bms(),
         );
-        assert_eq!(p.energy, 0);
+        assert_eq!(p.energy_needed, 0);
         assert_eq!(p.periods.len(), 0);
         assert!(p.feasible);
-    }
-
-    #[test]
-    fn estimate_soc_scales_with_energy() {
-        let ch = bms(); // 48_100 Wh
-        // 12_025 Wh = 25 % of the capacity.
-        let soc = estimate_soc(0.30, 12_025, &ch);
-        assert!((soc - 0.55).abs() < 1e-3);
-        // No energy yet: the initial SoC is the current SoC.
-        assert!((estimate_soc(0.30, 0, &ch) - 0.30).abs() < f32::EPSILON);
-        // Clamped at full.
-        assert_eq!(estimate_soc(0.90, 48_100, &ch), 1.0);
     }
 }

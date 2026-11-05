@@ -12,8 +12,8 @@ use tracing::*;
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use charge_system_common_model::bms::Bms;
 use charge_system_common_model::notification::{ChargeSystemConnectionState, Notification};
-use charge_system_common_model::{bms::Bms, plan_model::ChargingPlan};
 
 use crate::{CommandToChargingPoint, Evse, OcppInterface, args};
 
@@ -35,8 +35,6 @@ pub struct Dispatcher {
     notif_tx: broadcast::Sender<Notification>,
     cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
     ws_stream: Option<WebSocketStream<TcpStream>>,
-    command: Option<args::Command>,
-    charging_plan: Option<ChargingPlan>,
     listener: TcpListener,
     ocpp_if: OcppInterface,
     evse: Evse,
@@ -54,7 +52,6 @@ impl Dispatcher {
         args: &args::Args,
         notif_tx: broadcast::Sender<Notification>,
         cmd_rx: mpsc::Receiver<CommandToChargingPoint>,
-        charging_plan: Option<ChargingPlan>,
     ) -> anyhow::Result<Self> {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.ocpp_port);
 
@@ -67,8 +64,6 @@ impl Dispatcher {
             notif_tx: notif_tx.clone(),
             cmd_rx,
             ws_stream: None,
-            command: args.command.clone(),
-            charging_plan,
             listener,
             ocpp_if: OcppInterface::new(notif_tx.clone()),
             evse: Evse::new(bms, notif_tx),
@@ -134,58 +129,6 @@ impl Dispatcher {
         );
 
         info!("peer address {peer}");
-
-        // FIXME might want to refresh EVSE state
-
-        if let Some(command) = self.command.take() {
-            use args::Command::*;
-            match command {
-                ClearChargingProfile => {
-                    self.ocpp_if
-                        .push_command(CommandToChargingPoint::ClearChargingProfile);
-                }
-                GetConfiguration => {
-                    self.ocpp_if
-                        .push_command(CommandToChargingPoint::GetConfiguration);
-                }
-                Run => {
-                    if let Some(charging_plan) = self.charging_plan.take() {
-                        self.evse.set_charging_plan(charging_plan);
-                    } else {
-                        // no charging plan specified, re-apply last schedule if any,
-                        // in case it was removed (e.g. due to a charging point reboot)
-                        // FIXME only do this if there's an outstanding charging period
-                        // self.evse.refresh_charging_schedule();
-                    }
-                }
-                StopSession => self.evse.stop_current_session(),
-                Reboot => {
-                    self.evse.permanent_0w_set();
-                    self.ocpp_if.push_command(CommandToChargingPoint::Reboot);
-                }
-                ResetMeterValueConfiguration => {
-                    self.ocpp_if
-                        .push_command(CommandToChargingPoint::ResetMeterValueConfiguration);
-                }
-                SetMeterValueConfiguration => {
-                    self.ocpp_if
-                        .push_command(CommandToChargingPoint::SetMeterValueConfiguration);
-                }
-                SetMeterValueAlignedInterval(val) => {
-                    self.ocpp_if.push_command(
-                        CommandToChargingPoint::SetMeterValueAlignedInterval(val.interval),
-                    );
-                }
-                SetServerIp(ip_address) => {
-                    let server_ip = ip_address.get_ip_address().expect("checked by caller");
-                    self.evse.permanent_0w_set();
-                    self.ocpp_if
-                        .push_command(CommandToChargingPoint::SetServerAddress(format!(
-                            "ws://{server_ip}:9000"
-                        )));
-                }
-            };
-        }
 
         loop {
             trace!("## dispatcher loop iter");

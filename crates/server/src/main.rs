@@ -1,15 +1,12 @@
-use anyhow::{Context, bail};
+use anyhow::bail;
 use clap::Parser;
 use log::*;
 use tokio::sync::{broadcast, mpsc};
 
-use charge_system_common_model::{
-    bms::{self, Bms, SoC},
-    plan_model::ChargingPlan,
-};
+use charge_system_common_model::bms::{self, Bms};
 
 mod args;
-use args::{Args, Command};
+use args::Args;
 
 pub mod charging_session;
 pub use charging_session::{ChargingSession, ChargingSessionSnapshot, ChargingSessionState};
@@ -36,9 +33,6 @@ pub mod tests;
 async fn main() -> anyhow::Result<()> {
     use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
-    let args = Args::parse();
-    args.check()?;
-
     let env_filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
@@ -55,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
         .with(env_filter)
         .init();
 
+    let args = Args::parse();
+
     let mut bms = Bms::from(&args);
     info!("User defined BMS:\n{bms}");
 
@@ -68,13 +64,7 @@ async fn main() -> anyhow::Result<()> {
                     info!("consolidated BMS:\n{bms}");
                 }
             }
-            Ok(None) => {
-                if args.is_stop_session() {
-                    bail!("no known charging session to stop");
-                } else {
-                    info!("no known charging session");
-                }
-            }
+            Ok(None) => info!("no known charging session"),
             Err(err) => {
                 bail!("failed to query last session: {err}");
             }
@@ -104,35 +94,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let charging_plan = Option::<ChargingPlan>::try_from(&args)
-        .inspect(|cp| {
-            if args.is_dry_run()
-                && let Some(cp) = cp
-            {
-                info!("Selected charging plan: {cp:?}");
-                match ChargingSchedule::try_from_charging_plan(cp, &bms) {
-                    Ok(Some(s)) => {
-                        let remaining =
-                            s.remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS);
-                        info!(
-                            "remaining: {remaining}{}",
-                            if !remaining.is_zero() {
-                                format!(
-                                    ", {}",
-                                    SoC::Relative(remaining.energy as f32 / bms.capacity as f32)
-                                )
-                            } else {
-                                "".to_string()
-                            }
-                        );
-                    }
-                    Ok(None) => warn!("unlimited charging plan"),
-                    Err(err) => error!("couldn't compute charging schedule: {err}"),
-                }
-            }
-        })
-        .inspect_err(|err| error!("Charging plan: {err}"))?;
-
     // The shared notification channel fans out to the unix-socket notifier,
     // the web server (recording task + one SSE subscriber per connection) and
     // dispatcher/evse senders; each subscriber gets its own 64-slot window,
@@ -147,30 +108,9 @@ async fn main() -> anyhow::Result<()> {
         .inspect_err(|err| error!("failed to create unix socket notifier: {err}"))
         .ok();
     let webserver = Webserver::new(&args, notif_tx.clone(), CommandSender::new(cmd_tx)).await?;
-    let dispatcher = Dispatcher::new(bms, &args, notif_tx, cmd_rx, charging_plan).await?;
+    let dispatcher = Dispatcher::new(bms, &args, notif_tx, cmd_rx).await?;
 
-    match &args.command {
-        None => {
-            warn!("Quitting now!\nUse the 'run' command to actually run the server");
-            return Ok(());
-        }
-        Some(Command::Run) => {
-            info!("starting the server");
-        }
-        Some(Command::Reboot) => {
-            warn!("/!\\ Rebooting");
-            warn!("any charging plans will be replaced by a permanent 0 W plan");
-        }
-        Some(Command::SetServerIp(ip_address)) => {
-            let server_ip = ip_address
-                .get_ip_address()
-                .context("set-server-ip command")?;
-            warn!("Setting server IP address: {server_ip}");
-            warn!("/!\\ the charging point will Reboot");
-            warn!("any charging plans will be replaced by a permanent 0 W plan");
-        }
-        _ => (),
-    }
+    info!("starting the server");
 
     let (stop_tx, stop_rx) = broadcast::channel(8);
 

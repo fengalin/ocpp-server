@@ -17,7 +17,7 @@ env_logger.workspace = true
 futures.workspace = true
 http.workspace = true
 log.workspace = true
-charge-system-common-model = { workspace = true, features = ["ocpp"] }
+charge-system-common-model = { workspace = true, features = ["server"] }
 charge-system-web-model.workspace = true
 ocpp_rs.workspace = true
 rusqlite.workspace = true
