@@ -8,11 +8,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-ocpp = ["dep:ocpp_rs"]
+server = ["dep:ocpp_rs"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
-log = "0.4.33"
 ocpp_rs = { version = "0.4.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"

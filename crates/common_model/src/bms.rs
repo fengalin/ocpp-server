@@ -1,8 +1,8 @@
-use log::{error, info, warn};
 use std::{
     fmt::{self, Write},
     ops,
 };
+use tracing::{debug, error, info, warn};
 
 // FIXME make those a setting also they are not BMS related
 pub const DEFAULT_CAPACITY: u32 = 48_100;
@@ -12,24 +12,44 @@ pub const MAX_AVAILABLE_POWER: u32 = MAX_POWER - STATIC_LOSS;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Bms {
-    pub capacity: u32,
-    pub initial_energy: Option<u64>,
-    pub current_energy: Option<u64>,
-    pub initial_soc: SoC,
-    pub current_soc: SoC,
+    capacity: f32,
+    initial_energy: Option<u64>,
+    current_energy: Option<u64>,
+    initial_soc: SoC,
+    current_soc: SoC,
     pub target_soc: Option<f32>,
 }
 
 impl Bms {
     pub fn builder(capacity: u32) -> BmsBuilder {
         BmsBuilder(Bms {
-            capacity,
+            capacity: capacity as f32,
             initial_energy: None,
             current_energy: None,
             initial_soc: SoC::Unknown,
             current_soc: SoC::Unknown,
             target_soc: None,
         })
+    }
+
+    pub fn capacity(&self) -> f32 {
+        self.capacity
+    }
+
+    pub fn initial_energy(&self) -> Option<u64> {
+        self.initial_energy
+    }
+
+    pub fn current_energy(&self) -> Option<u64> {
+        self.current_energy
+    }
+
+    pub fn added_energy(&self) -> Option<u64> {
+        Option::zip(self.initial_energy, self.current_energy).map(|(init, cur)| cur - init)
+    }
+
+    pub fn initial_soc(&self) -> SoC {
+        self.initial_soc
     }
 
     pub fn current_soc(&self) -> SoC {
@@ -40,42 +60,87 @@ impl Bms {
         self.current_soc
     }
 
-    // FIXME could return a Result
+    pub fn sync_current_soc(&mut self, cur_soc: SoC) {
+        self.current_soc = cur_soc;
+    }
+
+    /// Initializes the BMS with snapshot retrieved from DB
+    ///
+    /// This only makes sense on startup
+    #[cfg(feature = "server")]
+    pub fn init_from_db(&mut self, init_energy: u64, cur_energy: u64, init_soc: SoC) {
+        self.initial_energy = Some(init_energy);
+        self.current_energy = Some(cur_energy);
+        self.update_initial_soc(init_soc);
+    }
+
+    /// Updates the BMS initial SoC is different and reflect this on current SoC
+    ///
+    /// Returns `true` this lead to changes.
+    #[cfg(feature = "server")]
+    pub fn update_initial_soc(&mut self, new_init_soc: SoC) -> bool {
+        if self.initial_soc.pratically_equals(new_init_soc) {
+            return false;
+        }
+
+        self.initial_soc = new_init_soc;
+
+        if let Some(cur_energy) = self.current_energy
+            && let Some(init_energy) = self.initial_energy
+        {
+            self.current_soc = new_init_soc + (cur_energy - init_energy) as f32 / self.capacity;
+        } else {
+            self.current_soc = new_init_soc;
+        }
+
+        debug!(initial_soc = %new_init_soc, cur_soc = %self.current_soc, "updated BMS");
+
+        true
+    }
+
     /// Record a new meter energy reading (Wh) and re-estimate `current_soc`
     /// from it (relative to `initial_energy`).
-    pub fn update_from_energy(&mut self, energy: u64) {
+    pub fn update_energy(&mut self, cur_energy: u64) {
         let Some(initial_energy) = self.initial_energy else {
+            info!(energy = cur_energy, "initializing BMS energy");
+
+            self.initial_energy = Some(cur_energy);
+            self.current_energy = Some(cur_energy);
+            self.current_soc = self.initial_soc;
+
             return;
         };
 
         if let Some(prev_energy) = self.current_energy {
-            if energy == prev_energy {
+            if cur_energy == prev_energy {
                 return;
-            } else if prev_energy > energy {
+            } else if prev_energy > cur_energy {
                 error!(
                     "can't compute SoC progress: new energy: {:.3} kWh, \
                     is less than previous: {:.3} kWh",
-                    energy as f32 / 1_000.0,
+                    cur_energy as f32 / 1_000.0,
                     prev_energy as f32 / 1_000.0,
                 );
                 return;
             }
-        } else if initial_energy > energy {
+        } else if initial_energy > cur_energy {
             error!(
                 "can't compute SoC progress: new energy: {:.3} kWh, \
                 initial energy: {:.3} kWh",
-                energy as f64 / 1_000.0,
+                cur_energy as f64 / 1_000.0,
                 initial_energy as f64 / 1_000.0,
             );
             return;
-        } else if energy == initial_energy {
+        } else if cur_energy == initial_energy {
             return;
         }
 
-        let added_energy = energy - initial_energy;
+        let added_energy = cur_energy - initial_energy;
 
-        self.current_energy = Some(energy);
-        self.current_soc = self.initial_soc + (added_energy as f32 / self.capacity as f32);
+        self.current_energy = Some(cur_energy);
+        self.current_soc = self.initial_soc + (added_energy as f32 / self.capacity);
+
+        debug!(cur_soc = %self.current_soc, cur_energy, "updated BMS");
     }
 
     pub fn soc_progress(&self) -> SoCProgress {
@@ -92,12 +157,12 @@ impl Bms {
             _ => return None,
         };
 
-        Some((self.capacity as f32 * soc_to_add) as u32)
+        Some((self.capacity * soc_to_add) as u32)
     }
 
     /// The `target_soc` field, as a [`SoC`] of the same kind as `current_soc`
     /// (named `target` so it does not clash with the `target_soc` field).
-    pub fn target(&self) -> SoC {
+    pub fn target_soc(&self) -> SoC {
         use SoC::*;
 
         match self.current_soc {
@@ -113,7 +178,7 @@ impl fmt::Display for Bms {
         f.write_fmt(format_args!(
             "cap.: {:.3} kWh, init energy: {} kWh, \
             cur energy: {}, init SoC: {} %, cur SoC: {}",
-            self.capacity as f32 / 1_000.0,
+            self.capacity / 1_000.0,
             self.initial_energy.map_or_else(
                 || "N/A".to_string(),
                 |e| format!("{:.3}", e as f64 / 1_000.0)
@@ -258,6 +323,20 @@ impl SoC {
         }
 
         *self = new_soc;
+    }
+
+    pub fn pratically_equals(&self, other: SoC) -> bool {
+        fn practically_equals(s: f32, o: f32) -> bool {
+            (s - o).abs() < 0.001
+        }
+
+        use SoC::*;
+        match (*self, other) {
+            (Absolute(s), Absolute(o)) => practically_equals(s, o),
+            (Relative(s), Relative(o)) => practically_equals(s, o),
+            (Unknown, Unknown) => true,
+            _ => false,
+        }
     }
 }
 

@@ -85,27 +85,30 @@ impl Evse {
             .notif_tx
             .send(Notification::BmsUpdate(this.bms.clone()))
         {
-            error!("error broadcasting BMS update: {err}");
+            error!(%err, "error broadcasting BMS update");
         }
 
         this
     }
 
     /// Updates the BMS initial SoC.
-    pub fn set_initial_soc(&mut self, soc: f32) {
-        info!("## setting initial SoC: {soc}");
-        self.bms.initial_soc.update(SoC::new_absolute(soc));
+    pub fn set_initial_soc(&mut self, init_soc: f32) {
+        if self.bms.update_initial_soc(SoC::new_absolute(init_soc)) {
+            info!(%init_soc, "## setting initial SoC");
 
-        if let Some(cs) = self.charging_session.as_mut() {
-            cs.apply_bms_updates(&Database::get(), &mut self.bms);
-        }
+            if let Some(cs) = self.charging_session.as_mut() {
+                cs.apply_bms_updates(&Database::get(), &mut self.bms);
+            }
 
-        info!("## broadcasting BMS update: {}", self.bms);
-        if let Err(err) = self
-            .notif_tx
-            .send(Notification::BmsUpdate(self.bms.clone()))
-        {
-            error!("error broadcasting BMS update: {err}");
+            info!(bms = %self.bms, "## broadcasting BMS update");
+            if let Err(err) = self
+                .notif_tx
+                .send(Notification::BmsUpdate(self.bms.clone()))
+            {
+                error!(%err, "error broadcasting BMS update");
+            }
+        } else {
+            info!(%init_soc, "## received pratically identical initial SoC => not updating");
         }
     }
 
@@ -224,18 +227,6 @@ impl Evse {
 
         self.command_queue
             .push_back(CommandToChargingPoint::SetChargingSchedule(schedule));
-    }
-
-    pub fn stop_current_session(&mut self) {
-        let Some(cs) = self.charging_session.as_ref() else {
-            return;
-        };
-        info!(
-            "## stopping transaction with id: {} as per user request",
-            cs.transaction_id(),
-        );
-        self.command_queue
-            .push_back(CommandToChargingPoint::StopTransaction);
     }
 
     pub fn have_session_stopped_status(&mut self, accepted: bool) {
@@ -692,7 +683,7 @@ impl Evse {
             // (less than 1% here) so we can start a new one without unplugging
             // FIXME could be an option
             // FIXME implement an optional intermediate SoC target for multi-period scheds
-            && remain_sched.is_none_or(|remain| remain.energy as f32 > self.bms.capacity as f32 / 100.0)
+            && remain_sched.is_none_or(|remain| remain.energy as f32 > self.bms.capacity() / 100.0)
         {
             info!(
                 "## Stopping session {}: {soc_progress}",
@@ -753,7 +744,7 @@ impl Evse {
                     if !remain_sched.is_zero() {
                         format!(
                             ", {:.1} %",
-                            remain_sched.energy as f32 / self.bms.capacity as f32 * 100.0
+                            remain_sched.energy as f32 / self.bms.capacity() * 100.0
                         )
                     } else {
                         "".to_string()

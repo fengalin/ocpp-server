@@ -77,7 +77,7 @@ impl AppState {
                 // A sample with a defined energy is the source of the world
                 // BMS's `current_energy` (session energy derives from it).
                 if let Some(energy) = meter_values.energy {
-                    world.bms.current_energy = Some(energy);
+                    world.bms.update_energy(energy);
                 }
                 world.push_meter_values(meter_values.clone());
             }
@@ -91,7 +91,7 @@ impl AppState {
                     // it to the world BMS so `/api/state` and the frontend
                     // stay current between meter values (which own
                     // `current_energy`).
-                    world.bms.current_soc = bms::SoC::Absolute(progress.soc);
+                    world.bms.sync_current_soc(bms::SoC::Absolute(progress.soc));
                 }
 
                 world.push_event(EventLogEntry {

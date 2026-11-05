@@ -234,10 +234,10 @@ name = "charge-system-common-model"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "log",
  "ocpp_rs",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

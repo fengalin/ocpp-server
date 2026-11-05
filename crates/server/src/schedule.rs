@@ -184,8 +184,8 @@ impl ChargingSchedule {
                 else {
                     return Err(format!(
                         "couldn't compute energy to add for {} to {}",
-                        bms.current_soc,
-                        bms.target()
+                        bms.current_soc(),
+                        bms.target_soc()
                     ));
                 };
 
@@ -205,8 +205,8 @@ impl ChargingSchedule {
                     \tenergy to add: {:.3} kWh\n\
                     \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
-                    bms.current_soc,
-                    bms.target(),
+                    bms.current_soc(),
+                    bms.target_soc(),
                     energy_to_add as f32 / 1_000.0,
                     energy_needed as f32 / 1_000.0,
                     (1.0 - (energy_to_add as f32 / energy_needed as f32)) * 100.0,
@@ -250,8 +250,8 @@ impl ChargingSchedule {
                 else {
                     return Err(format!(
                         "couldn't compute energy to add for {} to {}",
-                        bms.current_soc,
-                        bms.target(),
+                        bms.current_soc(),
+                        bms.target_soc(),
                     ));
                 };
 
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     pub fn deadline() {
-        use crate::{SoC, bms};
+        use charge_system_common_model::bms::{self, SoC};
 
         crate::tests::init();
 

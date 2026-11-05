@@ -100,10 +100,10 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------
-// OCPP-specific impls (only compiled when the `ocpp` feature is on, i.e.
-// on the server — never in the WASM front end or the OLED app).
+// server-specific impls (only compiled when the `server` feature is on,
+// never in the WASM front end or the OLED app).
 // ---------------------------------------------------------------------
-#[cfg(feature = "ocpp")]
+#[cfg(feature = "server")]
 pub mod ocpp_impls {
     use super::MeterValueSelection;
     use crate::model::Ts;

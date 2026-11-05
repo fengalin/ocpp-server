@@ -108,7 +108,7 @@ fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) 
     let target_txt = target
         .map(|t| format!("{:.0} %", t * 100.0))
         .unwrap_or_else(|| "—".to_string());
-    let remaining = match (target, bms.current_soc.absolute()) {
+    let remaining = match (target, bms.current_soc().absolute()) {
         (Some(t), Some(s)) => {
             let pct = ((t - s) * 100.0).max(0.0);
             match bms.target_soc_to_energy(bms::SoC::new_absolute(t)) {
@@ -207,7 +207,7 @@ fn render_soc() {
     let Some((soc, target)) = state::with_state(|s| {
         s.server
             .as_ref()
-            .map(|srv| (srv.bms.current_soc.absolute(), srv.bms.target_soc))
+            .map(|srv| (srv.bms.current_soc().absolute(), srv.bms.target_soc))
     }) else {
         return;
     };
@@ -253,18 +253,12 @@ fn render_tiles() {
             (true, Some(p)) => format!("{:.3} kW", p as f64 / 1000.0),
             _ => "—".to_string(),
         };
-        // Session energy comes from the BMS copy (current − initial):
-        // `on_meter_values` keeps `current_energy` fresh from samples carrying
-        // an energy reading.
-        let session_energy = match (srv.bms.initial_energy, srv.bms.current_energy) {
-            (Some(initial_energy), Some(energy)) => Some(energy.saturating_sub(initial_energy)),
-            _ => None,
-        };
         Some(vec![
             ("Power", power_txt),
             (
                 "Session energy",
-                session_energy
+                srv.bms
+                    .added_energy()
                     .map(|e| format!("{:.1} kWh", e as f64 / 1000.0))
                     .unwrap_or_else(|| "—".to_string()),
             ),

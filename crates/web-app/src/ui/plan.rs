@@ -188,7 +188,7 @@ fn plan_render_preview(p: Option<&PlanPreview>) {
     let mut rows: Vec<(&str, String)> = vec![
         (
             "Energy to add",
-            format!("{:.1} kWh", p.energy as f64 / 1000.0),
+            format!("{:.1} kWh", p.energy_needed as f64 / 1000.0),
         ),
         (
             "SoC",
@@ -301,9 +301,8 @@ fn plan_start_soc() -> Option<f32> {
     state::with_state(|s| {
         let srv = s.server.as_ref()?;
         srv.bms
-            .current_soc
+            .current_soc()
             .absolute()
-            .or(srv.bms.initial_soc.absolute())
             .or_else(|| with_ui_ref(|ui| ui.init_soc))
     })
 }
@@ -499,7 +498,11 @@ pub(crate) fn init_soc_sync() {
         return;
     }
 
-    match state::with_state(|s| s.server.as_ref().map(|srv| srv.bms.initial_soc.absolute())) {
+    match state::with_state(|s| {
+        s.server
+            .as_ref()
+            .map(|srv| srv.bms.initial_soc().absolute())
+    }) {
         Some(server_seed) => {
             let seed = server_seed.or_else(|| with_ui_ref(|ui| ui.init_soc));
             with_ui(|ui| ui.init_soc = seed);

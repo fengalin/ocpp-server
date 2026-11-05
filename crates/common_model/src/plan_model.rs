@@ -8,7 +8,6 @@
 use chrono::{DateTime, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::bms::Bms;
 use crate::model::Ts;
 
 /// One consecutive block of a charging plan. Periods with `power_limit == 0`
@@ -113,7 +112,7 @@ pub enum PlanState {
 /// verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanPreview {
-    pub energy: u64,
+    pub energy_needed: u32,
     pub soc_delta: f32,
     pub soc_result: f32,
     pub duration: u64,
@@ -133,7 +132,6 @@ pub struct Plan {
     /// *Fraction* 0–1 (see [`Bms`]); the frontend renders it `* 100`.
     pub target_soc: f32,
     pub deadline: Option<Ts>,
-    pub initial_soc: f32,
     pub periods: Vec<ChargingPeriod>,
     pub state: PlanState,
     pub preview: PlanPreview,
@@ -163,22 +161,11 @@ impl Plan {
     }
 }
 
-/// Battery energy (Wh) needed to go from `from_soc` to `to_soc` (0 if not).
-///
-/// SoC arguments are **fractions 0–1** (same convention as `Plan.target_soc`,
-/// `Bms.current_soc`), so the delta scales the capacity
-/// directly — no percent conversion.
-pub fn battery_energy_needed(from_soc: f32, to_soc: f32, bms: &Bms) -> f64 {
-    let soc_delta = (to_soc - from_soc).max(0.0);
-    let energy = soc_delta * bms.capacity as f32;
-    energy as f64
-}
-
 /// Snapshot of the active plan with live progress, as shown on the status tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LivePlan {
     pub plan: Plan,
-    pub remaining_energy: u64,
+    pub remaining_energy: u32,
     pub remaining_time: u64,
     pub eta: Ts,
 }

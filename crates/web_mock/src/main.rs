@@ -310,11 +310,10 @@ async fn apply_plan(
         // Blocking / unlimited have no periods).
         let periods = match req.kind {
             PlanKind::Deadline | PlanKind::Asap => {
-                let cur_soc = w.bms.current_soc.inner().unwrap_or_default();
                 plan::compute(
                     req.kind,
                     Utc::now(),
-                    cur_soc,
+                    w.bms.current_soc().absolute().unwrap_or_default(),
                     req.target_soc.expect("validated"),
                     req.deadline.map(|t| t.to_utc()),
                     req.power_limit.expect("validated"),
@@ -393,9 +392,9 @@ async fn set_init_soc(
     // used as the current SoC (the server does the same).
     let energy = w
         .energy
-        .saturating_sub(w.bms.initial_energy.unwrap_or_default());
-    let cur_soc = round_soc(plan::estimate_soc(req.soc, energy, &w.bms));
-    w.bms.current_soc = bms::SoC::Absolute(cur_soc);
+        .saturating_sub(w.bms.initial_energy().unwrap_or_default());
+    w.bms.update_energy(energy);
+
     Ok(ok_json())
 }
 
@@ -454,7 +453,7 @@ async fn drive(st: AppState) {
             t += Duration::seconds(10);
             i += 1;
         }
-        w.bms.current_soc = bms::SoC::Absolute(round_soc(soc));
+        w.bms.sync_current_soc(bms::SoC::Absolute(round_soc(soc)));
         w.initial_soc = Some(0.10);
         w.push_event(EventLogEntry {
             ts: Ts::from_utc(now - Duration::hours(24)),
@@ -537,8 +536,8 @@ async fn drive(st: AppState) {
                 {
                     let mut w = world.lock().await;
                     let soc = round_soc(soc);
-                    w.bms.current_soc = bms::SoC::Absolute(soc);
-                    w.bms.current_energy = Some(energy);
+                    w.bms.update_energy(energy);
+                    w.bms.sync_current_soc(bms::SoC::Absolute(soc));
                     w.push_sample(mv.clone());
                 }
                 let _ = tx.send(Notification::MeterValues(mv));
@@ -571,7 +570,7 @@ async fn drive(st: AppState) {
         // Finished
         {
             let mut w = world.lock().await;
-            w.bms.current_soc = bms::SoC::Absolute(0.90);
+            w.bms.sync_current_soc(bms::SoC::Absolute(0.90));
             w.push_event(EventLogEntry {
                 ts: Ts::from_utc(Utc::now()),
                 status: ChargeStatus::SuspendedEv,
