@@ -7,7 +7,7 @@
 //! timeframe change (samples step only) and after user actions.
 
 use charge_system_common_model::{
-    bms::{self, Bms},
+    bms::Bms,
     meter_value::MeterValueSelection,
     model::{EventLogEntry, Ts},
     notification::ChargeStatus,
@@ -55,7 +55,6 @@ pub(crate) fn refresh(scope: RefreshScope) {
                 Ok(server) => {
                     state::bump_rx_ts(server.ts.0);
                     state::with_state(|s| s.server = Some(server));
-                    plan::countdown_rebaseline_from_state();
                     render();
                 }
                 Err(e) => console_error("refresh: state", &e),
@@ -66,7 +65,14 @@ pub(crate) fn refresh(scope: RefreshScope) {
                 Ok(events) => {
                     state::with_state(|s| {
                         s.events = events.into_iter().rev().collect();
+                        if let Some(top) = s.events.first()
+                            && let ChargeStatus::Charging(_) | ChargeStatus::SuspendedEvse(_) =
+                                top.status
+                        {
+                            s.update_from_charge_status(top.status);
+                        }
                     });
+                    plan::countdown_rebaseline_from_state();
                     render();
                 }
                 Err(e) => console_error("refresh: events", &e),
@@ -189,20 +195,6 @@ pub(crate) fn on_meter_values(mv: MeterValueSelection) {
 /// remaining time) to the server state, append the event-log entry it
 /// represents on the server side, re-baseline the countdown, then render.
 pub(crate) fn on_status(cs: ChargeStatus) {
-    let progress = match &cs {
-        ChargeStatus::Charging(p) | ChargeStatus::SuspendedEvse(p) => Some(p),
-        _ => None,
-    };
-    // Copy out the remaining time before `cs` is moved into the log entry.
-    let remaining_time = progress.map(|p| p.remaining_time);
-    state::with_state(|s| {
-        if let Some(ref mut srv) = s.server {
-            srv.status = cs.clone();
-            if let Some(p) = progress {
-                srv.bms.sync_current_soc(bms::SoC::Absolute(p.soc));
-            }
-        }
-    });
     // Every status notification is exactly one event-log entry on the
     // server; reconstruct it here (client clock — a refresh replaces the
     // log with the server's authoritative history).
@@ -210,11 +202,9 @@ pub(crate) fn on_status(cs: ChargeStatus) {
         ts: Ts(now_ms()),
         status: cs,
     });
-    if let Some(secs) = remaining_time {
-        state::with_state(|s| {
-            s.remaining_at = Some((secs as i64, now_ms()));
-        });
-    }
+    state::with_state(|s| {
+        s.update_from_charge_status(cs);
+    });
     // `render()` re-syncs the countdown from the fresh re-baseline.
     render();
 }

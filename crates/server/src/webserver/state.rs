@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use log::{debug, warn};
 use tokio::sync::{Mutex, broadcast};
+use tracing::error;
 
 use charge_system_common_model::{
     bms::{self, Bms},
@@ -91,7 +92,9 @@ impl AppState {
                     // it to the world BMS so `/api/state` and the frontend
                     // stay current between meter values (which own
                     // `current_energy`).
-                    world.bms.sync_current_soc(bms::SoC::Absolute(progress.soc));
+                    if let Err(err) = world.bms.sync_current_soc(progress.soc) {
+                        error!(%err, soc = %progress.soc, "failed to sync progress SoC");
+                    }
                 }
 
                 world.push_event(EventLogEntry {

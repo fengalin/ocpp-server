@@ -2,7 +2,7 @@ use std::{
     fmt::{self, Write},
     ops,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 // FIXME make those a setting also they are not BMS related
 pub const DEFAULT_CAPACITY: u32 = 48_100;
@@ -15,7 +15,7 @@ pub struct Bms {
     capacity: f32,
     initial_energy: Option<u64>,
     current_energy: Option<u64>,
-    initial_soc: SoC,
+    initial_soc: Option<f32>,
     pub target_soc: Option<f32>,
 }
 
@@ -25,7 +25,7 @@ impl Bms {
             capacity: capacity as f32,
             initial_energy: None,
             current_energy: None,
-            initial_soc: SoC::Unknown,
+            initial_soc: None,
             target_soc: None,
         })
     }
@@ -47,7 +47,7 @@ impl Bms {
             .map(|(init, cur)| cur.saturating_sub(init))
     }
 
-    pub fn initial_soc(&self) -> SoC {
+    pub fn initial_soc(&self) -> Option<f32> {
         self.initial_soc
     }
 
@@ -55,48 +55,82 @@ impl Bms {
         let Some(added_energy) = self.added_energy() else {
             return SoC::Unknown;
         };
-        self.initial_soc + added_energy as f32 / self.capacity
+        let soc_delta = added_energy as f32 / self.capacity;
+
+        if let Some(init_soc) = self.initial_soc {
+            SoC::Abs((init_soc + soc_delta).clamp(0.0, 1.0))
+        } else {
+            SoC::Rel(soc_delta.clamp(0.0, 1.0))
+        }
     }
 
-    // End up only being needed by web-mock
-    pub fn sync_current_soc(&mut self, cur_soc: SoC) {
-        let delta_soc = match (self.initial_soc, cur_soc) {
-            (SoC::Absolute(init), SoC::Absolute(cur)) => Some((cur - init).clamp(0.0, 1.0)),
-            (SoC::Relative(init), SoC::Relative(cur)) => Some((cur - init).clamp(0.0, 1.0)),
-            _ => None,
+    // For mocking purposes only
+    pub fn sync_current_soc(&mut self, new_cur_soc: SoC) -> Result<(), BmsError> {
+        let soc_delta = match (self.initial_soc, new_cur_soc) {
+            (Some(init), SoC::Abs(cur)) => Some((cur - init).clamp(0.0, 1.0)),
+            (None, SoC::Rel(cur)) => Some(cur.clamp(0.0, 1.0)),
+            (_, SoC::Unknown) => None,
+            (None, SoC::Abs(_)) => return Err(BmsError::UnknownInitSoCCantSetAbsoluteCur),
+            (Some(_), SoC::Rel(_)) => return Err(BmsError::InitSoCDefinedCantSetRelativeCur),
         };
 
-        self.current_energy = if let Some(delta_soc) = delta_soc
+        self.current_energy = if let Some(soc_delta) = soc_delta
             && let Some(init_energy) = self.initial_energy
         {
-            Some(init_energy + (delta_soc * self.capacity) as u64)
+            Some(init_energy + (soc_delta * self.capacity) as u64)
         } else {
             None
         };
+
+        Ok(())
     }
 
     /// Initializes the BMS with snapshot retrieved from DB
     ///
     /// This only makes sense on startup
     #[cfg(feature = "server")]
-    pub fn init_from_db(&mut self, init_energy: u64, cur_energy: u64, init_soc: SoC) {
+    pub fn init_from_db(&mut self, init_energy: u64, cur_energy: u64, cur_soc: SoC) {
         self.initial_energy = Some(init_energy);
         self.current_energy = Some(cur_energy);
-        self.update_initial_soc(init_soc);
+
+        let Some(raw_abs_cur_soc) = cur_soc.absolute() else {
+            self.initial_soc = None;
+            return;
+        };
+
+        self.initial_soc = Some(
+            (raw_abs_cur_soc - cur_energy.saturating_sub(init_energy) as f32 / self.capacity)
+                .clamp(0.0, 1.0),
+        );
     }
 
-    /// Updates the BMS initial SoC is different and reflect this on current SoC
+    /// Updates the BMS initial SoC if different and reflect this on current SoC
+    ///
+    /// Since it's a reference, the new_init_soc if always absolute.
     ///
     /// Returns `true` this lead to changes.
-    #[cfg(feature = "server")]
-    pub fn update_initial_soc(&mut self, new_init_soc: SoC) -> bool {
-        if self.initial_soc.pratically_equals(new_init_soc) {
+    // FIXME looks like this should be a Result
+    pub fn update_initial_soc(&mut self, init_soc: f32) -> bool {
+        if !(0.0..=1.0).contains(&init_soc) {
+            debug!(init_soc, "out of range");
             return false;
         }
 
-        self.initial_soc = new_init_soc;
+        // can't be known at better precision than 1%
+        let new_init_soc = (init_soc * 100.0).round() / 100.0;
+        if self
+            .initial_soc
+            .is_some_and(|cur_init_soc| (cur_init_soc - new_init_soc).abs() < 0.009)
+        {
+            debug!(cur_bms = %self, new_init_soc, "not updating BMS");
+            return false;
+        }
 
-        debug!(initial_soc = %new_init_soc, cur_soc = %self.current_soc(), "updated BMS");
+        debug!(cur_bms = %self, "updating BMS");
+
+        self.initial_soc = Some(new_init_soc);
+
+        debug!(new_bms = %self, "updated BMS");
 
         true
     }
@@ -143,37 +177,28 @@ impl Bms {
     }
 
     pub fn soc_progress(&self) -> SoCProgress {
-        SoCProgress::from_soc_and_cap(self.current_soc(), self.target_soc)
+        SoCProgress::from_soc_and_target(self.current_soc(), self.target_soc)
     }
 
     /// Computes the raw energy to add to reach the target SoC,
     /// not including constant power loss
-    pub fn target_soc_to_energy(&self, target_soc: SoC) -> Option<u32> {
-        let (cur_energy, init_energy) = Option::zip(self.current_energy, self.initial_energy)?;
+    pub fn target_soc_to_energy(&self, target_soc: f32) -> Result<u32, BmsError> {
+        let target_soc = target_soc.clamp(0.0, 1.0);
 
         use SoC::*;
-        let session_soc_delta = match (self.initial_soc, target_soc) {
-            (Absolute(init_soc), Absolute(target_soc)) => saturating_sub(target_soc, init_soc),
-            (Relative(init_soc), Relative(target_soc)) => saturating_sub(target_soc, init_soc),
-            _ => return None,
+        let Abs(cur_soc) = self.current_soc() else {
+            return Err(BmsError::UnknownInitSoCCantComputeEnergy);
         };
 
-        Some(
-            ((self.capacity * session_soc_delta) as u64 + cur_energy).saturating_sub(init_energy)
-                as u32,
-        )
+        if cur_soc >= target_soc {
+            return Ok(0);
+        }
+
+        Ok((self.capacity * (target_soc - cur_soc)) as u32)
     }
 
-    /// The `target_soc` field, as a [`SoC`] of the same kind as `current_soc`
-    /// (named `target` so it does not clash with the `target_soc` field).
-    pub fn target_soc(&self) -> SoC {
-        use SoC::*;
-
-        match self.initial_soc {
-            Absolute(_) => SoC::new_absolute(self.target_soc),
-            Relative(_) => SoC::new_relative(self.target_soc),
-            Unknown => SoC::new_relative(self.target_soc),
-        }
+    pub fn target_soc(&self) -> Option<f32> {
+        self.target_soc
     }
 }
 
@@ -183,18 +208,28 @@ impl fmt::Display for Bms {
             "cap.: {:.3} kWh, init energy: {} kWh, \
             cur energy: {}, init SoC: {} %, cur SoC: {}",
             self.capacity / 1_000.0,
-            self.initial_energy.map_or_else(
-                || "N/A".to_string(),
-                |e| format!("{:.3}", e as f64 / 1_000.0)
-            ),
-            self.current_energy.map_or_else(
-                || "N/A".to_string(),
-                |e| format!("{:.3}", e as f64 / 1_000.0)
-            ),
-            self.initial_soc,
-            SoCProgress::from_soc_and_cap(self.current_soc(), self.target_soc),
+            self.initial_energy
+                .map_or_else(|| '—'.to_string(), |e| format!("{:.3}", e as f64 / 1_000.0)),
+            self.current_energy
+                .map_or_else(|| '—'.to_string(), |e| format!("{:.3}", e as f64 / 1_000.0)),
+            if let Some(init_soc) = self.initial_soc {
+                format!("{:.0}", init_soc * 100.0)
+            } else {
+                '—'.to_string()
+            },
+            SoCProgress::from_soc_and_target(self.current_soc(), self.target_soc),
         ))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BmsError {
+    #[error("Unknown inital SoC, can't set absolute current SoC")]
+    UnknownInitSoCCantSetAbsoluteCur,
+    #[error("Inital SoC defined, can't set relative current SoC")]
+    InitSoCDefinedCantSetRelativeCur,
+    #[error("Unknown initial SoC, can't compute energy to add")]
+    UnknownInitSoCCantComputeEnergy,
 }
 
 pub struct BmsBuilder(Bms);
@@ -207,24 +242,17 @@ impl BmsBuilder {
         self.0.current_energy = Some(energy);
         self
     }
-    pub fn initial_soc(mut self, soc: SoC) -> Self {
-        self.0.initial_soc = soc;
+    pub fn initial_soc(mut self, soc: f32) -> Self {
+        self.0.initial_soc = Some(soc.clamp(0.0, 1.0));
         self
     }
     pub fn target_soc(mut self, target_soc: impl Into<Option<f32>>) -> Self {
-        self.0.target_soc = target_soc.into();
+        self.0.target_soc = target_soc.into().map(|t| t.clamp(0.0, 1.0));
         self
     }
     pub fn build(self) -> Bms {
         self.0
     }
-}
-
-fn saturating_sub(lhs: f32, rhs: f32) -> f32 {
-    if rhs >= lhs {
-        return 0.0;
-    }
-    lhs - rhs
 }
 
 /// State of charge: a *fraction* 0–1 (see the crate docs). `PartialEq` is
@@ -234,39 +262,39 @@ fn saturating_sub(lhs: f32, rhs: f32) -> f32 {
 pub enum SoC {
     #[default]
     Unknown,
-    Absolute(f32),
-    Relative(f32),
+    Abs(f32),
+    Rel(f32),
 }
 
 impl SoC {
     pub fn new(is_absolute: bool, soc: impl Into<Option<f32>>) -> Self {
         if is_absolute {
-            Self::new_absolute(soc)
+            Self::new_absolute(soc).clamp()
         } else {
-            Self::new_relative(soc)
+            Self::new_relative(soc).clamp()
         }
     }
 
     pub fn new_absolute(soc: impl Into<Option<f32>>) -> Self {
         match soc.into() {
-            Some(soc) => SoC::Absolute(soc),
+            Some(soc) => SoC::Abs(soc).clamp(),
             None => SoC::Unknown,
         }
     }
 
     pub fn new_relative(soc: impl Into<Option<f32>>) -> Self {
         match soc.into() {
-            Some(soc) => SoC::Relative(soc),
+            Some(soc) => SoC::Rel(soc).clamp(),
             None => SoC::Unknown,
         }
     }
 
     pub fn is_absolute(self) -> bool {
-        matches!(self, SoC::Absolute(_))
+        matches!(self, SoC::Abs(_))
     }
 
     pub fn is_relative(self) -> bool {
-        matches!(self, SoC::Relative(_))
+        matches!(self, SoC::Rel(_))
     }
 
     pub fn is_unknown(self) -> bool {
@@ -281,45 +309,49 @@ impl SoC {
         self.is_relative().then(|| self.inner()).flatten()
     }
 
-    /// The inner fraction, for either kind (`None` when `Unknown`).
-    pub fn inner(self) -> Option<f32> {
+    pub fn round_per_100(self) -> SoC {
+        fn round(soc: f32) -> f32 {
+            (soc * 100.0).round() / 100.0
+        }
+        use SoC::*;
         match self {
-            SoC::Absolute(soc) => Some(soc),
-            SoC::Relative(rel_soc) => Some(rel_soc),
-            SoC::Unknown => None,
+            Abs(soc) => Abs(round(soc)),
+            Rel(soc) => Rel(round(soc)),
+            Unknown => Unknown,
         }
     }
 
-    // FIXME could return a status
-    pub fn update(&mut self, new_soc: SoC) {
+    pub fn round_per_1000(self) -> SoC {
+        fn round(soc: f32) -> f32 {
+            (soc * 1000.0).round() / 1000.0
+        }
         use SoC::*;
         match self {
-            Unknown => (),
-            Absolute(_) => match new_soc {
-                Unknown => {
-                    warn!("forgetting absolute SoC {self}");
-                }
-                Absolute(_) => {
-                    info!("Replacing absolute SoC {self} with {new_soc}");
-                }
-                Relative(_) => {
-                    warn!("Replacing absolute SoC {self} with relative {new_soc}");
-                }
-            },
-            Relative(_) => match new_soc {
-                Unknown => {
-                    warn!("forgetting relative SoC {self}");
-                }
-                Absolute(_) => {
-                    info!("Replacing relative SoC {self} with absolute {new_soc}");
-                }
-                Relative(_) => {
-                    warn!("Replacing relative SoC {self} with {new_soc}");
-                }
-            },
+            Abs(soc) => Abs(round(soc)),
+            Rel(soc) => Rel(round(soc)),
+            Unknown => Unknown,
         }
+    }
 
-        *self = new_soc;
+    pub fn clamp(self) -> SoC {
+        fn clamp(soc: f32) -> f32 {
+            soc.clamp(0.0, 100.0)
+        }
+        use SoC::*;
+        match self {
+            Abs(soc) => Abs(clamp(soc)),
+            Rel(soc) => Rel(clamp(soc)),
+            Unknown => Unknown,
+        }
+    }
+
+    /// The inner fraction, for either kind (`None` when `Unknown`).
+    pub fn inner(self) -> Option<f32> {
+        match self {
+            SoC::Abs(soc) => Some(soc),
+            SoC::Rel(rel_soc) => Some(rel_soc),
+            SoC::Unknown => None,
+        }
     }
 
     pub fn pratically_equals(&self, other: SoC) -> bool {
@@ -329,8 +361,8 @@ impl SoC {
 
         use SoC::*;
         match (*self, other) {
-            (Absolute(s), Absolute(o)) => practically_equals(s, o),
-            (Relative(s), Relative(o)) => practically_equals(s, o),
+            (Abs(s), Abs(o)) => practically_equals(s, o),
+            (Rel(s), Rel(o)) => practically_equals(s, o),
             (Unknown, Unknown) => true,
             _ => false,
         }
@@ -341,11 +373,11 @@ impl ops::Add<f32> for SoC {
     type Output = SoC;
     fn add(mut self, added_soc: f32) -> Self::Output {
         match &mut self {
-            SoC::Absolute(soc) => *soc += added_soc,
-            SoC::Relative(rel_soc) => *rel_soc += added_soc,
-            SoC::Unknown => self = SoC::Relative(added_soc),
+            SoC::Abs(soc) => *soc += added_soc,
+            SoC::Rel(rel_soc) => *rel_soc += added_soc,
+            SoC::Unknown => self = SoC::Rel(added_soc),
         }
-        self
+        self.clamp()
     }
 }
 
@@ -353,26 +385,26 @@ impl ops::Sub<f32> for SoC {
     type Output = SoC;
     fn sub(mut self, soc_delta: f32) -> Self::Output {
         match &mut self {
-            SoC::Absolute(soc) => *soc -= soc_delta,
-            SoC::Relative(rel_soc) => *rel_soc -= soc_delta,
-            SoC::Unknown => self = SoC::Relative(soc_delta),
+            SoC::Abs(soc) => *soc -= soc_delta,
+            SoC::Rel(rel_soc) => *rel_soc -= soc_delta,
+            SoC::Unknown => self = SoC::Rel(soc_delta),
         }
-        self
+        self.clamp()
     }
 }
 
 impl fmt::Display for SoC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn fmt_soc(f: &mut fmt::Formatter<'_>, soc: f32) -> fmt::Result {
-            f.write_fmt(format_args!("{:.1} %", soc * 100.0))
+            f.write_fmt(format_args!("{:.1}", soc * 100.0))
         }
         match self {
-            SoC::Absolute(soc) => fmt_soc(f, *soc),
-            SoC::Relative(soc) => {
+            SoC::Abs(soc) => fmt_soc(f, *soc),
+            SoC::Rel(soc) => {
                 f.write_char('+')?;
                 fmt_soc(f, *soc)
             }
-            SoC::Unknown => f.write_str("unknown"),
+            SoC::Unknown => f.write_str("—"),
         }
     }
 }
@@ -394,10 +426,10 @@ impl SoCProgress {
     pub fn new(
         is_absolute: bool,
         soc: impl Into<Option<f32>>,
-        cap: impl Into<Option<f32>>,
+        target: impl Into<Option<f32>>,
     ) -> Self {
         let soc = soc.into().map(|soc| soc.clamp(0.0, 1.0));
-        let cap = cap.into().map(|cap| cap.clamp(0.0, 1.0));
+        let cap = target.into().map(|cap| cap.clamp(0.0, 1.0));
 
         use SoCProgress::*;
         if is_absolute {
@@ -424,8 +456,8 @@ impl SoCProgress {
         }
     }
 
-    pub fn from_soc_and_cap(soc: SoC, cap: impl Into<Option<f32>>) -> Self {
-        Self::new(soc.is_absolute(), soc.inner(), cap)
+    pub fn from_soc_and_target(soc: SoC, target: impl Into<Option<f32>>) -> Self {
+        Self::new(soc.is_absolute(), soc.inner(), target)
     }
 
     pub fn is_complete(self) -> bool {
@@ -440,29 +472,29 @@ impl SoCProgress {
         use SoCProgress::*;
         match self {
             Unknown => SoC::Unknown,
-            AbsoluteUncapped(soc) => SoC::Absolute(soc),
+            AbsoluteUncapped(soc) => SoC::Abs(soc),
             AbsoluteCap(_) => SoC::Unknown,
-            AbsoluteTargetNotReached { soc, .. } => SoC::Absolute(soc),
-            AbsoluteTargetReached { soc, .. } => SoC::Absolute(soc),
-            RelativeUncapped(rel_soc) => SoC::Relative(rel_soc),
+            AbsoluteTargetNotReached { soc, .. } => SoC::Abs(soc),
+            AbsoluteTargetReached { soc, .. } => SoC::Abs(soc),
+            RelativeUncapped(rel_soc) => SoC::Rel(rel_soc),
             RelativeCap(_) => SoC::Unknown,
-            RelativeTargetNotReached { rel_soc, .. } => SoC::Relative(rel_soc),
-            RelativeCapReached { rel_soc, .. } => SoC::Relative(rel_soc),
+            RelativeTargetNotReached { rel_soc, .. } => SoC::Rel(rel_soc),
+            RelativeCapReached { rel_soc, .. } => SoC::Rel(rel_soc),
         }
     }
 
-    pub fn cap(self) -> SoC {
+    pub fn target(self) -> SoC {
         use SoCProgress::*;
         match self {
             Unknown => SoC::Unknown,
             AbsoluteUncapped(_) => SoC::Unknown,
-            AbsoluteCap(cap) => SoC::Absolute(cap),
-            AbsoluteTargetNotReached { target: cap, .. } => SoC::Absolute(cap),
-            AbsoluteTargetReached { target: cap, .. } => SoC::Absolute(cap),
+            AbsoluteCap(cap) => SoC::Abs(cap),
+            AbsoluteTargetNotReached { target: cap, .. } => SoC::Abs(cap),
+            AbsoluteTargetReached { target: cap, .. } => SoC::Abs(cap),
             RelativeUncapped(_) => SoC::Unknown,
-            RelativeCap(cap) => SoC::Relative(cap),
-            RelativeTargetNotReached { target: cap, .. } => SoC::Relative(cap),
-            RelativeCapReached { cap, .. } => SoC::Relative(cap),
+            RelativeCap(cap) => SoC::Rel(cap),
+            RelativeTargetNotReached { target: cap, .. } => SoC::Rel(cap),
+            RelativeCapReached { cap, .. } => SoC::Rel(cap),
         }
     }
 
@@ -476,11 +508,11 @@ impl fmt::Display for SoCProgress {
         use SoCProgress::*;
         match self {
             Unknown => f.write_str("unknown"),
-            AbsoluteUncapped(soc) => write!(f, "uncapped {}", SoC::Absolute(*soc)),
-            RelativeUncapped(added_soc) => write!(f, "uncapped {}", SoC::Relative(*added_soc)),
-            RelativeCap(cap) => write!(f, "capped to {}", SoC::Relative(*cap)),
+            AbsoluteUncapped(soc) => write!(f, "uncapped {} %", SoC::Abs(*soc)),
+            RelativeUncapped(added_soc) => write!(f, "uncapped {} %", SoC::Rel(*added_soc)),
+            RelativeCap(cap) => write!(f, "capped to {} %", SoC::Rel(*cap)),
             _ => {
-                write!(f, "{} / {}", self.soc(), self.cap())
+                write!(f, "{} / {} %", self.soc(), self.target())
             }
         }
     }

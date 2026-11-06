@@ -110,11 +110,12 @@ pub enum PlanState {
 
 /// The computed preview of a plan; applying the plan stores these periods
 /// verbatim.
+// FIXME this should be an enum with fields depending on the PlanKind
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanPreview {
     pub energy_needed: u32,
     pub soc_delta: f32,
-    pub soc_result: f32,
+    pub target_soc: f32,
     pub duration: u64,
     pub completes_at: Ts,
     pub feasible: bool,
@@ -125,11 +126,11 @@ pub struct PlanPreview {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// FIXME this should be an enum with fields depending on the PlanKind
 pub struct Plan {
     pub id: String,
     pub kind: PlanKind,
     pub start_at: Ts,
-    /// *Fraction* 0–1 (see [`Bms`]); the frontend renders it `* 100`.
     pub target_soc: f32,
     pub deadline: Option<Ts>,
     pub periods: Vec<ChargingPeriod>,

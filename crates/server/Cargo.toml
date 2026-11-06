@@ -13,7 +13,6 @@ axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 directories.workspace = true
-env_logger.workspace = true
 futures.workspace = true
 http.workspace = true
 log.workspace = true

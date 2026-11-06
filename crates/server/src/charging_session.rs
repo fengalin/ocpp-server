@@ -268,14 +268,14 @@ impl ChargingSession {
         if ref_snapshot.soc.pratically_equals(bms.current_soc())
             && ref_snapshot.energy == current_energy
         {
-            debug!(session_id = self.session_id, "last snapshot up to date");
+            debug!(session_id = self.session_id, "last snapshot is up to date");
             return;
         }
 
         let new_snapshot = ChargingSessionSnapshot::builder(Utc::now(), current_energy)
             .is_reference(true)
             .soc(bms.current_soc())
-            .target_soc(bms.target_soc().inner())
+            .target_soc(bms.target_soc())
             .build();
 
         if let Err(err) = db.add_charging_session_snapshot(self.session_id, &new_snapshot) {
@@ -508,13 +508,13 @@ mod tests {
             initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / bms::DEFAULT_CAPACITY as f32;
 
         let mut bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(initial_soc))
+            .initial_soc(initial_soc)
             .target_soc(target)
             .build();
         let tid = 10;
         let mut cs = ChargingSession::new(&mut bms, start_time, tid, INITIAL_ENERGY);
         assert_eq!(tid, cs.transaction_id());
-        assert_eq!(initial_soc, bms.initial_soc().absolute().unwrap());
+        assert_eq!(initial_soc, bms.initial_soc().unwrap());
         assert_eq!(Some(target), bms.target_soc);
         let last_snapshot = cs.last_snapshot().unwrap();
         assert_eq!(last_snapshot.timestamp, start_time);
@@ -624,7 +624,7 @@ mod tests {
         let tid = 11;
         let mut cs = ChargingSession::new(&mut bms, start_time, tid, INITIAL_ENERGY);
         assert_eq!(tid, cs.transaction_id());
-        assert_eq!(SoC::Unknown, bms.initial_soc());
+        assert_eq!(None, bms.initial_soc());
         assert_eq!(Some(target), bms.target_soc);
         assert!(cs.last_snapshot().unwrap().is_reference);
 
@@ -711,11 +711,11 @@ mod tests {
         let tid = 14;
         let mut cs = ChargingSession::new(&mut bms, start_time, tid, INITIAL_ENERGY);
         assert_eq!(tid, cs.transaction_id());
-        assert_eq!(SoC::Unknown, bms.initial_soc());
+        assert_eq!(None, bms.initial_soc());
         assert!(bms.target_soc.is_none());
         assert!(cs.last_snapshot().unwrap().is_reference);
 
-        assert_eq!(SoC::Unknown, bms.initial_soc());
+        assert_eq!(None, bms.initial_soc());
         assert_eq!(
             SoCProgress::RelativeUncapped(10.0 / bms::DEFAULT_CAPACITY as f32),
             cs.add_snapshot(
@@ -777,7 +777,7 @@ mod tests {
             initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / bms::DEFAULT_CAPACITY as f32;
 
         let mut bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(initial_soc))
+            .initial_soc(initial_soc)
             .target_soc(target)
             .build();
         let tid = 15;
@@ -847,7 +847,7 @@ mod tests {
             .expect("last session exists");
         assert_eq!(Some(INITIAL_ENERGY), bms.initial_energy());
         // recovered session started from an unknown reference SoC
-        assert_eq!(SoC::Relative(0.0), bms.initial_soc());
+        assert_eq!(None, bms.initial_soc());
         assert_eq!(Some(target), bms.target_soc);
 
         let soc_progress = recovered_session.add_snapshot(
@@ -875,7 +875,7 @@ mod tests {
             initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / bms::DEFAULT_CAPACITY as f32;
 
         let mut bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(initial_soc))
+            .initial_soc(initial_soc)
             .target_soc(target)
             .build();
 
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(last_snapshot.energy, last_known_energy);
 
         assert_eq!(Some(last_known_energy), bms.initial_energy());
-        assert_eq!(SoC::Absolute(initial_soc), bms.initial_soc());
+        assert_eq!(Some(initial_soc), bms.initial_soc());
         assert_eq!(Some(target), bms.target_soc);
 
         let mut bms = Bms::builder(bms::DEFAULT_CAPACITY)
@@ -944,7 +944,7 @@ mod tests {
             initial_soc + MAX_ADDED_ENERGY_FIRST_PERIOD as f32 / bms::DEFAULT_CAPACITY as f32;
 
         let mut bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(initial_soc))
+            .initial_soc(initial_soc)
             .target_soc(target)
             .build();
 
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(last_snapshot.energy, current_energy);
 
         assert_eq!(Some(current_energy), bms.initial_energy());
-        assert_eq!(SoC::Absolute(initial_soc), bms.initial_soc());
+        assert_eq!(Some(initial_soc), bms.initial_soc());
         assert_eq!(Some(target), bms.target_soc);
 
         let last_session = Database::get()

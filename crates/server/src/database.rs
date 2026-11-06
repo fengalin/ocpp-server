@@ -182,14 +182,8 @@ impl<'a> Database<'a> {
             && apply_updates
         {
             if let Some(first) = cs.first_snapshot() {
-                if let Some(reference) = cs.last_reference_snapshot() {
-                    bms.init_from_db(first.energy, reference.energy, cs.initial_soc());
-                } else {
-                    error!(
-                        session_id = cs.session_id(),
-                        "FIXME: no reference snapshots",
-                    );
-                }
+                let last = cs.last_snapshot().expect("at least one");
+                bms.init_from_db(first.energy, last.energy, last.soc);
             } else {
                 error!(session_id = cs.session_id(), "FIXME: no first snapshot");
             }
