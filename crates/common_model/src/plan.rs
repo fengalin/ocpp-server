@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::bms::{self, Bms, SoC};
+use crate::bms::{self, Bms};
 use crate::model::Ts;
 use crate::plan_model::{ChargingPeriod, LivePlan, Plan, PlanKind, PlanPreview};
 
@@ -19,60 +19,55 @@ use crate::plan_model::{ChargingPeriod, LivePlan, Plan, PlanKind, PlanPreview};
 pub fn compute(
     kind: PlanKind,
     now: DateTime<Utc>,
-    cur_soc: f32,
     target_soc: f32,
     deadline: Option<DateTime<Utc>>,
     limit: u32,
     bms: &Bms,
-) -> PlanPreview {
-    if target_soc <= cur_soc {
-        return PlanPreview {
+) -> Result<PlanPreview, String> {
+    if let PlanKind::Blocking | PlanKind::Unlimited = kind {
+        // Blocking / unlimited have no charging periods.
+        // FIXME PlanPreview should be an enum with fields depending on the PlanKind
+        // most of the fields here don't make sense for these plans
+        return Ok(PlanPreview {
             energy_needed: 0,
             soc_delta: 0.0,
-            soc_result: cur_soc,
+            target_soc: 0.0,
             duration: 0,
             completes_at: Ts::from_utc(now),
             feasible: true,
             avg_battery: 0,
             periods: vec![],
-            note: Some("already at or above target SoC".into()),
-        };
+            note: None,
+        });
     }
 
     let energy_needed = bms
-        .target_soc_to_energy(SoC::Absolute(target_soc))
-        .expect("all absolute SoCs currently");
+        .target_soc_to_energy(target_soc)
+        .map_err(|err| err.to_string())?;
 
     let limit = limit.min(bms::MAX_POWER);
     if limit <= bms::STATIC_LOSS {
         // The grid limit wouldn't even cover the static loss: no power would
         // reach the battery (and the duration math below divides by zero).
-        return PlanPreview {
-            energy_needed,
-            soc_delta: target_soc - cur_soc,
-            soc_result: target_soc,
-            duration: 0,
-            completes_at: Ts::from_utc(now),
-            feasible: false,
-            avg_battery: 0,
-            periods: vec![],
-            note: Some(format!(
-                "power limit must exceed the {} W static loss",
-                bms::STATIC_LOSS
-            )),
-        };
+        return Err("power limit must exceed the {} W static loss".into());
     }
 
     let effective_power = limit - bms::STATIC_LOSS;
     let duration = energy_needed as u64 * 60 * 60 / effective_power as u64;
 
+    let raw_abs_cur_soc = bms
+        .current_soc()
+        .absolute()
+        .expect("energy needed could be computed");
+
     match kind {
         PlanKind::Asap => {
             let completes_at = now + Duration::seconds(duration as i64);
-            PlanPreview {
+            // FIXME PlanPreview should be an enum with fields depending on the PlanKind
+            Ok(PlanPreview {
                 energy_needed,
-                soc_delta: target_soc - cur_soc,
-                soc_result: target_soc,
+                soc_delta: target_soc - raw_abs_cur_soc,
+                target_soc,
                 duration,
                 completes_at: Ts::from_utc(completes_at),
                 feasible: true,
@@ -83,7 +78,7 @@ pub fn compute(
                     power_limit: limit,
                 }],
                 note: None,
-            }
+            })
         }
         PlanKind::Deadline => {
             // Mirrors `ChargingPlan::Deadline` in server/src/schedule.rs: the
@@ -109,10 +104,11 @@ pub fn compute(
                 (start, true, None)
             };
 
-            PlanPreview {
+            // FIXME PlanPreview should be an enum with fields depending on the PlanKind
+            Ok(PlanPreview {
                 energy_needed,
-                soc_delta: target_soc - cur_soc,
-                soc_result: target_soc,
+                soc_delta: target_soc - raw_abs_cur_soc,
+                target_soc,
                 duration,
                 completes_at: Ts::from_utc(start + Duration::seconds(duration as i64)),
                 feasible,
@@ -123,27 +119,16 @@ pub fn compute(
                     power_limit: limit,
                 }],
                 note,
-            }
+            })
         }
-        // Blocking / unlimited have no charging periods.
-        PlanKind::Blocking | PlanKind::Unlimited => PlanPreview {
-            energy_needed: 0,
-            soc_delta: 0.0,
-            soc_result: cur_soc,
-            duration: 0,
-            completes_at: Ts::from_utc(now),
-            feasible: true,
-            avg_battery: 0,
-            periods: vec![],
-            note: None,
-        },
+        PlanKind::Blocking | PlanKind::Unlimited => unreachable!("handled at fn start"),
     }
 }
 
 /// Live progress of an active plan, as shown on the status tab.
 pub fn live(plan: &Plan, bms: &Bms, is_charging: bool, now: DateTime<Utc>) -> LivePlan {
     let remaining_energy = bms
-        .target_soc_to_energy(SoC::Absolute(plan.target_soc))
+        .target_soc_to_energy(plan.target_soc)
         .expect("all absolute SoCs currently");
 
     let end = plan.end();
@@ -174,22 +159,18 @@ pub fn live(plan: &Plan, bms: &Bms, is_charging: bool, now: DateTime<Utc>) -> Li
 mod tests {
     use super::*;
 
-    fn bms() -> Bms {
-        Bms::builder(bms::DEFAULT_CAPACITY).build()
+    #[track_caller]
+    fn bms(init_soc: f32) -> Bms {
+        Bms::builder(bms::DEFAULT_CAPACITY)
+            .initial_soc(init_soc)
+            .build()
+            .unwrap()
     }
 
     #[test]
     fn asap_math() {
         let now = Utc::now();
-        let p = compute(
-            PlanKind::Asap,
-            now,
-            0.30,
-            0.80,
-            None,
-            bms::MAX_POWER,
-            &bms(),
-        );
+        let p = compute(PlanKind::Asap, now, 0.80, None, bms::MAX_POWER, &bms(0.30)).unwrap();
         let energy = 48_100 / 2; // Wh
         assert_eq!(p.energy_needed, energy);
         let expected_duration = energy as u64 * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64;
@@ -203,7 +184,7 @@ mod tests {
             Ts::from_utc(now + Duration::seconds(expected_duration as i64))
         );
         assert!((p.soc_delta - 0.5).abs() < f32::EPSILON);
-        assert!((p.soc_result - 0.80).abs() < f32::EPSILON);
+        assert!((p.target_soc - 0.80).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -213,12 +194,12 @@ mod tests {
         let p = compute(
             PlanKind::Deadline,
             now,
-            0.30,
             0.80,
             Some(d),
             bms::MAX_POWER,
-            &bms(),
-        );
+            &bms(0.30),
+        )
+        .unwrap();
         let energy: f64 = 0.5 * 48_100.0; // Wh
         // The duration comes from the energy and the battery power (7000 W),
         // not from the now->deadline window; the period ends exactly at the
@@ -243,12 +224,12 @@ mod tests {
         let p = compute(
             PlanKind::Deadline,
             now,
-            0.30,
             0.80,
             Some(d),
             bms::MAX_POWER,
-            &bms(),
-        );
+            &bms(0.30),
+        )
+        .unwrap();
         // 24 050 Wh at 7000 W takes ~206 min: it can't start early enough to
         // finish 1 h from now, so the whole window shifts one day later.
         assert!(!p.feasible);
@@ -270,7 +251,7 @@ mod tests {
         // window, so the plan must start the next day.
         let now = Utc::now();
         let d = now + Duration::hours(4);
-        let p = compute(PlanKind::Deadline, now, 0.30, 0.80, Some(d), 2_000, &bms());
+        let p = compute(PlanKind::Deadline, now, 0.80, Some(d), 2_000, &bms(0.30)).unwrap();
         // 24 050 Wh at 1600 W takes ~901 min > the 4 h window.
         assert!(!p.feasible);
         let expected_duration = (24_050.0 / 1_600.0_f64 * 3600.0).round() as u64;
@@ -284,7 +265,7 @@ mod tests {
     #[test]
     fn limit_is_clamped_to_cp_max() {
         let now = Utc::now();
-        let p = compute(PlanKind::Asap, now, 0.30, 0.80, None, 99_000, &bms());
+        let p = compute(PlanKind::Asap, now, 0.80, None, 99_000, &bms(0.30)).unwrap();
         assert_eq!(p.periods[0].power_limit, 7400);
         assert_eq!(p.avg_battery, 7000);
     }
@@ -292,15 +273,7 @@ mod tests {
     #[test]
     fn already_at_target() {
         let now = Utc::now();
-        let p = compute(
-            PlanKind::Asap,
-            now,
-            0.90,
-            0.80,
-            None,
-            bms::MAX_POWER,
-            &bms(),
-        );
+        let p = compute(PlanKind::Asap, now, 0.80, None, bms::MAX_POWER, &bms(0.90)).unwrap();
         assert_eq!(p.energy_needed, 0);
         assert_eq!(p.periods.len(), 0);
         assert!(p.feasible);

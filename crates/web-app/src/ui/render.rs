@@ -2,7 +2,7 @@ use js_sys::Date;
 use wasm_bindgen::JsValue;
 
 use charge_system_common_model::{
-    bms::{self, Bms},
+    bms::Bms,
     model::EventLogEntry,
     notification::ChargeStatus,
     plan_model::{AppliedChargingPlan, ChargingPlan},
@@ -111,9 +111,9 @@ fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) 
     let remaining = match (target, bms.current_soc().absolute()) {
         (Some(t), Some(s)) => {
             let pct = ((t - s) * 100.0).max(0.0);
-            match bms.target_soc_to_energy(bms::SoC::new_absolute(t)) {
-                Some(w) => format!("{pct:.1} % · {:.1} kWh", w as f64 / 1000.0),
-                None => format!("{pct:.1} %"),
+            match bms.target_soc_to_energy(t) {
+                Ok(w) => format!("{pct:.1} % · {:.1} kWh", w as f64 / 1000.0),
+                _ => format!("{pct:.1} %"),
             }
         }
         _ => "—".to_string(),
@@ -207,23 +207,15 @@ fn render_soc() {
     let Some((soc, target)) = state::with_state(|s| {
         s.server
             .as_ref()
-            .map(|srv| (srv.bms.current_soc().absolute(), srv.bms.target_soc))
+            .map(|srv| (srv.bms.current_soc(), srv.bms.target_soc))
     }) else {
         return;
     };
-    dom::set_text(
-        &dom::el("soc-text"),
-        &soc.map(|v| format!("{:.1} %", v * 100.0))
-            .unwrap_or_else(|| "—".to_string()),
-    );
+    dom::set_text(&dom::el("soc-text"), &format!("{soc} %"));
     let soc_fill = dom::el("soc-fill");
-    if let Some(soc) = soc {
+    if !soc.is_unknown() {
         dom::remove_class(&soc_fill, "hidden");
-        dom::set_style(
-            &soc_fill,
-            "width",
-            &format!("{}%", (soc * 100.0).clamp(0.0, 100.0)),
-        );
+        dom::set_style(&soc_fill, "width", &format!("{soc}%"));
     } else {
         dom::add_class(&soc_fill, "hidden");
     }

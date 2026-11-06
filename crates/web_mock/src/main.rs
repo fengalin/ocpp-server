@@ -27,7 +27,7 @@ use tower_http::ServiceExt;
 use tower_http::services::ServeDir;
 
 use charge_system_common_model::{
-    bms::{self, Bms},
+    bms::{self, Bms, SoC},
     meter_value::MeterValueSelection,
     model::{EventLogEntry, Ts},
     notification::{ChargeProgress, ChargeStatus, Notification},
@@ -39,12 +39,6 @@ use charge_system_web_model::model::{MAX_EVENTS, MAX_METER_VALUES, ServerState};
 // Relative to the CWD when run via `cd crates/web_mock && cargo run`.
 const STATIC_DIR: &str = "../../static";
 const BROADCAST_CAPACITY: usize = 512;
-
-/// SoC is a fraction 0–1 internally; the notification boundary (evse.rs)
-/// rounds to 3 decimals before it reaches the wire. The mock mirrors that.
-fn round_soc(soc: f32) -> f32 {
-    (soc * 1000.0).round() / 1000.0
-}
 
 // ---------------------------------------------------------------------
 // World (mirrors src/webserver/world::World)
@@ -66,7 +60,7 @@ impl World {
     fn status(&self) -> ChargeStatus {
         self.events
             .back()
-            .map(|e| e.status.clone())
+            .map(|e| e.status)
             .unwrap_or(ChargeStatus::Available)
     }
 
@@ -313,12 +307,12 @@ async fn apply_plan(
                 plan::compute(
                     req.kind,
                     Utc::now(),
-                    w.bms.current_soc().absolute().unwrap_or_default(),
                     req.target_soc.expect("validated"),
                     req.deadline.map(|t| t.to_utc()),
                     req.power_limit.expect("validated"),
                     &w.bms,
                 )
+                .unwrap()
                 .periods
             }
             _ => vec![],
@@ -453,8 +447,10 @@ async fn drive(st: AppState) {
             t += Duration::seconds(10);
             i += 1;
         }
-        w.bms.sync_current_soc(bms::SoC::Absolute(round_soc(soc)));
-        w.initial_soc = Some(0.10);
+        w.bms.update_initial_soc(0.10);
+        w.bms
+            .sync_current_soc(SoC::new_absolute(soc).round_per_100())
+            .unwrap();
         w.push_event(EventLogEntry {
             ts: Ts::from_utc(now - Duration::hours(24)),
             status: ChargeStatus::Available,
@@ -488,10 +484,11 @@ async fn drive(st: AppState) {
             let mut w = world.lock().await;
             w.bms = Bms::builder(bms::DEFAULT_CAPACITY)
                 .initial_energy(5_000)
-                .initial_soc(bms::SoC::Absolute(0.10))
-                .current_soc(bms::SoC::Absolute(0.10))
+                .initial_soc(0.10)
+                .current_soc(SoC::new_absolute(0.10))
                 .current_energy(5_000)
-                .build();
+                .build()
+                .unwrap();
             // An ASAP plan for the session (its target matches the synthetic
             // ramp) is applied before charging starts, like a user would do.
             w.bms.target_soc = Some(0.90);
@@ -500,8 +497,9 @@ async fn drive(st: AppState) {
                 power_limit: 7_000,
             };
             // Periods from the same shared plan math as the preview.
-            let periods =
-                plan::compute(PlanKind::Asap, Utc::now(), 0.10, 0.90, None, 7_000, &w.bms).periods;
+            let periods = plan::compute(PlanKind::Asap, Utc::now(), 0.90, None, 7_000, &w.bms)
+                .unwrap()
+                .periods;
             w.charging_plan = Some(AppliedChargingPlan { plan, periods });
             w.push_event(EventLogEntry {
                 ts: Ts::from_utc(Utc::now()),
@@ -535,9 +533,10 @@ async fn drive(st: AppState) {
                 };
                 {
                     let mut w = world.lock().await;
-                    let soc = round_soc(soc);
                     w.bms.update_energy(energy);
-                    w.bms.sync_current_soc(bms::SoC::Absolute(soc));
+                    w.bms
+                        .sync_current_soc(SoC::new_absolute(soc).round_per_1000())
+                        .unwrap();
                     w.push_sample(mv.clone());
                 }
                 let _ = tx.send(Notification::MeterValues(mv));
@@ -547,13 +546,13 @@ async fn drive(st: AppState) {
                 if i.is_multiple_of(5) {
                     let remaining = (((0.90 - soc) / 0.005).ceil() as u32).max(1);
                     let status = ChargeStatus::Charging(ChargeProgress {
-                        soc: round_soc(soc),
+                        soc: SoC::new_absolute(soc).round_per_1000(),
                         remaining_time: remaining,
                     });
                     let mut w = world.lock().await;
                     w.push_event(EventLogEntry {
                         ts: Ts::from_utc(Utc::now()),
-                        status: status.clone(),
+                        status,
                     });
                     let _ = tx.send(Notification::Status(status));
                 }
@@ -570,7 +569,7 @@ async fn drive(st: AppState) {
         // Finished
         {
             let mut w = world.lock().await;
-            w.bms.sync_current_soc(bms::SoC::Absolute(0.90));
+            w.bms.sync_current_soc(SoC::new_absolute(0.90)).unwrap();
             w.push_event(EventLogEntry {
                 ts: Ts::from_utc(Utc::now()),
                 status: ChargeStatus::SuspendedEv,
@@ -595,7 +594,9 @@ async fn main() {
     let (front_end_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let (cmd_tx, _cmd_rx) = mpsc::channel(8);
     let world = World {
-        bms: Bms::builder(bms::DEFAULT_CAPACITY).build(),
+        bms: Bms::builder(bms::DEFAULT_CAPACITY)
+            .build()
+            .expect("can't fail as is"),
         last_ts: Utc::now(),
         charging_plan: None,
         initial_soc: None,

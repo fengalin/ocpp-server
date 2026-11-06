@@ -94,26 +94,32 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use charge_system_common_model::{bms, notification::ChargeProgress};
+    use charge_system_common_model::{
+        bms::{self, SoC},
+        notification::ChargeProgress,
+    };
 
     fn entry(ts: i64, status: ChargeStatus) -> EventLogEntry {
         EventLogEntry { ts: Ts(ts), status }
     }
 
-    fn charging(soc: f32) -> ChargeStatus {
+    fn charging_abs(soc: f32) -> ChargeStatus {
         ChargeStatus::Charging(ChargeProgress {
-            soc,
+            soc: SoC::new_absolute(soc),
             remaining_time: 100,
         })
     }
 
     #[test]
     fn charging_progress_updates_collapse_into_first_and_last() {
-        let mut w = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
+        let mut w = World::new(
+            Utc::now(),
+            Bms::builder(bms::DEFAULT_CAPACITY).build().unwrap(),
+        );
         w.push_event(entry(1, ChargeStatus::Available));
-        w.push_event(entry(2, charging(0.2)));
-        w.push_event(entry(3, charging(0.4)));
-        w.push_event(entry(4, charging(0.6)));
+        w.push_event(entry(2, charging_abs(0.2)));
+        w.push_event(entry(3, charging_abs(0.4)));
+        w.push_event(entry(4, charging_abs(0.6)));
 
         assert_eq!(w.events.len(), 3);
         // The first entry on the switch to Charging keeps its original ts ...
@@ -122,34 +128,37 @@ mod tests {
         // ... and later updates replace the live (latest) entry only.
         let last = w.events.back().unwrap();
         assert_eq!(last.ts.0, 4);
-        assert_eq!(last.status, charging(0.6));
+        assert_eq!(last.status, charging_abs(0.6));
         // `status()` still reports the live (latest) progress.
-        assert_eq!(w.status(), charging(0.6));
+        assert_eq!(w.status(), charging_abs(0.6));
     }
 
     #[test]
     fn other_statuses_always_append() {
-        let mut w = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
-        w.push_event(entry(1, charging(0.2)));
+        let mut w = World::new(
+            Utc::now(),
+            Bms::builder(bms::DEFAULT_CAPACITY).build().unwrap(),
+        );
+        w.push_event(entry(1, charging_abs(0.2)));
         w.push_event(entry(
             2,
             ChargeStatus::SuspendedEvse(ChargeProgress {
-                soc: 0.3,
+                soc: SoC::new_absolute(0.3),
                 remaining_time: 90,
             }),
         ));
         w.push_event(entry(
             3,
             ChargeStatus::SuspendedEvse(ChargeProgress {
-                soc: 0.4,
+                soc: SoC::new_absolute(0.4),
                 remaining_time: 80,
             }),
         ));
         // A new Charging episode after a different status appends fresh, then
         // collapses into its own start + live pair.
-        w.push_event(entry(4, charging(0.5)));
-        w.push_event(entry(5, charging(0.6)));
-        w.push_event(entry(6, charging(0.7)));
+        w.push_event(entry(4, charging_abs(0.5)));
+        w.push_event(entry(5, charging_abs(0.6)));
+        w.push_event(entry(6, charging_abs(0.7)));
 
         assert_eq!(w.events.len(), 5);
         assert_eq!(
@@ -160,7 +169,10 @@ mod tests {
 
     #[test]
     fn event_log_is_capped() {
-        let mut w = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
+        let mut w = World::new(
+            Utc::now(),
+            Bms::builder(bms::DEFAULT_CAPACITY).build().unwrap(),
+        );
         for i in 0..MAX_EVENTS + 10 {
             // Alternate statuses so nothing collapses.
             let status = if i % 2 == 0 {

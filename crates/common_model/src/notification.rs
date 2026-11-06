@@ -5,7 +5,7 @@
 //! it does not speak OCPP — so the exact enum shapes here are the API the
 //! OLED app deserializes. Keep them stable.
 
-use crate::bms::Bms;
+use crate::bms::{Bms, SoC};
 use crate::meter_value::MeterValueSelection;
 use crate::plan_model::AppliedChargingPlan;
 
@@ -49,7 +49,7 @@ impl Notification {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChargeProgress {
     /// Current state of charge (fraction 0–1).
-    pub soc: f32,
+    pub soc: SoC,
     /// Seconds until the end of the active charging schedule.
     pub remaining_time: u32,
 }

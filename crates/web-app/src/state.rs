@@ -14,7 +14,7 @@ use charge_system_web_model::model::{MAX_EVENTS, ServerState};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
-use crate::dom;
+use crate::{dom, ui::now_ms};
 
 /// SSE link state, shown by the header dot: grey while connecting, green
 /// once open, red on error (the browser auto-retries in the background).
@@ -47,6 +47,29 @@ pub struct ClientState {
     /// Metrics the user has explicitly toggled (on or off). A metric in this
     /// set is never auto-enabled/hidden by the "no data in window" rule.
     pub user_toggled: Vec<&'static str>,
+}
+
+impl ClientState {
+    pub fn update_from_charge_status(&mut self, cs: ChargeStatus) {
+        if let ChargeStatus::Charging(p) | ChargeStatus::SuspendedEvse(p) = &cs {
+            if let Some(ref mut srv) = self.server
+                && let Err(err) = srv.bms.sync_current_soc(p.soc)
+            {
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "failed to sync bms {:?} with SoC {} progress: {err}",
+                    srv.bms, p.soc,
+                )));
+            }
+            // Copy out the remaining time before `cs` is moved into the log entry.
+            self.remaining_at = Some((p.remaining_time as i64, now_ms()));
+        } else {
+            self.remaining_at = None;
+        }
+
+        if let Some(ref mut srv) = self.server {
+            srv.status = cs;
+        }
+    }
 }
 
 impl Default for ClientState {
@@ -419,6 +442,8 @@ pub fn from_iso(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use charge_system_common_model::bms::SoC;
+
     use super::*;
 
     #[test]
@@ -466,9 +491,9 @@ mod tests {
         }
     }
 
-    fn charging(soc: f32) -> ChargeStatus {
+    fn charging_abs(soc: f32) -> ChargeStatus {
         ChargeStatus::Charging(charge_system_common_model::notification::ChargeProgress {
-            soc,
+            soc: SoC::new_absolute(soc),
             remaining_time: 100,
         })
     }
@@ -480,9 +505,9 @@ mod tests {
             s.events.clear();
         });
         push_event_local(entry(1, ChargeStatus::Available));
-        push_event_local(entry(2, charging(0.2)));
-        push_event_local(entry(3, charging(0.4)));
-        push_event_local(entry(4, charging(0.6)));
+        push_event_local(entry(2, charging_abs(0.2)));
+        push_event_local(entry(3, charging_abs(0.4)));
+        push_event_local(entry(4, charging_abs(0.6)));
 
         let list = with_state(|s| s.events.clone());
         assert_eq!(list.len(), 3);

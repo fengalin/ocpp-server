@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use ocpp_rs::v16::{call, enums::*};
 use tokio::sync::broadcast;
 use tracing::*;
@@ -7,10 +7,9 @@ use std::collections::VecDeque;
 
 use charge_system_common_model::notification::{self, Notification};
 use charge_system_common_model::{
-    bms::{self, Bms, SoC, SoCProgress},
+    bms::{self, Bms, SoCProgress},
     meter_value::MeterValueSelection,
-    model::Ts,
-    plan_model::{AppliedChargingPlan, ChargingPeriod, ChargingPlan},
+    plan_model::{AppliedChargingPlan, ChargingPlan},
 };
 
 use crate::{
@@ -93,7 +92,7 @@ impl Evse {
 
     /// Updates the BMS initial SoC.
     pub fn set_initial_soc(&mut self, init_soc: f32) {
-        if self.bms.update_initial_soc(SoC::new_absolute(init_soc)) {
+        if self.bms.update_initial_soc(init_soc) {
             info!(%init_soc, "## setting initial SoC");
 
             if let Some(cs) = self.charging_session.as_mut() {
@@ -108,7 +107,7 @@ impl Evse {
                 error!(%err, "error broadcasting BMS update");
             }
         } else {
-            info!(%init_soc, "## received pratically identical initial SoC => not updating");
+            warn!(%init_soc, "## not updating");
         }
     }
 
@@ -127,11 +126,17 @@ impl Evse {
         // keeps the target the user just entered (no clearing, no re-entry).
         match &charging_plan {
             ChargingPlan::Deadline { target_soc, .. } | ChargingPlan::Asap { target_soc, .. } => {
+                let target_soc = (*target_soc).clamp(0.0, 1.0);
                 info!(
-                    "applying charging plan with target SoC: {:.1}",
-                    *target_soc * 100.0
+                    "applying charging plan with target SoC: {}{:.1} %",
+                    if self.bms.current_soc().is_absolute() {
+                        ""
+                    } else {
+                        "+"
+                    },
+                    target_soc * 100.0
                 );
-                self.bms.target_soc = Some(*target_soc);
+                self.bms.target_soc = Some(target_soc);
             }
             _ => {
                 self.bms.target_soc = None;
@@ -192,7 +197,7 @@ impl Evse {
         mut schedule: ChargingSchedule,
         prev_schedule_id: Option<i32>,
     ) {
-        let periods = schedule_periods(&schedule);
+        let periods = schedule.schedule_periods();
         // Inactivate the previous schedule and persist the new one (with its
         // periods) in a single transaction.
         schedule.id = Database::get()
@@ -737,7 +742,7 @@ impl Evse {
 
         info!(
             "## session {cs} / {}{}",
-            SoCProgress::from_soc_and_cap(cs.last_soc(), self.bms.target_soc).cap(),
+            SoCProgress::from_soc_and_target(cs.last_soc(), self.bms.target_soc).target(),
             if let Some(remain_sched) = remain_sched {
                 format!(
                     ", remaining: {remain_sched}{}",
@@ -761,11 +766,8 @@ impl Evse {
             Preparing => ChargeStatus::Preparing,
             Charging | SuspendedByEvse | SoCTargetReached => {
                 let charge_progress = notification::ChargeProgress {
-                    soc: cs
-                        .last_soc()
-                        .absolute()
-                        .map_or_default(|s| (s * 1_000.0).round() / 1_000.0)
-                        .clamp(0.0, 1.0),
+                    // reduce size on wire - clients don't need the extra precision
+                    soc: cs.last_soc().round_per_1000(),
                     remaining_time: remain_sched.map_or_default(|rs| rs.duration).num_seconds()
                         as u32,
                 };
@@ -809,95 +811,5 @@ impl Evse {
 
     pub fn pop_command(&mut self) -> Option<CommandToChargingPoint> {
         self.command_queue.pop_front()
-    }
-}
-
-/// The schedule's periods as shared `ChargingPeriod`s (computed in local
-/// time, converted to `Ts` for the notification).
-fn schedule_periods(schedule: &ChargingSchedule) -> Vec<ChargingPeriod> {
-    schedule
-        .periods()
-        .filter_map(|p| {
-            let start = p
-                .start
-                .and_local_timezone(Local)
-                .earliest()?
-                .with_timezone(&Utc);
-            Some(ChargingPeriod {
-                start_at: Ts::from_utc(start),
-                duration: (p.end - p.start).num_seconds().max(0) as u64,
-                power_limit: p.limit,
-            })
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A plan whose schedule cannot be computed (here: the BMS current SoC is
-    /// relative, so the energy to add isn't) must fall back to the default
-    /// (Blocking) plan — never leave the CP unrestricted — and must keep the
-    /// target SoC this request set (what the user just entered): not clear it,
-    /// not roll it back to an older value (carried to clients by a follow-up
-    /// BmsUpdate). Constructed directly (not via `Evse::new`) so no session is
-    /// restored from the test database and can overwrite the BMS.
-    #[test]
-    fn uncomputable_plan_falls_back_to_blocking() {
-        let (tx, mut rx) = broadcast::channel(4);
-        let mut evse = Evse {
-            bms: Bms::builder(bms::DEFAULT_CAPACITY)
-                .current_soc(SoC::Relative(0.41))
-                .target_soc(0.60) // a stale value the request is about to replace
-                .build(),
-            last_known_tid: 0,
-            last_known_stop_energy: None,
-            energy_tracker: Default::default(),
-            meter_value_observer: Default::default(),
-            last_dpm: None,
-            command_queue: VecDeque::new(),
-            charging_session: None,
-            charging_schedule: None,
-            saw_finishing: false,
-            notif_tx: tx,
-        };
-
-        evse.set_charging_plan(ChargingPlan::Asap {
-            target_soc: 0.80,
-            power_limit: 7_400,
-        });
-
-        // The fallback installs the permanent (empty) schedule...
-        let sched = evse
-            .charging_schedule
-            .as_ref()
-            .expect("blocking schedule installed");
-        assert!(sched.is_empty());
-        // ...keeps the target this request set (not cleared, not rolled back
-        // to the previous 0.60)...
-        assert_eq!(evse.bms.target_soc, Some(0.80));
-        // ...and queues its profile (not a ClearChargingProfile).
-        let cmd = evse.pop_command().expect("queued command");
-        assert!(matches!(
-            cmd,
-            CommandToChargingPoint::SetChargingSchedule(_),
-        ));
-        assert_eq!(evse.command_queue.len(), 0);
-
-        // Clients get the plan notification, then a BmsUpdate carrying the kept
-        // target (they mirror the target from plan notifications).
-        let notif = rx.try_recv().expect("plan notification broadcast");
-        match &notif {
-            Notification::ChargingPlan(applied) => {
-                assert!(matches!(applied.plan, ChargingPlan::Blocking));
-            }
-            other => panic!("expected ChargingPlan, got {other:?}"),
-        }
-        let notif = rx.try_recv().expect("BmsUpdate broadcast");
-        match &notif {
-            Notification::BmsUpdate(bms) => assert_eq!(bms.target_soc, Some(0.80)),
-            other => panic!("expected BmsUpdate, got {other:?}"),
-        }
     }
 }

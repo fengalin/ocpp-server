@@ -6,7 +6,7 @@ use std::rc::Rc;
 use chrono::Timelike;
 
 use charge_system_common_model::{
-    bms,
+    bms::{self, SoC},
     model::Ts,
     notification::ChargeStatus,
     plan as plan_math,
@@ -179,7 +179,7 @@ fn plan_set_msg(text: &str, ok: bool) {
     });
 }
 
-fn plan_render_preview(p: Option<&PlanPreview>) {
+fn plan_render_preview(p: Option<PlanPreview>) {
     let el = dom::el("preview-panel");
     let Some(p) = p else {
         dom::add_class(&el, "hidden");
@@ -195,7 +195,7 @@ fn plan_render_preview(p: Option<&PlanPreview>) {
             format!(
                 "+{:.1} % → {:.1} %",
                 p.soc_delta * 100.0,
-                p.soc_result * 100.0
+                p.target_soc * 100.0
             ),
         ),
         ("Duration", state::fmt_dur(p.duration)),
@@ -262,15 +262,14 @@ fn plan_do_preview() {
         plan_set_msg("", true);
         return;
     }
-    let Some(p) = plan_local_preview(&body) else {
+    let Ok(plan) = plan_local_preview(&body).inspect_err(|err| {
         plan_render_preview(None);
-        plan_set_msg(
-            "No SoC known yet: set the initial SoC or wait for the first sample.",
-            false,
-        );
+        plan_set_msg(err, false);
+    }) else {
         return;
     };
-    plan_render_preview(Some(&p));
+
+    plan_render_preview(plan);
     plan_set_msg("", true);
 }
 
@@ -297,24 +296,14 @@ pub(crate) fn plan_schedule_preview() {
 /// server applies on `/api/bms/init_soc`, so the preview reacts to the widget
 /// instantly and the state catch-up later confirms it). Falls back to the live
 /// sample SoC when no initial SoC is known.
-fn plan_start_soc() -> Option<f32> {
+fn plan_start_soc() -> SoC {
     state::with_state(|s| {
-        let srv = s.server.as_ref()?;
-        srv.bms
-            .current_soc()
-            .absolute()
-            .or_else(|| with_ui_ref(|ui| ui.init_soc))
-    })
-}
+        let Some(srv) = s.server.as_ref() else {
+            return SoC::Unknown;
+        };
 
-/// The lowest target SoC (in integer %) a plan can be applied with: the
-/// current SoC (re-estimated from the initial SoC, or the last sample), or
-/// the initial-SoC widget value when no current SoC is known. A target below
-/// the floor is meaningless (the battery is already there), so applying is
-/// blocked; a target *at* the floor is allowed (it just does nothing).
-fn target_floor() -> Option<u32> {
-    let soc = plan_start_soc()?;
-    Some((soc * 100.0).ceil() as u32)
+        srv.bms.current_soc()
+    })
 }
 
 /// The power-limit value in W, chosen by the preset chips in the form.
@@ -394,17 +383,16 @@ fn plan_build_body() -> Option<PlanRequest> {
             kind,
             target_soc: None,
             deadline: None,
-            initial_soc: with_ui_ref(|ui| ui.init_soc),
             power_limit: None,
         }),
         PlanKind::Deadline | PlanKind::Asap => {
             let deadline_date = dom::input("deadline-date");
             let deadline_time = dom::input("deadline-time");
             let target = dom::input("target");
-            let target_soc = target.value().parse::<f64>().ok()? / 100.0;
+            let target_soc = target.value().parse::<f32>().ok()? / 100.0;
             Some(PlanRequest {
                 kind,
-                target_soc: Some(target_soc as f32),
+                target_soc: Some(target_soc),
                 deadline: match kind {
                     PlanKind::Deadline => {
                         // Missing date/time -> `None` body -> "Pick a deadline."
@@ -416,7 +404,6 @@ fn plan_build_body() -> Option<PlanRequest> {
                     }
                     _ => None,
                 },
-                initial_soc: with_ui_ref(|ui| ui.init_soc),
                 power_limit: Some(plan_power_limit()),
             })
         }
@@ -427,29 +414,28 @@ fn plan_build_body() -> Option<PlanRequest> {
 /// front end already holds the `Bms` (from `/api/state`) and the
 /// current SoC, and the server recomputes the identical preview when the plan
 /// is applied (single implementation, `charge_system_web_model::plan`).
-fn plan_local_preview(body: &PlanRequest) -> Option<PlanPreview> {
-    let cur_soc = plan_start_soc()?;
+fn plan_local_preview(body: &PlanRequest) -> Result<Option<PlanPreview>, String> {
     // The option-less kinds have nothing to preview.
     let (target_soc, power_limit) = match body.kind {
-        PlanKind::Deadline | PlanKind::Asap => (body.target_soc?, body.power_limit?),
-        PlanKind::Blocking | PlanKind::Unlimited => return None,
+        PlanKind::Deadline | PlanKind::Asap => {
+            let Some(target_and_power) = Option::zip(body.target_soc, body.power_limit) else {
+                return Err("Missing target SoC and/or power limit".to_string());
+            };
+
+            target_and_power
+        }
+        PlanKind::Blocking | PlanKind::Unlimited => return Ok(None),
     };
 
     state::with_state(|s| {
         s.server.as_ref().map(|srv| {
             let now = chrono::Utc::now();
             let deadline = body.deadline.map(|t| t.to_utc());
-            plan_math::compute(
-                body.kind,
-                now,
-                cur_soc,
-                target_soc,
-                deadline,
-                power_limit,
-                &srv.bms,
-            )
+            plan_math::compute(body.kind, now, target_soc, deadline, power_limit, &srv.bms)
+                .map(Some)
         })
     })
+    .unwrap_or_else(|| Err("Waiting for server synchronisation.".to_string()))
 }
 
 /// Update the target-SoC label and chip highlight from the current field
@@ -465,19 +451,22 @@ fn sync_target_ui() {
     chip_sync("target-chips", &pct.to_string());
 }
 
-fn init_soc_set_ui(pct: Option<u32>, note: &str) {
+fn init_soc_set_ui(init_soc: Option<f32>, note: &str) {
     let input = dom::input("init-soc");
-    // `None` = nothing known: leave the field and chip highlight untouched
-    // (writing a value like `0` would show a number the server never reported).
-    if let Some(p) = pct {
-        input.set_value(&p.to_string());
-        chip_sync("init-soc-chips", &p.to_string());
+
+    let init_soc_pct = init_soc.map(|s| (s * 100.0).round() as u8);
+
+    if let Some(init_soc_pct) = init_soc_pct {
+        input.set_value(&init_soc_pct.to_string());
+        chip_sync("init-soc-chips", &init_soc_pct.to_string());
     }
+
     dom::set_text(
         &dom::el("init-soc-val"),
-        &match pct {
-            Some(p) => format!("{p} %"),
-            None => "… (unknown)".into(),
+        &if let Some(init_soc_pct) = init_soc_pct {
+            format!("{init_soc_pct} %")
+        } else {
+            "… (unknown)".into()
         },
     );
     dom::set_text(&dom::el("init-soc-note"), note);
@@ -498,19 +487,15 @@ pub(crate) fn init_soc_sync() {
         return;
     }
 
-    match state::with_state(|s| {
-        s.server
-            .as_ref()
-            .map(|srv| srv.bms.initial_soc().absolute())
-    }) {
-        Some(server_seed) => {
-            let seed = server_seed.or_else(|| with_ui_ref(|ui| ui.init_soc));
-            with_ui(|ui| ui.init_soc = seed);
-            let note = match seed {
-                Some(_) => "Last known SoC at the start of the session.",
-                None => "No SoC known yet. Set it so the plan math can start from a real value.",
+    match state::with_state(|s| s.server.as_ref().map(|srv| srv.bms.initial_soc())) {
+        Some(server_init_soc) => {
+            with_ui(|ui| ui.init_soc = server_init_soc);
+            let note = if server_init_soc.is_none() {
+                "Uknown init SoC."
+            } else {
+                ""
             };
-            init_soc_set_ui(seed.map(|s| (s * 100.0).round() as u32), note);
+            init_soc_set_ui(server_init_soc, note);
         }
         None => init_soc_set_ui(None, ""),
     }
@@ -736,6 +721,7 @@ pub(crate) fn init_plan(on_change: Rc<dyn Fn() + 'static>) {
             (target_local_sync)();
         }
     });
+
     // Init-SoC: per-keystroke updates stay local (the preview is debounced,
     // client-side); the value is pushed to the server once, when editing
     // finishes (`change` = blur or Enter) or a preset chip is tapped. An
@@ -748,6 +734,7 @@ pub(crate) fn init_plan(on_change: Rc<dyn Fn() + 'static>) {
             return false;
         };
         with_ui(|ui| ui.init_soc = Some(pct as f32 / 100.0));
+
         true
     };
 
@@ -789,9 +776,12 @@ pub(crate) fn init_plan(on_change: Rc<dyn Fn() + 'static>) {
         // (nothing to send in that case).
         if (init_soc_local_sync)() {
             (init_soc_commit)();
-        } else if let Some(pct) = with_ui_ref(|ui| ui.init_soc).map(|s| (s * 100.0).round() as u32)
-        {
-            dom::input("init-soc").set_value(&pct.to_string());
+        } else {
+            dom::input("init-soc").set_value(
+                &with_ui_ref(|ui| ui.init_soc.unwrap_or_default() * 100.0)
+                    .round()
+                    .to_string(),
+            );
             (init_soc_local_sync)();
         }
     });
@@ -863,24 +853,22 @@ pub(crate) fn init_plan(on_change: Rc<dyn Fn() + 'static>) {
                 return;
             };
             if matches!(body.kind, PlanKind::Deadline | PlanKind::Asap) {
-                if plan_start_soc().is_none() {
-                    plan_set_msg(
-                        "No SoC known yet: set the initial SoC or wait for the first sample.",
-                        false,
-                    );
+                let start_soc = plan_start_soc();
+                let Some(raw_soc) = start_soc.inner() else {
+                    plan_set_msg("No SoC known yet: set the initial SoC.", false);
                     return;
-                }
-                let target_pct = body.target_soc.expect("set above") as f64 * 100.0;
-                if let Some(floor) = target_floor()
-                    && target_pct < floor as f64
-                {
+                };
+
+                let target = body.target_soc.expect("set above");
+                if target <= raw_soc {
                     plan_set_msg(
-                        &format!("Target SoC must be ≥ current SoC ({floor} %)."),
+                        &format!("Target SoC must be > current SoC ({start_soc} %)."),
                         false,
                     );
                     return;
                 }
             }
+
             // Replacing a plan that actually charges (deadline / ASAP) needs
             // an explicit confirm.
             let active = state::with_state(|s| {

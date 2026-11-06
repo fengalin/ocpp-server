@@ -4,8 +4,9 @@ use std::{
 };
 
 use charge_system_common_model::{
-    bms::{self, Bms, SoC},
-    plan_model::ChargingPlan,
+    bms::{self, Bms},
+    model::Ts,
+    plan_model::{ChargingPeriod, ChargingPlan},
 };
 use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use log::{debug, info, warn};
@@ -129,6 +130,7 @@ impl ChargingSchedule {
     pub fn try_from_charging_plan(
         plan: &ChargingPlan,
         bms: &Bms,
+        // FIXME impl Error
     ) -> Result<Option<ChargingSchedule>, String> {
         // FIXME make off peak period configurable
         use ChargingPlan::*;
@@ -177,17 +179,14 @@ impl ChargingSchedule {
                 target_soc,
                 power_limit,
             } => {
-                // FIXME target_soc_to_energy: is flexible re. whether init SoC is known
-                // or not (Absolute / Relative). Added complexity is probably not worth it
-                // and we could require user to specify init SoC all the time
-                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
-                else {
-                    return Err(format!(
-                        "couldn't compute energy to add for {} to {}",
+                let energy_to_add = bms.target_soc_to_energy(*target_soc).map_err(|err| {
+                    format!(
+                        "couldn't compute energy to add for {} to {}: {err}",
                         bms.current_soc(),
                         bms.target_soc()
-                    ));
-                };
+                            .map_or('—'.to_string(), |t| format!("{:0.0}", t * 100.0)),
+                    )
+                })?;
 
                 let available_power = power_limit.saturating_sub(bms::STATIC_LOSS);
                 // FIXME would also need a ponderation in case of variations due to DPM
@@ -206,7 +205,8 @@ impl ChargingSchedule {
                     \tenergy needed: {:.3} kWh (loss {:.1} %)\n\
                     \tduration {} mn",
                     bms.current_soc(),
-                    bms.target_soc(),
+                    bms.target_soc()
+                        .map_or('—'.to_string(), |t| format!("{:0.0}", t * 100.0)),
                     energy_to_add as f32 / 1_000.0,
                     energy_needed as f32 / 1_000.0,
                     (1.0 - (energy_to_add as f32 / energy_needed as f32)) * 100.0,
@@ -246,14 +246,14 @@ impl ChargingSchedule {
                 target_soc,
                 power_limit,
             } => {
-                let Some(energy_to_add) = bms.target_soc_to_energy(SoC::Absolute(*target_soc))
-                else {
-                    return Err(format!(
-                        "couldn't compute energy to add for {} to {}",
+                let energy_to_add = bms.target_soc_to_energy(*target_soc).map_err(|err| {
+                    format!(
+                        "couldn't compute energy to add for {} to {}: {err}",
                         bms.current_soc(),
-                        bms.target_soc(),
-                    ));
-                };
+                        bms.target_soc()
+                            .map_or('—'.to_string(), |t| format!("{:0.0}", t * 100.0)),
+                    )
+                })?;
 
                 let available_power = power_limit.saturating_sub(bms::STATIC_LOSS);
                 let duration_s = energy_to_add * 60 * 60 / available_power;
@@ -333,6 +333,25 @@ impl ChargingSchedule {
         }
 
         rem
+    }
+
+    /// The schedule's periods as shared `ChargingPeriod`s (computed in local
+    /// time, converted to `Ts` for the notification).
+    pub fn schedule_periods(&self) -> Vec<ChargingPeriod> {
+        self.periods()
+            .filter_map(|p| {
+                let start = p
+                    .start
+                    .and_local_timezone(Local)
+                    .earliest()?
+                    .with_timezone(&Utc);
+                Some(ChargingPeriod {
+                    start_at: Ts::from_utc(start),
+                    duration: (p.end - p.start).num_seconds().max(0) as u64,
+                    power_limit: p.limit,
+                })
+            })
+            .collect()
     }
 }
 
@@ -969,7 +988,7 @@ mod tests {
 
     #[test]
     pub fn deadline() {
-        use charge_system_common_model::bms::{self, SoC};
+        use charge_system_common_model::bms;
 
         crate::tests::init();
 
@@ -988,7 +1007,8 @@ mod tests {
         // unknown initial SoC
         let bms = Bms::builder(bms::DEFAULT_CAPACITY)
             .target_soc(TARGET_SOC)
-            .build();
+            .build()
+            .unwrap();
         let plan = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
             target_soc: TARGET_SOC,
@@ -998,9 +1018,10 @@ mod tests {
 
         // known initial SoC, can start today
         let bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(INITIAL_SOC))
+            .initial_soc(INITIAL_SOC)
             .target_soc(TARGET_SOC)
-            .build();
+            .build()
+            .unwrap();
         let plan = ChargingPlan::Deadline {
             deadline: end_time_can_start_today.time(),
             target_soc: TARGET_SOC,
@@ -1022,9 +1043,10 @@ mod tests {
 
         // known initial SOC, can't start today
         let bms = Bms::builder(bms::DEFAULT_CAPACITY)
-            .initial_soc(SoC::Absolute(INITIAL_SOC))
+            .initial_soc(INITIAL_SOC)
             .target_soc(TARGET_SOC)
-            .build();
+            .build()
+            .unwrap();
         let plan = ChargingPlan::Deadline {
             deadline: end_time_can_not_start_today.time(),
             target_soc: TARGET_SOC,

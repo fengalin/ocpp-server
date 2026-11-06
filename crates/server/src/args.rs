@@ -34,6 +34,8 @@ pub struct Args {
 
 impl From<&Args> for Bms {
     fn from(args: &Args) -> Self {
-        Bms::builder(args.battery_capacity).build()
+        Bms::builder(args.battery_capacity)
+            .build()
+            .expect("can't fail as is")
     }
 }

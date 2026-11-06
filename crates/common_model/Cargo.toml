@@ -15,4 +15,5 @@ chrono = { version = "0.4.45", features = ["serde"] }
 ocpp_rs = { version = "0.4.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2.0.21"
 tracing = "0.1"
