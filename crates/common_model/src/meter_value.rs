@@ -53,7 +53,7 @@ impl std::fmt::Display for MeterValueSelection {
             .map_or(String::from("-"), |v| format!("{v:.0} °C"));
         f.write_fmt(format_args!(
             "ts: {}, energy: {}, power: {}, L1: {}, temp.: {}",
-            self.ts.to_utc(),
+            self.ts.to_utc().with_timezone(&chrono::Local),
             energy,
             power,
             voltage,

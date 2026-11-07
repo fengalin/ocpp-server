@@ -1,9 +1,8 @@
-use anyhow::bail;
 use clap::Parser;
 use log::*;
 use tokio::sync::{broadcast, mpsc};
 
-use charge_system_common_model::bms::{self, Bms};
+use charge_system_common_model::bms::Bms;
 
 mod args;
 use args::Args;
@@ -20,7 +19,7 @@ pub mod measurements;
 mod ocpp;
 use ocpp::{CommandSender, CommandToChargingPoint, OcppInterface};
 pub mod schedule;
-pub use schedule::{ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState};
+pub use schedule::{ChargingSchedule, ChargingScheduleState};
 pub mod unix_socket;
 pub use unix_socket::UnixSocketNotifier;
 pub mod webserver;
@@ -50,49 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-
-    let mut bms = Bms::from(&args);
-    info!("User defined BMS:\n{bms}");
-
-    {
-        let db = Database::get();
-
-        match db.check_last_charging_session(&mut bms) {
-            Ok(Some(session)) => {
-                info!("last known session:\n{session}");
-                if !session.is_complete() {
-                    info!("consolidated BMS:\n{bms}");
-                }
-            }
-            Ok(None) => info!("no known charging session"),
-            Err(err) => {
-                bail!("failed to query last session: {err}");
-            }
-        }
-
-        match db.get_active_charging_schedule() {
-            Ok(Some(schedule)) => {
-                info!(
-                    "active charging schedule:\n{schedule}{}",
-                    if !schedule.is_empty() {
-                        format!(
-                            "\nremaining: {}",
-                            schedule
-                                .remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS)
-                        )
-                    } else {
-                        "".to_string()
-                    }
-                );
-            }
-            Ok(None) => {
-                info!("no active charging schedule");
-            }
-            Err(err) => {
-                bail!("failed to query active charging schedule: {err}");
-            }
-        }
-    }
+    let bms = Bms::from(&args);
 
     // The shared notification channel fans out to the unix-socket notifier,
     // the web server (recording task + one SSE subscriber per connection) and

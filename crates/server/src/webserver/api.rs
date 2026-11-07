@@ -9,7 +9,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Local, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use futures::stream;
 use serde::Deserialize;
 use tower_http::ServiceExt;
@@ -186,10 +186,8 @@ fn evse_plan(req: &PlanRequest, now: DateTime<Utc>) -> Result<ChargingPlan, ApiE
                     "deadline must be within the next 48 h",
                 ));
             }
-            let deadline = d.to_utc().with_timezone(&Local);
             Ok(ChargingPlan::Deadline {
-                deadline: NaiveTime::from_hms_opt(deadline.hour(), deadline.minute(), 0)
-                    .expect("hour/minute of a valid DateTime are a valid time of day"),
+                deadline: d.to_utc().into(),
                 target_soc,
                 power_limit,
             })

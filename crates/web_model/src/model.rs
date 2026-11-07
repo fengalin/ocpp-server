@@ -59,8 +59,5 @@ pub struct ServerState {
     pub ts: Ts,
     pub bms: Bms,
     pub status: ChargeStatus,
-    /// The plan currently in effect on the EVSE (or `None`), with its
-    /// computed schedule, as notified by the server
-    /// (`Notification::ChargingPlan`).
-    pub charging_plan: Option<AppliedChargingPlan>,
+    pub charging_plan: AppliedChargingPlan,
 }

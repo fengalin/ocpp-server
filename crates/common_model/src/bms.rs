@@ -64,7 +64,11 @@ impl Bms {
         }
     }
 
-    // For mocking purposes only
+    pub fn target_soc_str(&self) -> String {
+        self.target_soc
+            .map_or('—'.to_string(), |t| format!("{:.0}", t * 100.0))
+    }
+
     pub fn sync_current_soc(&mut self, new_cur_soc: SoC) -> Result<(), BmsError> {
         let soc_delta = match (self.initial_soc, new_cur_soc) {
             (Some(init), SoC::Abs(cur)) => Some((cur - init).clamp(0.0, 1.0)),
@@ -174,6 +178,13 @@ impl Bms {
         self.current_energy = Some(cur_energy);
 
         debug!(cur_soc = %self.current_soc(), cur_energy, "updated BMS");
+    }
+
+    /// Resets the BMS, getting it ready for a new charging session
+    pub fn reset(&mut self) {
+        self.initial_energy = self.current_energy;
+        self.initial_soc = None;
+        self.target_soc = None;
     }
 
     pub fn soc_progress(&self) -> SoCProgress {

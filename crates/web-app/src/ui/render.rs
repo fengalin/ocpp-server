@@ -78,17 +78,6 @@ pub(crate) fn fmt_range(start_ms: i64, end_ms: i64) -> String {
     format!("{} → {}", fmt_when(start_ms), end)
 }
 
-pub(crate) fn plan_name(p: &ChargingPlan) -> &'static str {
-    match p {
-        ChargingPlan::Asap { .. } => "ASAP",
-        ChargingPlan::Deadline { .. } => "deadline",
-        ChargingPlan::OffPeakToday { .. } => "off-peak (today)",
-        ChargingPlan::OffPeakTomorrow { .. } => "off-peak (tomorrow)",
-        ChargingPlan::Blocking => "blocking",
-        ChargingPlan::Unlimited => "unlimited",
-    }
-}
-
 fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) -> String {
     let plan = &applied.plan;
     // Blocking has no schedule, target or remaining time — the card body is
@@ -97,11 +86,11 @@ fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) 
     if matches!(plan, ChargingPlan::Blocking) {
         return format!(
             "<div class=\"kv\"><span>Plan</span><b>{}</b></div>",
-            plan_name(plan),
+            plan.kind()
         );
     }
     let schedule_txt = match (applied.periods.first(), applied.end()) {
-        (Some(first), Some(end)) => fmt_range(first.start_at.0, end.0),
+        (Some(first), Some(end)) => fmt_range(first.start.0, end.0),
         _ => "—".to_string(),
     };
     let target = plan.target_soc();
@@ -124,7 +113,7 @@ fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) 
          <div class=\"kv\"><span>Target</span><b>{target_txt}</b></div>\
          <div class=\"kv\"><span>Remaining</span><b>{remaining}</b></div>\
          <div class=\"kv\"><span>Remaining time</span><b id=\"{remaining_id}\">—</b></div>",
-        plan_name(plan),
+        plan.kind(),
     )
 }
 
@@ -286,16 +275,15 @@ fn render_plan_card() {
     // are static elements; only the body is re-rendered.
     let card = state::with_state(|s| {
         let srv = s.server.as_ref()?;
-        let applied = srv.charging_plan.as_ref()?;
         // The stop button only makes sense for plans that can actually be
         // stopped (deadline / ASAP): Blocking is already the default,
         // and a missing plan (unlimited) hides the whole card.
         let stoppable = matches!(
-            &applied.plan,
+            &srv.charging_plan.plan,
             ChargingPlan::Deadline { .. } | ChargingPlan::Asap { .. }
         );
         Some((
-            plan_card_html(applied, &srv.bms, "plan-remaining"),
+            plan_card_html(&srv.charging_plan, &srv.bms, "plan-remaining"),
             stoppable,
         ))
     });

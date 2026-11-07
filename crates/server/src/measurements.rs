@@ -134,9 +134,9 @@ impl cmp::PartialEq for DpmSelection {
 impl fmt::Display for DpmSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
-            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, voltage: {} V",
+            "ts: {}, energy: {:.3} kWh, power: {:.3} kW, L1: {} V",
             self.timestamp.map_or_else(
-                || "invalid".to_string(),
+                || "—".to_string(),
                 |ts| ts.with_timezone(&Local).to_string()
             ),
             self.energy.map_or(f64::NAN, |v| v as f64 / 1_000.0),
