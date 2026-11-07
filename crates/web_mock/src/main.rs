@@ -19,7 +19,7 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use chrono::{DateTime, Duration, Local, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures::stream;
 use serde::Deserialize;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -47,7 +47,7 @@ const BROADCAST_CAPACITY: usize = 512;
 struct World {
     bms: Bms,
     last_ts: DateTime<Utc>,
-    charging_plan: Option<AppliedChargingPlan>,
+    charging_plan: AppliedChargingPlan,
     initial_soc: Option<f32>,
     energy: u64,
     metrics: VecDeque<MeterValueSelection>,
@@ -246,19 +246,11 @@ async fn get_events(State(st): State<AppState>, Query(_q): Query<EventsQuery>) -
 /// Mirror of the server's `evse_plan`: web plan request -> EVSE plan model.
 fn evse_plan(req: &charge_system_web_model::model::PlanRequest) -> ChargingPlan {
     match req.kind {
-        PlanKind::Deadline => {
-            let deadline = req
-                .deadline
-                .expect("validated")
-                .to_utc()
-                .with_timezone(&Local);
-            ChargingPlan::Deadline {
-                deadline: NaiveTime::from_hms_opt(deadline.hour(), deadline.minute(), 0)
-                    .expect("valid time of day"),
-                target_soc: req.target_soc.expect("validated"),
-                power_limit: req.power_limit.expect("validated"),
-            }
-        }
+        PlanKind::Deadline => ChargingPlan::Deadline {
+            deadline: req.deadline.expect("validated"),
+            target_soc: req.target_soc.expect("validated"),
+            power_limit: req.power_limit.expect("validated"),
+        },
         PlanKind::Asap => ChargingPlan::Asap {
             target_soc: req.target_soc.expect("validated"),
             power_limit: req.power_limit.expect("validated"),
@@ -282,7 +274,7 @@ async fn apply_plan(
             .as_ref()
             .ok_or_else(|| bad_request("target_soc is required for this plan kind"))?;
         // `!(0 < t && t <= 1)` also rejects NaN.
-        if !(0.0 < target_soc && target_soc <= 1.0) {
+        if !(0.0..=1.0).contains(&target_soc) {
             return Err(bad_request("target_soc must be in (0, 1]"));
         }
         let power_limit = req.power_limit.unwrap_or(0);
@@ -320,7 +312,7 @@ async fn apply_plan(
         let applied = AppliedChargingPlan { plan, periods };
         // `Unlimited` means "no plan in effect", like the server's world; the
         // BMS target mirrors the active plan (like the server's EVSE).
-        w.charging_plan = (!matches!(plan, ChargingPlan::Unlimited)).then(|| applied.clone());
+        w.charging_plan = applied.clone();
         w.bms.target_soc = applied.plan.target_soc();
         applied
     };
@@ -339,7 +331,7 @@ async fn stop_plan(State(st): State<AppState>) -> Json<serde_json::Value> {
         periods: vec![],
     };
     let mut w = st.world.lock().await;
-    w.charging_plan = Some(applied.clone());
+    w.charging_plan = applied.clone();
     w.bms.target_soc = None;
     drop(w);
     let _ = st.front_end_tx.send(Notification::ChargingPlan(applied));
@@ -469,7 +461,7 @@ async fn drive(st: AppState) {
         };
         {
             let mut w = world.lock().await;
-            w.charging_plan = Some(applied.clone());
+            w.charging_plan = applied.clone();
             w.push_event(EventLogEntry {
                 ts: Ts::from_utc(Utc::now()),
                 status: ChargeStatus::Available,
@@ -500,7 +492,7 @@ async fn drive(st: AppState) {
             let periods = plan::compute(PlanKind::Asap, Utc::now(), 0.90, None, 7_000, &w.bms)
                 .unwrap()
                 .periods;
-            w.charging_plan = Some(AppliedChargingPlan { plan, periods });
+            w.charging_plan = AppliedChargingPlan { plan, periods };
             w.push_event(EventLogEntry {
                 ts: Ts::from_utc(Utc::now()),
                 status: ChargeStatus::Preparing,
@@ -509,9 +501,7 @@ async fn drive(st: AppState) {
             // energy) — broadcast it so session-energy bookkeeping is correct.
             let _ = tx.send(Notification::BmsUpdate(w.bms.clone()));
             let _ = tx.send(Notification::Status(ChargeStatus::Preparing));
-            let _ = tx.send(Notification::ChargingPlan(
-                w.charging_plan.clone().expect("set above"),
-            ));
+            let _ = tx.send(Notification::ChargingPlan(w.charging_plan.clone()));
         }
         sleep(StdDuration::from_secs(2)).await;
 
@@ -598,7 +588,10 @@ async fn main() {
             .build()
             .expect("can't fail as is"),
         last_ts: Utc::now(),
-        charging_plan: None,
+        charging_plan: AppliedChargingPlan {
+            plan: ChargingPlan::Unlimited,
+            periods: vec![],
+        },
         initial_soc: None,
         energy: 0,
         metrics: VecDeque::new(),

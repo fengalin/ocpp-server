@@ -11,7 +11,6 @@ use charge_system_common_model::{
     bms::{self, Bms},
     model::{EventLogEntry, Ts},
     notification::{ChargeStatus, Notification},
-    plan_model::ChargingPlan,
 };
 
 use crate::CommandSender;
@@ -53,7 +52,7 @@ impl AppState {
             match notif_rx.recv().await {
                 Ok(notif) => {
                     debug!("notif {notif:?}");
-                    self.record(&notif).await;
+                    self.record(notif).await;
                 }
                 // A lag just means a few events were skipped: clients resync from
                 // the REST snapshot on demand, so keep recording rather than
@@ -71,7 +70,7 @@ impl AppState {
     /// Record a notification as it flows by, keeping `world` (and therefore
     /// `/api/state`, `/api/metrics`, `/api/events`) up to date. No relay: SSE
     /// clients subscribe to the channel directly.
-    pub async fn record(&self, notif: &Notification) {
+    pub async fn record(&self, notif: Notification) {
         match notif {
             Notification::BmsUpdate(bms) => {
                 let mut world = self.world.lock().await;
@@ -104,25 +103,22 @@ impl AppState {
 
                 world.push_event(EventLogEntry {
                     ts: Ts::from_utc(Utc::now()),
-                    status: *status,
+                    status,
                 });
             }
             Notification::Connection(_) => (),
             Notification::ChargingPlan(applied) => {
                 let mut world = self.world.lock().await;
-                // `Unlimited` means no plan is in effect (the charging point's
-                // charging is unrestricted); every other variant — including
-                // the default post-session `Blocking` — is the plan now active
-                // on the EVSE.
-                world.charging_plan = match applied.plan {
-                    ChargingPlan::Unlimited => None,
-                    _ => Some(applied.clone()),
-                };
                 // The plan's target SoC *is* the EVSE's BMS target: mirror it
                 // onto the world BMS (plans without a charging target clear
                 // any stale value — the EVSE no longer sends a separate
                 // BmsUpdate on the plan path).
                 world.bms.target_soc = applied.plan.target_soc();
+                // `Unlimited` means no plan is in effect (the charging point's
+                // charging is unrestricted); every other variant — including
+                // the default post-session `Blocking` — is the plan now active
+                // on the EVSE.
+                world.charging_plan = applied;
             }
         }
     }

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use charge_system_common_model::notification::{self, Notification};
 use charge_system_common_model::{
-    bms::{self, Bms, SoCProgress},
+    bms::{self, Bms},
     meter_value::MeterValueSelection,
     plan_model::{AppliedChargingPlan, ChargingPlan},
 };
@@ -27,7 +27,7 @@ pub struct Evse {
     last_dpm: Option<DpmSelection>,
     command_queue: VecDeque<CommandToChargingPoint>,
     charging_session: Option<ChargingSession>,
-    charging_schedule: Option<ChargingSchedule>,
+    charging_schedule: ChargingSchedule,
     /// The last `StatusNotification` had status `Finishing`: on the next
     /// `Available`, apply the default plan (see the status handler below).
     saw_finishing: bool,
@@ -36,14 +36,38 @@ pub struct Evse {
 
 impl Evse {
     pub fn new(mut bms: Bms, notif_tx: broadcast::Sender<Notification>) -> Self {
-        let (last_charging_session, mut last_charging_schedule) = {
+        let (last_charging_session, last_charging_sched_res) = {
             let db = Database::get();
             (
                 db.get_last_charging_session(&mut bms)
                     .expect("valid db interface"),
-                db.get_active_charging_schedule()
-                    .expect("valid db interface"),
+                db.get_last_charging_schedule(),
             )
+        };
+
+        let charging_schedule = match last_charging_sched_res {
+            Ok(mut charging_schedule) => {
+                if !charging_schedule.is_active() {
+                    warn!("Last charging schedule is inactive => will set a blocking plan");
+                    charging_schedule = ChargingSchedule::new_blocking_active();
+                    Database::get()
+                        .insert_charging_schedule(&mut charging_schedule)
+                        .expect("persist Blocking Plan");
+                } else {
+                    bms.target_soc = charging_schedule.plan.target_soc();
+                }
+
+                charging_schedule
+            }
+            Err(err) => {
+                error!(%err, "Error retrieving last charging schedule => will set a blocking plan");
+                let mut charging_schedule = ChargingSchedule::new_blocking_active();
+                Database::get()
+                    .insert_charging_schedule(&mut charging_schedule)
+                    .expect("persist Blocking Plan");
+
+                charging_schedule
+            }
         };
 
         let mut this = Evse {
@@ -55,7 +79,7 @@ impl Evse {
             last_dpm: None,
             command_queue: VecDeque::new(),
             charging_session: None,
-            charging_schedule: None,
+            charging_schedule,
             saw_finishing: false,
             notif_tx,
         };
@@ -63,6 +87,7 @@ impl Evse {
         if let Some(ref cs) = last_charging_session {
             this.last_known_tid = cs.transaction_id();
 
+            info!(session = %cs, "last known session");
             if cs.is_complete() {
                 this.last_known_stop_energy = Some(cs.last_energy());
             } else {
@@ -71,21 +96,15 @@ impl Evse {
 
                 this.charging_session = last_charging_session;
             }
+        } else {
+            info!("no known charging session");
         }
 
-        if let Some(schedule) = last_charging_schedule.take()
-            && schedule.is_active()
-        {
-            this.charging_schedule = Some(schedule);
-        }
+        info!(schedule = %this.charging_schedule, "charging schedule");
+        info!(bms = %this.bms, "BMS");
 
-        // FIXME also notify charging schedule & details about the session
-        if let Err(err) = this
-            .notif_tx
-            .send(Notification::BmsUpdate(this.bms.clone()))
-        {
-            error!(%err, "error broadcasting BMS update");
-        }
+        this.notify_charging_plan(this.charging_schedule.get_applied_plan());
+        this.broadcast_bms_update();
 
         this
     }
@@ -99,67 +118,34 @@ impl Evse {
                 cs.apply_bms_updates(&Database::get(), &mut self.bms);
             }
 
-            info!(bms = %self.bms, "## broadcasting BMS update");
-            if let Err(err) = self
-                .notif_tx
-                .send(Notification::BmsUpdate(self.bms.clone()))
-            {
-                error!(%err, "error broadcasting BMS update");
-            }
+            self.broadcast_bms_update();
         } else {
             warn!(%init_soc, "## not updating");
         }
     }
 
-    pub fn set_charging_plan(&mut self, charging_plan: ChargingPlan) {
-        // The previous schedule is inactivated together with the insert of
-        // the new one (see `apply_computed_schedule`), or on its own for the
-        // unlimited plan — either way exactly once.
-        let prev_schedule = self.charging_schedule.take();
-        let prev_schedule_id = prev_schedule.as_ref().map(|s| s.id);
-
-        // The BMS target SoC mirrors the requested plan: plans with a charging
-        // target set it (the web app and the webserver's world get it through
-        // the ChargingPlan notification below — no separate BmsUpdate on this
-        // path), plans without one drop any stale value. The install paths
-        // never touch it, so a computation failure that ends up on Blocking
-        // keeps the target the user just entered (no clearing, no re-entry).
-        match &charging_plan {
-            ChargingPlan::Deadline { target_soc, .. } | ChargingPlan::Asap { target_soc, .. } => {
-                let target_soc = (*target_soc).clamp(0.0, 1.0);
-                info!(
-                    "applying charging plan with target SoC: {}{:.1} %",
-                    if self.bms.current_soc().is_absolute() {
-                        ""
-                    } else {
-                        "+"
-                    },
-                    target_soc * 100.0
-                );
-                self.bms.target_soc = Some(target_soc);
-            }
-            _ => {
-                self.bms.target_soc = None;
-            }
+    pub fn broadcast_bms_update(&self) {
+        info!(bms = %self.bms, "## broadcasting BMS update");
+        if let Err(err) = self
+            .notif_tx
+            .send(Notification::BmsUpdate(self.bms.clone()))
+        {
+            error!(%err, "error broadcasting BMS update");
         }
+    }
 
-        match ChargingSchedule::try_from_charging_plan(&charging_plan, &self.bms) {
-            Ok(Some(schedule)) => {
-                self.apply_computed_schedule(charging_plan, schedule, prev_schedule_id)
-            }
-            // An explicit `Unlimited` plan clears any profile installed on the
-            // CP (unrestricted charging).
-            Ok(None) => {
-                info!("## applying unlimited plan (no schedule)");
-                if let Some(mut prev) = prev_schedule {
-                    prev.inactivate();
-                }
-                self.command_queue
-                    .push_back(CommandToChargingPoint::ClearChargingProfile);
-                self.notify_charging_plan(AppliedChargingPlan {
-                    plan: charging_plan,
-                    periods: vec![],
-                });
+    pub fn set_charging_plan(&mut self, charging_plan: ChargingPlan) {
+        self.bms.target_soc = charging_plan.target_soc();
+        info!(
+            plan = %charging_plan,
+            cur_soc = %self.bms.current_soc(),
+            "computing charging plan",
+        );
+
+        match ChargingSchedule::try_from_charging_plan(charging_plan, &self.bms) {
+            Ok(schedule) => {
+                self.charging_schedule = schedule;
+                self.commit_charging_schedule()
             }
             // Any other plan whose schedule couldn't be computed must NOT leave
             // the CP unrestricted: install the default (Blocking) plan instead.
@@ -168,20 +154,8 @@ impl Evse {
                     "## error computing charging schedule for {charging_plan:?}; \
                     applying the default (blocking) plan: {err}"
                 );
-                self.apply_computed_schedule(
-                    ChargingPlan::Blocking,
-                    ChargingSchedule::new_blocking(),
-                    prev_schedule_id,
-                );
-                // Clients mirror the target from plan notifications (the one
-                // above would clear it for Blocking): carry the kept value in a
-                // follow-up BmsUpdate.
-                if let Err(err) = self
-                    .notif_tx
-                    .send(Notification::BmsUpdate(self.bms.clone()))
-                {
-                    error!("error broadcasting BMS update: {err}");
-                }
+                self.charging_schedule = ChargingSchedule::new_blocking_active();
+                self.commit_charging_schedule();
             }
         }
     }
@@ -191,22 +165,25 @@ impl Evse {
     /// computed schedule. The caller inactivated the previous schedule and
     /// mirrored the BMS target (the Deadline/Asap variants carry it in the
     /// notification, so no BmsUpdate is needed here).
-    fn apply_computed_schedule(
-        &mut self,
-        plan: ChargingPlan,
-        mut schedule: ChargingSchedule,
-        prev_schedule_id: Option<i32>,
-    ) {
-        let periods = schedule.schedule_periods();
-        // Inactivate the previous schedule and persist the new one (with its
-        // periods) in a single transaction.
-        schedule.id = Database::get()
-            .replace_charging_schedule(prev_schedule_id, &schedule)
+    fn commit_charging_schedule(&mut self) {
+        Database::get()
+            .insert_charging_schedule(&mut self.charging_schedule)
             .expect("persist charging schedule");
-        self.charging_schedule = Some(schedule.clone());
-        self.command_queue
-            .push_back(CommandToChargingPoint::SetChargingSchedule(schedule));
-        self.notify_charging_plan(AppliedChargingPlan { plan, periods });
+
+        if self.charging_schedule.plan.is_unlimited() {
+            warn!("applying unlimited plan");
+            self.command_queue
+                .push_back(CommandToChargingPoint::ClearChargingProfile);
+        } else {
+            info!(plan = %self.charging_schedule.plan.kind(), "applying plan");
+            self.command_queue
+                .push_back(CommandToChargingPoint::SetChargingSchedule(
+                    self.charging_schedule.clone(),
+                ));
+            self.bms.target_soc = self.charging_schedule.plan.target_soc();
+        }
+
+        self.notify_charging_plan(self.charging_schedule.get_applied_plan());
     }
 
     /// Broadcasts the current plan state (plan + computed schedule) to all
@@ -215,23 +192,16 @@ impl Evse {
         if let Err(err) = self.notif_tx.send(Notification::ChargingPlan(applied)) {
             error!("error broadcasting charging plan notification: {err}");
         }
+        self.notif_session_progress();
     }
 
     pub fn refresh_charging_schedule(&mut self) {
-        let Some(mut schedule) = self.charging_schedule.take() else {
+        if let Err(err) = self.charging_schedule.refresh(&self.bms) {
+            error!(%err, "error refreshing charging schedule");
             return;
-        };
+        }
 
-        info!("## refreshing charging schedule");
-        let old_id = schedule.id;
-        schedule.reset_set_time();
-        schedule.id = Database::get()
-            .replace_charging_schedule(Some(old_id), &schedule)
-            .expect("persist refreshed charging schedule");
-        self.charging_schedule = Some(schedule.clone());
-
-        self.command_queue
-            .push_back(CommandToChargingPoint::SetChargingSchedule(schedule));
+        self.commit_charging_schedule();
     }
 
     pub fn have_session_stopped_status(&mut self, accepted: bool) {
@@ -339,6 +309,10 @@ impl Evse {
                                     after Finishing -> Available"
                                 );
                                 self.set_charging_plan(ChargingPlan::Blocking);
+                                self.bms.reset();
+                            } else {
+                                // might have reconnected re-apply last known plan
+                                self.commit_charging_schedule();
                             }
                             self.notif_state(notification::ChargeStatus::Available);
                         }
@@ -478,13 +452,7 @@ impl Evse {
         // A new session changed the BMS (initial/current energy) — broadcast
         // it so clients' session-energy bookkeeping (current − initial) is
         // correct from the first status event.
-        info!(bms = ?self.bms, "## broadcasting BMS update");
-        if let Err(err) = self
-            .notif_tx
-            .send(Notification::BmsUpdate(self.bms.clone()))
-        {
-            error!(%err, "error broadcasting BMS update");
-        }
+        self.broadcast_bms_update();
     }
 
     /// Handles incoming stop transaction from charging point
@@ -671,8 +639,7 @@ impl Evse {
 
         let remain_sched = self
             .charging_schedule
-            .as_ref()
-            .map(|s| s.remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS));
+            .remaining(Utc::now(), bms::STATIC_LOSS);
 
         let snapshot = ChargingSessionSnapshot::builder(mv.ts.to_utc(), energy)
             .power(mv.power)
@@ -688,7 +655,7 @@ impl Evse {
             // (less than 1% here) so we can start a new one without unplugging
             // FIXME could be an option
             // FIXME implement an optional intermediate SoC target for multi-period scheds
-            && remain_sched.is_none_or(|remain| remain.energy as f32 > self.bms.capacity() / 100.0)
+            && remain_sched.energy as f32 > self.bms.capacity() / 100.0
         {
             info!(
                 "## Stopping session {}: {soc_progress}",
@@ -717,47 +684,29 @@ impl Evse {
         }
     }
 
-    /// Call this when a permanent 0 W schedule was set
-    ///
-    /// This can occur on reboot for instance
-    // FIXME re-set the charging schedule after boot instead
+    /// Call this when a permanent 0 W (Blocking) schedule was set
     pub fn permanent_0w_set(&mut self) {
-        let prev_id = self.charging_schedule.take().map(|s| s.id);
-        let mut schedule = ChargingSchedule::new_blocking();
-        schedule.id = Database::get()
-            .replace_charging_schedule(prev_id, &schedule)
-            .expect("persist permanent 0 W schedule");
-        self.charging_schedule = Some(schedule);
+        self.charging_schedule = ChargingSchedule::new_blocking_active();
+        self.commit_charging_schedule();
     }
 
     fn notif_session_progress(&self) {
         let Some(ref cs) = self.charging_session else {
             return;
         };
+        if cs.is_complete() {
+            return;
+        }
 
         let remain_sched = self
             .charging_schedule
-            .as_ref()
-            .map(|s| s.remaining(chrono::Local::now().naive_local(), bms::STATIC_LOSS));
+            .remaining(Utc::now(), bms::STATIC_LOSS);
 
         info!(
-            "## session {cs} / {}{}",
-            SoCProgress::from_soc_and_target(cs.last_soc(), self.bms.target_soc).target(),
-            if let Some(remain_sched) = remain_sched {
-                format!(
-                    ", remaining: {remain_sched}{}",
-                    if !remain_sched.is_zero() {
-                        format!(
-                            ", {:.1} %",
-                            remain_sched.energy as f32 / self.bms.capacity() * 100.0
-                        )
-                    } else {
-                        "".to_string()
-                    }
-                )
-            } else {
-                "".to_string()
-            }
+            %cs,
+            %remain_sched,
+            soc_target = %self.bms.target_soc_str(),
+            "## session",
         );
 
         use ChargingSessionState::*;
@@ -768,8 +717,7 @@ impl Evse {
                 let charge_progress = notification::ChargeProgress {
                     // reduce size on wire - clients don't need the extra precision
                     soc: cs.last_soc().round_per_1000(),
-                    remaining_time: remain_sched.map_or_default(|rs| rs.duration).num_seconds()
-                        as u32,
+                    remaining_time: remain_sched.duration.num_seconds() as u32,
                 };
                 match *cs.state() {
                     Charging => notification::ChargeStatus::Charging(charge_progress),

@@ -62,6 +62,11 @@ impl Bms {
         self.current_soc
     }
 
+    pub fn target_soc_str(&self) -> String {
+        self.target_soc
+            .map_or('—'.to_string(), |t| format!("{:.0}", t * 100.0))
+    }
+
     pub fn sync_current_soc(&mut self, new_cur_soc: SoC) -> Result<(), BmsError> {
         if self.initial_soc.is_none() && new_cur_soc.is_absolute() {
             return Err(BmsError::UnknownInitSoCCantSetAbsoluteCur);
@@ -202,6 +207,14 @@ impl Bms {
         };
 
         debug!(cur_soc = %self.current_soc, cur_energy, "updated BMS");
+    }
+
+    /// Resets the BMS, getting it ready for a new charging session
+    pub fn reset(&mut self) {
+        self.initial_energy = self.current_energy;
+        self.initial_soc = None;
+        self.current_soc = SoC::Unknown;
+        self.target_soc = None;
     }
 
     pub fn soc_progress(&self) -> SoCProgress {

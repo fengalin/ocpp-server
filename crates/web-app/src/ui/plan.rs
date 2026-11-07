@@ -3,8 +3,6 @@
 
 use std::rc::Rc;
 
-use chrono::Timelike;
-
 use charge_system_common_model::{
     bms::{self, SoC},
     model::Ts,
@@ -19,7 +17,7 @@ use web_sys::{HtmlButtonElement, HtmlInputElement};
 
 use super::actions::confirm_show;
 use super::catchup::console_error;
-use super::render::{fmt_range, plan_name, session_active};
+use super::render::{fmt_range, session_active};
 use crate::state::ClientState;
 use crate::ui::{now_ms, now_or_server_ts, on, with_ui, with_ui_ref};
 use crate::{api, dom, state};
@@ -51,10 +49,9 @@ pub(crate) fn target_sync() {
 
     // `None` = the server has no target: keep whatever is in the field (the
     // default set on init, or a local edit) instead of clobbering it.
-    let seed = state::with_state(|s| s.server.as_ref().and_then(|srv| srv.bms.target_soc));
+    let seed = state::with_state(|s| s.server.as_ref().map(|srv| srv.bms.target_soc_str()));
     if let Some(seed) = seed {
-        let pct = (seed * 100.0).round() as u32;
-        dom::input("target").set_value(&pct.to_string());
+        dom::input("target").set_value(&seed);
         sync_target_ui();
     }
 }
@@ -106,19 +103,17 @@ fn preset_kind(preset: &str) -> Option<PlanKind> {
 }
 
 pub(crate) fn plan_form_sync() {
-    let applied =
-        state::with_state(|s| s.server.as_ref().and_then(|srv| srv.charging_plan.clone()));
+    let applied = state::with_state(|s| s.server.as_ref().map(|srv| srv.charging_plan.clone()));
     let Some(applied) = applied else {
         return;
     };
-    let plan = &applied.plan;
 
     // Plan kind (chip + which option fields are visible).
-    set_kind_ui(kind_preset(plan));
+    set_kind_ui(kind_preset(&applied.plan));
 
-    match plan {
+    match applied.plan {
         ChargingPlan::Deadline {
-            deadline,
+            mut deadline,
             power_limit,
             ..
         } => {
@@ -126,26 +121,23 @@ pub(crate) fn plan_form_sync() {
             let time = dom::input("deadline-time");
             if !date.matches(":focus").unwrap_or(false) && !time.matches(":focus").unwrap_or(false)
             {
-                // The plan carries a time of day only; mirror the server's
-                // "today or tomorrow" rule — next occurrence of that time.
-                let hhmm = format!("{:02}:{:02}", deadline.hour(), deadline.minute());
+                // mirror the server's "today or tomorrow" rule — next occurrence of that time.
+                // FIXME shouldn't be necessary: the server already takes care of that
                 let now_ms = now_or_server_ts();
-                let mut ms = state::from_local_date_time(&state::to_local_date(now_ms), &hhmm)
-                    .unwrap_or_else(|| now_ms + DEFAULT_DEADLINE_OFFSET_MS);
-                if ms <= now_ms {
-                    ms += 86_400_000;
+                if deadline.0 <= now_ms {
+                    deadline.0 += 86_400_000;
                 }
-                let want_date = state::to_local_date(ms);
-                let want_time = state::to_local_time(ms);
+                let want_date = state::to_local_date(deadline.0);
+                let want_time = state::to_local_time(deadline.0);
                 if date.value() != want_date || time.value() != want_time {
                     date.set_value(&want_date);
                     time.set_value(&want_time);
                 }
             }
-            sync_power_limit(*power_limit);
+            sync_power_limit(power_limit);
         }
         ChargingPlan::Asap { power_limit, .. } => {
-            sync_power_limit(*power_limit);
+            sync_power_limit(power_limit);
         }
         // Blocking / unlimited / off-peak plans have no form fields to mirror.
         _ => {}
@@ -203,7 +195,7 @@ fn plan_render_preview(p: Option<PlanPreview>) {
     // Same "start → end" row as the status tab's plan card (hidden when the
     // preview has no schedule, e.g. already at target).
     if let Some(first) = p.periods.first() {
-        rows.push(("Schedule", fmt_range(first.start_at.0, p.completes_at.0)));
+        rows.push(("Schedule", fmt_range(first.start.0, p.completes_at.0)));
     }
     rows.push((
         "Avg battery power",
@@ -228,10 +220,10 @@ fn plan_render_preview(p: Option<PlanPreview>) {
         .iter()
         .filter(|x| x.power_limit > 0)
         .map(|x| {
-            let end_ms = x.start_at.0 + x.duration as i64 * 1000;
+            let end_ms = x.start.0 + x.duration_s as i64 * 1000;
             format!(
                 "<div class=\"period\"><span>{s} – {e}</span><b>@ {lim:.3} kW limit ≈ {bat:.3} kW to battery</b></div>",
-                s = state::fmt_time(x.start_at.0, true),
+                s = state::fmt_time(x.start.0, true),
                 e = state::fmt_time(end_ms, true),
                 lim = x.power_limit as f64 / 1000.0,
                 bat = (x.power_limit as f64 - bms::STATIC_LOSS as f64) / 1000.0,
@@ -583,18 +575,17 @@ pub(crate) fn countdown_sync() {
     let period = state::with_state(|s| {
         let srv = s.server.as_ref()?;
         // A plan with a schedule counts down even before it starts.
-        let applied = srv.charging_plan.as_ref()?;
-        if applied.periods.is_empty() {
+        if srv.charging_plan.periods.is_empty() {
             // No schedule (e.g. blocking): nothing to count down — drop any
             // stale re-baseline so the previous plan's time is not shown.
             s.remaining_at = None;
             return None;
         }
-        let start_ms = match applied.periods.first().map(|p| p.start_at.0) {
+        let start_ms = match srv.charging_plan.periods.first().map(|p| p.start.0) {
             Some(ms) => ms,
             None => return None,
         };
-        let end = applied.end()?;
+        let end = srv.charging_plan.end()?;
         if session_active(&srv.status) {
             // A live session re-baselines from charge progress (`on_status`
             // and state fetches); only fill in when none is set yet (e.g.
@@ -871,18 +862,13 @@ pub(crate) fn init_plan(on_change: Rc<dyn Fn() + 'static>) {
 
             // Replacing a plan that actually charges (deadline / ASAP) needs
             // an explicit confirm.
-            let active = state::with_state(|s| {
-                s.server
-                    .as_ref()
-                    .and_then(|srv| srv.charging_plan.as_ref())
-                    .map(|applied| applied.plan)
-            });
+            let active = state::with_state(|s| s.server.as_ref().map(|srv| srv.charging_plan.plan));
             match active {
                 Some(p @ (ChargingPlan::Deadline { .. } | ChargingPlan::Asap { .. })) => {
                     let body = body.clone();
                     let oc = oc.clone();
                     confirm_show(
-                        format!("Replace the active {} plan?", plan_name(&p)),
+                        format!("Replace the active {} plan?", p.kind()),
                         Box::new(move || do_apply_plan(body, &oc)),
                     );
                 }

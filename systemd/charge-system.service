@@ -5,13 +5,14 @@ Description=Charge System Server daemon
 User=ocpp
 Group=ocpp
 Type=simple
-ExecStart=/home/ocpp/.local/bin/charge-system-server run
+ExecStart=/home/ocpp/.local/bin/charge-system-server
 WorkingDirectory=/home/ocpp/
 RuntimeDirectory=charge_system
 RuntimeDirectoryPreserve=true
 UMask=002
 StandardOutput=append:/home/ocpp/server_out.log
 StandardError=append:/home/ocpp/server_err.log
+Environment=RUST_LOG=charge_system_server=info
 KillSignal=SIGINT
 Restart=on-failure
 RestartSec=10

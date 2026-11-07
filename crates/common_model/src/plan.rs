@@ -53,7 +53,7 @@ pub fn compute(
     }
 
     let effective_power = limit - bms::STATIC_LOSS;
-    let duration = energy_needed as u64 * 60 * 60 / effective_power as u64;
+    let duration_s = energy_needed as u64 * 60 * 60 / effective_power as u64;
 
     let raw_abs_cur_soc = bms
         .current_soc()
@@ -62,19 +62,19 @@ pub fn compute(
 
     match kind {
         PlanKind::Asap => {
-            let completes_at = now + Duration::seconds(duration as i64);
+            let completes_at = now + Duration::seconds(duration_s as i64);
             // FIXME PlanPreview should be an enum with fields depending on the PlanKind
             Ok(PlanPreview {
                 energy_needed,
                 soc_delta: target_soc - raw_abs_cur_soc,
                 target_soc,
-                duration,
+                duration: duration_s,
                 completes_at: Ts::from_utc(completes_at),
                 feasible: true,
                 avg_battery: effective_power,
                 periods: vec![ChargingPeriod {
-                    start_at: Ts::from_utc(now),
-                    duration,
+                    start: Ts::from_utc(now),
+                    duration_s,
                     power_limit: limit,
                 }],
                 note: None,
@@ -86,7 +86,7 @@ pub fn compute(
             // battery power (charging at the limit, not spread over the whole
             // window); the single period ends exactly at the deadline.
             let deadline = deadline.unwrap_or(now + Duration::days(1));
-            let start = deadline - Duration::seconds(duration as i64);
+            let start = deadline - Duration::seconds(duration_s as i64);
 
             let (start, feasible, note) = if start + Duration::minutes(2) <= now {
                 // The window would have had to start in the past: shift it to
@@ -109,13 +109,13 @@ pub fn compute(
                 energy_needed,
                 soc_delta: target_soc - raw_abs_cur_soc,
                 target_soc,
-                duration,
-                completes_at: Ts::from_utc(start + Duration::seconds(duration as i64)),
+                duration: duration_s,
+                completes_at: Ts::from_utc(start + Duration::seconds(duration_s as i64)),
                 feasible,
                 avg_battery: effective_power,
                 periods: vec![ChargingPeriod {
-                    start_at: Ts::from_utc(start),
-                    duration,
+                    start: Ts::from_utc(start),
+                    duration_s,
                     power_limit: limit,
                 }],
                 note,
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(p.periods[0].power_limit, 7400);
         assert_eq!(p.completes_at, Ts::from_utc(d));
         assert_eq!(
-            p.periods[0].start_at,
+            p.periods[0].start,
             Ts::from_utc(d - Duration::seconds(expected_duration as i64))
         );
     }
@@ -240,7 +240,7 @@ mod tests {
         // The window is [d + 1 day - duration, d + 1 day].
         assert_eq!(p.completes_at, Ts::from_utc(d + Duration::days(1)));
         assert_eq!(
-            p.periods[0].start_at,
+            p.periods[0].start,
             Ts::from_utc(d + Duration::days(1) - Duration::seconds(expected_duration as i64))
         );
     }

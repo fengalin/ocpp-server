@@ -362,22 +362,9 @@ impl OcppInterface {
                 }
                 Reboot => {
                     info!("<< sending Reset Soft");
-                    evse.permanent_0w_set();
-                    // After a reset, the EVSE starts the last chaging plan that
-                    // was set, regardless of the moment it was supposed to start.
-                    // Set a 0 W permanent limit to make sure we don't start
-                    // charging unexpectedly.
-                    vec![
-                        Action::SetChargingProfile(
-                            schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new_blocking(),
-                            )
-                            .build(),
-                        ),
-                        Action::Reset(call::Reset {
-                            reset_type: ResetType::Soft,
-                        }),
-                    ]
+                    vec![Action::Reset(call::Reset {
+                        reset_type: ResetType::Soft,
+                    })]
                 }
                 ResetMeterValueConfiguration => {
                     info!("<< resetting meter value configuration to defaults");
@@ -464,7 +451,7 @@ impl OcppInterface {
                         }),
                         Action::SetChargingProfile(
                             schedule::SetChargingProfile::builder(
-                                schedule::ChargingSchedule::new_blocking(),
+                                schedule::ChargingSchedule::new_blocking_active(),
                             )
                             .build(),
                         ),

@@ -10,7 +10,7 @@
 //! All plan/schedule *computation* still uses `chrono::DateTime<Utc>`; only the
 //! serialization boundary converts through this newtype.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::notification::ChargeStatus;
@@ -56,11 +56,18 @@ impl From<Ts> for DateTime<Utc> {
     }
 }
 
-impl std::ops::Add<Duration> for Ts {
+impl std::ops::Add<TimeDelta> for Ts {
     type Output = Ts;
-    fn add(self, rhs: Duration) -> Self::Output {
+    fn add(self, rhs: TimeDelta) -> Self::Output {
         // Saturate instead of wrapping on overflow.
         Ts(self.0.saturating_add(rhs.num_milliseconds()))
+    }
+}
+
+impl std::ops::Sub for Ts {
+    type Output = TimeDelta;
+    fn sub(self, rhs: Ts) -> Self::Output {
+        TimeDelta::milliseconds(self.0 - rhs.0)
     }
 }
 

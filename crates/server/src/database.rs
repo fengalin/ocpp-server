@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use std::{
     fs,
@@ -7,11 +7,14 @@ use std::{
 };
 use tracing::error;
 
-use charge_system_common_model::bms::{Bms, SoC};
+use charge_system_common_model::{
+    bms::{Bms, SoC},
+    plan_model::{ChargingPeriod, ChargingPlan},
+};
 
 use crate::{
-    ChargingSchedule, ChargingSchedulePeriod, ChargingScheduleState, ChargingSession,
-    ChargingSessionSnapshot, ChargingSessionState,
+    ChargingSchedule, ChargingScheduleState, ChargingSession, ChargingSessionSnapshot,
+    ChargingSessionState,
 };
 
 static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
@@ -53,12 +56,16 @@ static DATABASE: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
             CREATE TABLE schedule (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 set_time STRING,
+                plan_kind STRING,
+                deadline STRING,
+                target_soc FLOAT,
+                power_limit INTEGER,
                 state i32
             );
             CREATE TABLE schedule_period (
                 scheduleid INTEGER,
                 start STRING,
-                end STRING,
+                duration INTEGER,
                 power_limit INTEGER,
                 FOREIGN KEY (scheduleid) REFERENCES schedule(id)
             );
@@ -84,26 +91,10 @@ impl<'a> Database<'a> {
         }))
     }
 
-    /// Check last charging session, but don't persist any changes
-    pub fn check_last_charging_session(
-        &self,
-        bms: &mut Bms,
-    ) -> anyhow::Result<Option<ChargingSession>> {
-        self.get_last_charging_session_priv(bms, false)
-    }
-
-    /// Get last charging session, and add a new reference snapshot if applicable
+    /// Get last charging session, and add update Bms if applicable
     pub fn get_last_charging_session(
         &self,
         bms: &mut Bms,
-    ) -> anyhow::Result<Option<ChargingSession>> {
-        self.get_last_charging_session_priv(bms, true)
-    }
-
-    fn get_last_charging_session_priv(
-        &self,
-        bms: &mut Bms,
-        apply_updates: bool,
     ) -> anyhow::Result<Option<ChargingSession>> {
         let Some((session_id, state, transaction_id)) = self
             .0
@@ -178,12 +169,14 @@ impl<'a> Database<'a> {
             );
         }
 
-        if let Some(ref cs) = cs
-            && apply_updates
-        {
+        if let Some(ref cs) = cs {
             if let Some(first) = cs.first_snapshot() {
                 let last = cs.last_snapshot().expect("at least one");
-                bms.init_from_db(first.energy, last.energy, last.soc);
+                if cs.is_complete() {
+                    bms.init_from_db(last.energy, last.energy, SoC::Unknown);
+                } else {
+                    bms.init_from_db(first.energy, last.energy, last.soc);
+                }
             } else {
                 error!(session_id = cs.session_id(), "FIXME: no first snapshot");
             }
@@ -307,11 +300,11 @@ impl<'a> Database<'a> {
         self.set_charging_session_state(session_id, reason);
     }
 
-    pub fn get_active_charging_schedule(&self) -> anyhow::Result<Option<ChargingSchedule>> {
-        let Some((schedule_id, set_time, state)) = self
+    pub fn get_last_charging_schedule(&self) -> anyhow::Result<ChargingSchedule> {
+        let Some((schedule_id, set_time, plan_kind, deadline, target_soc, power_limit, state)) = self
             .0
-            .query_row::<(i32, DateTime<Utc>, i32), _, _>(
-                "SELECT id, set_time, state FROM schedule
+            .query_row::<(i32, DateTime<Utc>, String, Option<NaiveDateTime>, Option<f32>, Option<i64>, i32), _, _>(
+                "SELECT id, set_time, plan_kind, deadline, target_soc, power_limit, state FROM schedule
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='schedule'
                     )",
@@ -319,25 +312,25 @@ impl<'a> Database<'a> {
                 |row| {
                     let schedule_id = row.get(0)?;
                     let set_time = row.get(1)?;
-                    let state = row.get(2)?;
-                    Ok((schedule_id, set_time, state))
+                    let plan_kind = row.get(2)?;
+                    let deadline = row.get(3)?;
+                    let target_soc = row.get(4)?;
+                    let power_limit = row.get(5)?;
+                    let state = row.get(6)?;
+                    Ok((schedule_id, set_time, plan_kind, deadline, target_soc, power_limit, state))
                 },
             )
             .optional()
             .context("querying last charging schedule")?
         else {
-            return Ok(None);
+            return Ok(ChargingSchedule::new_unlimited_active());
         };
-
-        let state = ChargingScheduleState::from(state);
-        if !state.is_active() {
-            return Ok(None);
-        }
 
         let mut schedule = ChargingSchedule {
             id: schedule_id,
             set_time,
-            state,
+            plan: ChargingPlan::from_db(&plan_kind, deadline, target_soc, power_limit)?,
+            state: ChargingScheduleState::from(state),
             ..Default::default()
         };
 
@@ -358,30 +351,37 @@ impl<'a> Database<'a> {
             .next()
             .context("getting last charging schedule period row")?
         {
-            let start = row.get_unwrap::<_, DateTime<Utc>>("start");
-            let end = row.get_unwrap::<_, DateTime<Utc>>("end");
+            let start = row.get_unwrap::<_, DateTime<Utc>>("start").into();
+            let duration_s = row.get_unwrap::<_, i64>("duration");
             let power_limit = row.get_unwrap::<_, i64>("power_limit");
 
             schedule.periods.insert(
-                start.naive_utc(),
-                ChargingSchedulePeriod {
-                    start: start.naive_utc(),
-                    end: end.naive_utc(),
-                    limit: power_limit.try_into().context("power limit")?,
+                start,
+                ChargingPeriod {
+                    start,
+                    duration_s: duration_s as _,
+                    power_limit: power_limit.try_into().context("power limit")?,
                 },
             );
         }
 
-        Ok(Some(schedule))
+        Ok(schedule)
     }
 
-    fn insert_schedule(conn: &Connection, schedule: &ChargingSchedule) -> anyhow::Result<i32> {
+    fn insert_schedule_priv(
+        conn: &Connection,
+        schedule: &mut ChargingSchedule,
+    ) -> anyhow::Result<()> {
         let schedule_id = conn.query_one::<i32, _, _>(
-            "INSERT INTO schedule (set_time, state)
-                VALUES (:set_time, :state)
+            "INSERT INTO schedule (set_time, plan_kind, deadline, target_soc, power_limit, state)
+                VALUES (:set_time, :plan_kind, :deadline, :target_soc, :power_limit, :state)
                 RETURNING id;",
             named_params![
                 ":set_time": schedule.set_time,
+                ":plan_kind": schedule.plan.kind().to_string(),
+                ":deadline": schedule.plan.deadline().map(|d| d.to_utc().naive_local()),
+                ":target_soc": schedule.plan.target_soc(),
+                ":power_limit": schedule.plan.power_limit(),
                 ":state": schedule.state.as_i32(),
             ],
             |row| row.get(0),
@@ -394,60 +394,48 @@ impl<'a> Database<'a> {
             conn.execute(
                 "
                 INSERT INTO schedule_period
-                (scheduleid, start, end, power_limit)
+                (scheduleid, start, duration, power_limit)
                 VALUES (
                     :schedule_id,
                     :start,
-                    :end,
+                    :duration,
                     :power_limit
                 );
             ",
                 named_params![
                     ":schedule_id": schedule_id,
-                    ":start": period.start.and_utc(),
-                    ":end": period.end.and_utc(),
-                    ":power_limit": period.limit,
+                    ":start": period.start.to_utc(),
+                    ":duration": period.duration_s as i64,
+                    ":power_limit": period.power_limit,
                 ],
             )?;
         }
 
-        Ok(schedule_id)
+        schedule.id = schedule_id;
+
+        Ok(())
     }
 
-    pub fn add_new_charging_schedule(&self, schedule: &ChargingSchedule) -> anyhow::Result<i32> {
-        Self::insert_schedule(&self.0, schedule)
-    }
-
-    /// Inactivate the previous schedule and insert the new one (with its
-    /// periods) atomically, so a failure can't leave both or neither active.
-    pub fn replace_charging_schedule(
-        &self,
-        old_schedule_id: Option<i32>,
-        schedule: &ChargingSchedule,
-    ) -> anyhow::Result<i32> {
-        let tx = self.0.unchecked_transaction()?;
-        if let Some(id) = old_schedule_id {
-            Self::inactivate_schedule(&tx, id)?;
-        }
-        let schedule_id = Self::insert_schedule(&tx, schedule)?;
-        tx.commit()?;
-        Ok(schedule_id)
-    }
-
-    fn inactivate_schedule(conn: &Connection, schedule_id: i32) -> anyhow::Result<()> {
+    fn inactivate_last_schedule(conn: &Connection) -> anyhow::Result<()> {
         conn.execute(
-            "UPDATE schedule SET state = :state WHERE id = :schedule_id;",
+            "UPDATE schedule SET state = :state
+                WHERE id IN (
+                    SELECT seq FROM sqlite_sequence WHERE name='schedule'
+                )",
             named_params![
                 ":state": ChargingScheduleState::Inactive.as_i32(),
-                ":schedule_id": schedule_id,
             ],
         )?;
         Ok(())
     }
 
-    pub fn inactivate_charging_schedule(&self, schedule_id: i32) {
-        if let Err(err) = Self::inactivate_schedule(&self.0, schedule_id) {
-            error!("could not inactivate charging schedule: {err}");
-        }
+    /// Inactivate the previous schedule and insert the new one (with its
+    /// periods) atomically, so a failure can't leave both or neither active.
+    pub fn insert_charging_schedule(&self, schedule: &mut ChargingSchedule) -> anyhow::Result<()> {
+        let tx = self.0.unchecked_transaction()?;
+        Self::inactivate_last_schedule(&tx)?;
+        Self::insert_schedule_priv(&tx, schedule)?;
+        tx.commit()?;
+        Ok(())
     }
 }

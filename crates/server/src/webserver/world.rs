@@ -7,7 +7,7 @@ use charge_system_common_model::{
     meter_value::MeterValueSelection,
     model::{EventLogEntry, Ts},
     notification::ChargeStatus,
-    plan_model::AppliedChargingPlan,
+    plan_model::{AppliedChargingPlan, ChargingPlan},
 };
 
 use charge_system_web_model::model::{MAX_EVENTS, MAX_METER_VALUES, ServerState};
@@ -20,7 +20,7 @@ pub struct World {
     pub last_ts: DateTime<Utc>,
     /// The plan currently in effect on the EVSE, with its computed schedule
     /// (recorded from `Notification::ChargingPlan`; `None` when none).
-    pub charging_plan: Option<AppliedChargingPlan>,
+    pub charging_plan: AppliedChargingPlan,
     pub meter_values: VecDeque<MeterValueSelection>,
     pub events: VecDeque<EventLogEntry>,
 }
@@ -31,7 +31,10 @@ impl World {
         Self {
             bms,
             last_ts: now,
-            charging_plan: None,
+            charging_plan: AppliedChargingPlan {
+                plan: ChargingPlan::Unlimited,
+                periods: vec![],
+            },
             meter_values: VecDeque::with_capacity(MAX_METER_VALUES),
             events: VecDeque::with_capacity(MAX_EVENTS),
         }

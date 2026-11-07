@@ -11,7 +11,7 @@ use charge_system_common_model::{
     meter_value::MeterValueSelection,
     model::{EventLogEntry, Ts},
     notification::ChargeStatus,
-    plan_model::{AppliedChargingPlan, ChargingPlan},
+    plan_model::AppliedChargingPlan,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -126,10 +126,7 @@ pub(crate) fn on_charging_plan(applied: AppliedChargingPlan) {
             return false; // snapshot not in yet (below)
         };
         let target = applied.plan.target_soc();
-        srv.charging_plan = match applied.plan {
-            ChargingPlan::Unlimited => None,
-            _ => Some(applied),
-        };
+        srv.charging_plan = applied;
         // The plan's target SoC *is* the EVSE's BMS target: mirror it (plans
         // without a charging target clear any stale value).
         srv.bms.target_soc = target;
