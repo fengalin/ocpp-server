@@ -86,6 +86,7 @@ impl UnixSocketNotifier {
 
             buf.clear();
             serde_json::to_writer(&mut buf, &msg)?;
+            buf.push(b'\n');
 
             match timeout(WRITE_TIMEOUT, stream.write(buf.as_slice())).await {
                 Ok(res) => {
