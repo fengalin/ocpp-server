@@ -8,8 +8,6 @@
 use std::fmt::{self, Write};
 use std::str::FromStr;
 
-#[cfg(feature = "server")]
-use chrono::NaiveDateTime;
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -104,51 +102,6 @@ pub enum ChargingPlan {
 }
 
 impl ChargingPlan {
-    #[cfg(feature = "server")]
-    pub fn from_db(
-        plan_kind: &str,
-        deadline: Option<NaiveDateTime>,
-        target_soc: Option<f32>,
-        power_limit: Option<i64>,
-    ) -> Result<Self, ChargingPlanError> {
-        use ChargingPlanError::*;
-
-        let kind = PlanKind::from_str(plan_kind)?;
-
-        let get_power_limit = move || -> Result<_, _> {
-            let Some(power_limit) = power_limit else {
-                return Err(MissingPowerLimit { kind });
-            };
-            u32::try_from(power_limit).map_err(|_| PowerLimitOutOfRange { power_limit, kind })
-        };
-
-        let get_target_soc = move || -> Result<_, _> {
-            let target_soc = target_soc.ok_or(MissingTargetSoC { kind })?;
-            if !(0.0..=1.0).contains(&target_soc) {
-                return Err(TargetSoCOutOfRange { target_soc, kind });
-            }
-
-            Ok(target_soc)
-        };
-
-        use PlanKind::*;
-        let this = match kind {
-            Blocking => ChargingPlan::Blocking,
-            Deadline => ChargingPlan::Deadline {
-                deadline: deadline.ok_or(MissingDeadline { kind })?.and_utc().into(),
-                power_limit: get_power_limit()?,
-                target_soc: get_target_soc()?,
-            },
-            Asap => ChargingPlan::Asap {
-                power_limit: get_power_limit()?,
-                target_soc: get_target_soc()?,
-            },
-            Unlimited => ChargingPlan::Unlimited,
-        };
-
-        Ok(this)
-    }
-
     pub fn is_blocking(&self) -> bool {
         self.kind() == PlanKind::Blocking
     }

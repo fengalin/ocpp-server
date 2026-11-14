@@ -1,12 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    fmt::{self, Write},
-};
+use std::fmt::{self, Write};
 
 use charge_system_common_model::{
     bms::{self, Bms, BmsError},
-    model::Ts,
-    plan_model::{AppliedChargingPlan, ChargingPeriod, ChargingPlan},
+    plan_model::{AppliedChargingPlan, ChargingPeriod, ChargingPlan, ChargingPlanError, PlanKind},
 };
 use chrono::{DateTime, Duration, Local, TimeDelta, Utc};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
@@ -70,7 +66,7 @@ pub struct ChargingSchedule {
     pub set_time: DateTime<Utc>,
     pub plan: ChargingPlan,
     pub state: ChargingScheduleState,
-    pub periods: BTreeMap<Ts, ChargingPeriod>,
+    pub periods: Vec<ChargingPeriod>,
 }
 
 impl ChargingSchedule {
@@ -147,15 +143,11 @@ impl ChargingSchedule {
                 let start = start.into();
 
                 Ok(ChargingSchedule {
-                    periods: [(
+                    periods: vec![ChargingPeriod {
                         start,
-                        ChargingPeriod {
-                            start,
-                            duration_s,
-                            power_limit: *power_limit,
-                        },
-                    )]
-                    .into(),
+                        duration_s,
+                        power_limit: *power_limit,
+                    }],
                     plan,
                     ..Default::default()
                 })
@@ -182,15 +174,11 @@ impl ChargingSchedule {
                 let start = now.into();
 
                 Ok(ChargingSchedule {
-                    periods: [(
+                    periods: vec![ChargingPeriod {
                         start,
-                        ChargingPeriod {
-                            start,
-                            duration_s,
-                            power_limit: *power_limit,
-                        },
-                    )]
-                    .into(),
+                        duration_s,
+                        power_limit: *power_limit,
+                    }],
                     plan,
                     ..Default::default()
                 })
@@ -226,12 +214,12 @@ impl ChargingSchedule {
     }
 
     pub fn add_period(mut self, period: ChargingPeriod) -> Self {
-        self.periods.insert(period.start, period);
+        self.periods.push(period);
         self
     }
 
     pub fn periods(&self) -> impl Iterator<Item = &ChargingPeriod> {
-        self.periods.values()
+        self.periods.iter()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -253,7 +241,7 @@ impl ChargingSchedule {
         if !self.is_active() {
             return rem;
         }
-        for period in self.periods.values() {
+        for period in self.periods.iter() {
             let period_end = period.start.to_utc() + TimeDelta::seconds(period.duration_s as _);
 
             if from_instant >= period_end {
@@ -303,7 +291,7 @@ impl fmt::Display for ChargingSchedule {
             f.write_str("\npermanent 0 W (blocking)")?;
             return Ok(());
         }
-        for period in self.periods.values() {
+        for period in self.periods.iter() {
             f.write_fmt(format_args!("\n* {period}"))?
         }
         Ok(())
@@ -366,7 +354,7 @@ impl SetChargingProfile {
 #[derive(Debug)]
 pub struct SetChargingProfileBuilder {
     start_schedule: DateTime<Utc>,
-    periods: BTreeMap<Ts, ChargingPeriod>,
+    periods: Vec<ChargingPeriod>,
 }
 
 impl SetChargingProfileBuilder {
@@ -382,7 +370,7 @@ impl SetChargingProfileBuilder {
         let start_schedule = self.start_schedule.into();
         let mut charging_schedule = vec![];
         let mut last_end = None;
-        for period in self.periods.values() {
+        for period in self.periods.iter() {
             let start = period.start;
             let end = period.start + TimeDelta::seconds(period.duration_s as _);
 
@@ -516,6 +504,64 @@ impl SetChargingProfileBuilder {
                 },
             },
         }
+    }
+}
+
+pub(crate) trait CharginPlanExt {
+    type ChargingPlan;
+    fn from_db(
+        plan_kind: &str,
+        deadline: Option<DateTime<Utc>>,
+        target_soc: Option<f32>,
+        power_limit: Option<i64>,
+    ) -> Result<ChargingPlan, ChargingPlanError>;
+}
+
+impl CharginPlanExt for ChargingPlan {
+    type ChargingPlan = Self;
+    fn from_db(
+        plan_kind: &str,
+        deadline: Option<DateTime<Utc>>,
+        target_soc: Option<f32>,
+        power_limit: Option<i64>,
+    ) -> Result<Self, ChargingPlanError> {
+        use ChargingPlanError::*;
+        use std::str::FromStr;
+
+        let kind = PlanKind::from_str(plan_kind)?;
+
+        let get_power_limit = move || -> Result<_, _> {
+            let Some(power_limit) = power_limit else {
+                return Err(MissingPowerLimit { kind });
+            };
+            u32::try_from(power_limit).map_err(|_| PowerLimitOutOfRange { power_limit, kind })
+        };
+
+        let get_target_soc = move || -> Result<_, _> {
+            let target_soc = target_soc.ok_or(MissingTargetSoC { kind })?;
+            if !(0.0..=1.0).contains(&target_soc) {
+                return Err(TargetSoCOutOfRange { target_soc, kind });
+            }
+
+            Ok(target_soc)
+        };
+
+        use PlanKind::*;
+        let this = match kind {
+            Blocking => ChargingPlan::Blocking,
+            Deadline => ChargingPlan::Deadline {
+                deadline: deadline.ok_or(MissingDeadline { kind })?.into(),
+                power_limit: get_power_limit()?,
+                target_soc: get_target_soc()?,
+            },
+            Asap => ChargingPlan::Asap {
+                power_limit: get_power_limit()?,
+                target_soc: get_target_soc()?,
+            },
+            Unlimited => ChargingPlan::Unlimited,
+        };
+
+        Ok(this)
     }
 }
 
@@ -861,15 +907,11 @@ mod tests {
         let start = (end_time_can_start_today - TimeDelta::seconds(DURATION_S as _)).into();
         let ref_schedule = ChargingSchedule {
             plan,
-            periods: [(
+            periods: vec![ChargingPeriod {
                 start,
-                ChargingPeriod {
-                    start,
-                    duration_s: DURATION_S,
-                    power_limit: MAX_POWER,
-                },
-            )]
-            .into(),
+                duration_s: DURATION_S,
+                power_limit: MAX_POWER,
+            }],
             ..charging_schedule
         };
         assert_eq!(ref_schedule, charging_schedule);
@@ -893,15 +935,11 @@ mod tests {
         .into();
         let ref_schedule = ChargingSchedule {
             plan,
-            periods: [(
+            periods: vec![ChargingPeriod {
                 start,
-                ChargingPeriod {
-                    start,
-                    duration_s: DURATION_S,
-                    power_limit: MAX_POWER,
-                },
-            )]
-            .into(),
+                duration_s: DURATION_S,
+                power_limit: MAX_POWER,
+            }],
             ..charging_schedule
         };
         assert_eq!(ref_schedule, charging_schedule);

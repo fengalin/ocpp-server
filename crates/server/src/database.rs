@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use std::{
     fs,
@@ -301,9 +301,11 @@ impl<'a> Database<'a> {
     }
 
     pub fn get_last_charging_schedule(&self) -> anyhow::Result<ChargingSchedule> {
+        use crate::schedule::CharginPlanExt;
+
         let Some((schedule_id, set_time, plan_kind, deadline, target_soc, power_limit, state)) = self
             .0
-            .query_row::<(i32, DateTime<Utc>, String, Option<NaiveDateTime>, Option<f32>, Option<i64>, i32), _, _>(
+            .query_row::<(i32, DateTime<Utc>, String, Option<DateTime<Utc>>, Option<f32>, Option<i64>, i32), _, _>(
                 "SELECT id, set_time, plan_kind, deadline, target_soc, power_limit, state FROM schedule
                     WHERE id IN (
                         SELECT seq FROM sqlite_sequence WHERE name='schedule'
@@ -351,18 +353,15 @@ impl<'a> Database<'a> {
             .next()
             .context("getting last charging schedule period row")?
         {
-            let start = row.get_unwrap::<_, DateTime<Utc>>("start").into();
+            let start = row.get_unwrap::<_, DateTime<Utc>>("start");
             let duration_s = row.get_unwrap::<_, i64>("duration");
             let power_limit = row.get_unwrap::<_, i64>("power_limit");
 
-            schedule.periods.insert(
-                start,
-                ChargingPeriod {
-                    start,
-                    duration_s: duration_s as _,
-                    power_limit: power_limit.try_into().context("power limit")?,
-                },
-            );
+            schedule.periods.push(ChargingPeriod {
+                start: start.into(),
+                duration_s: duration_s as _,
+                power_limit: power_limit.try_into().context("power limit")?,
+            });
         }
 
         Ok(schedule)
@@ -379,7 +378,7 @@ impl<'a> Database<'a> {
             named_params![
                 ":set_time": schedule.set_time,
                 ":plan_kind": schedule.plan.kind().to_string(),
-                ":deadline": schedule.plan.deadline().map(|d| d.to_utc().naive_local()),
+                ":deadline": schedule.plan.deadline().map(|d| d.to_utc()),
                 ":target_soc": schedule.plan.target_soc(),
                 ":power_limit": schedule.plan.power_limit(),
                 ":state": schedule.state.as_i32(),
@@ -390,7 +389,7 @@ impl<'a> Database<'a> {
         // A schedule without its periods would be inconsistent (the periods
         // are what `remaining()` computes from), so a period insert failure
         // must fail the whole insert — hence `?` here, not a logged skip.
-        for period in schedule.periods.values() {
+        for period in schedule.periods.iter() {
             conn.execute(
                 "
                 INSERT INTO schedule_period
