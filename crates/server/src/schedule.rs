@@ -1,10 +1,13 @@
-use std::fmt::{self, Write};
+use std::fmt;
 
 use charge_system_common_model::{
     bms::{self, Bms, BmsError},
-    plan_model::{AppliedChargingPlan, ChargingPeriod, ChargingPlan, ChargingPlanError, PlanKind},
+    plan_model::{
+        AppliedChargingPlan, ChargingPeriod, ChargingPlan, ChargingPlanError, PlanKind,
+        RemainingDurationEnergy,
+    },
 };
-use chrono::{DateTime, Duration, Local, TimeDelta, Utc};
+use chrono::{DateTime, Local, TimeDelta, Utc};
 use ocpp_rs::v16::{call, data_types as ocpp_v16, enums::*};
 use tracing::{debug, info, warn};
 
@@ -16,48 +19,6 @@ pub enum ChargingScheduleError {
     EndEarlierThanStart { start: String, end: String },
     #[error("Couldn't compute energy to add: {0}")]
     TargetSoCToEnergy(#[from] BmsError),
-}
-
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub struct RemainingDurationEnergy {
-    pub duration: Duration,
-    pub energy: u32,
-}
-impl RemainingDurationEnergy {
-    fn zero() -> Self {
-        Default::default()
-    }
-
-    pub fn is_zero(&self) -> bool {
-        *self == RemainingDurationEnergy::zero()
-    }
-
-    fn add(&mut self, delta: TimeDelta, active_power: u32) {
-        assert!(delta.num_seconds() >= 0);
-        self.duration += delta;
-        self.energy += active_power * delta.num_seconds() as u32 / 60 / 60;
-    }
-}
-
-impl fmt::Display for RemainingDurationEnergy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_zero() {
-            return f.write_char('—');
-        }
-
-        let total_secs = self.duration.num_seconds();
-        let total_mins = total_secs / 60;
-        let hours = total_mins / 60;
-        let mins = total_mins % 60;
-        let secs = total_secs % 60;
-        if hours > 0 {
-            f.write_fmt(format_args!("+{hours}:{mins:02}:{secs:02}",))?;
-        } else {
-            f.write_fmt(format_args!("+{mins:02}:{secs:02}",))?;
-        }
-
-        f.write_fmt(format_args!(", {:.3} kWh", self.energy as f32 / 1_000.0))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +129,7 @@ impl ChargingSchedule {
                     start_local = %now_local,
                     end_local = %(now_local + delta),
                     target_soc = %(*target_soc * 100.0),
+                    energy_to_add = %(energy_to_add as f32 / 1_000.0),
                     "asap charging schedule",
                 );
 
@@ -231,36 +193,16 @@ impl ChargingSchedule {
         self.state = ChargingScheduleState::Active;
     }
 
-    // FIXME energy that will be added also depends on the SoC and DPM profile
     pub fn remaining(
         &self,
         from_instant: DateTime<Utc>,
-        constant_power_loss: u32,
-    ) -> RemainingDurationEnergy {
-        let mut rem = RemainingDurationEnergy::default();
+        bms: &Bms,
+    ) -> Option<RemainingDurationEnergy> {
         if !self.is_active() {
-            return rem;
-        }
-        for period in self.periods.iter() {
-            let period_end = period.start.to_utc() + TimeDelta::seconds(period.duration_s as _);
-
-            if from_instant >= period_end {
-                continue;
-            }
-            if from_instant > period.start.to_utc() && from_instant < period_end {
-                rem.add(
-                    period_end - from_instant,
-                    period.power_limit - constant_power_loss,
-                );
-                continue;
-            }
-            rem.add(
-                TimeDelta::seconds(period.duration_s as _),
-                period.power_limit - constant_power_loss,
-            );
+            return Some(RemainingDurationEnergy::default());
         }
 
-        rem
+        self.plan.remaining(from_instant, &self.periods, bms)
     }
 }
 
@@ -949,7 +891,12 @@ mod tests {
     fn remaining() {
         crate::tests::init();
 
-        const CONST_POWER_LOSS: u32 = 400;
+        let bms = Bms::builder(bms::DEFAULT_CAPACITY)
+            .initial_energy(1000)
+            .initial_soc(20.0)
+            .current_energy(1635)
+            .target_soc(0.55)
+            .build();
 
         let today = Utc::now().date_naive();
 
@@ -964,7 +911,7 @@ mod tests {
             .and_utc();
         let period2_duration = TimeDelta::hours(1);
 
-        let schedule = ChargingSchedule::new_blocking_active()
+        let mut schedule = ChargingSchedule::default()
             .add_period(ChargingPeriod {
                 start: period1_start.into(),
                 duration_s: period1_duration.num_seconds() as _,
@@ -975,68 +922,96 @@ mod tests {
                 duration_s: period2_duration.num_seconds() as _,
                 power_limit: MAX_POWER,
             });
+        // TODO multiple periods are not supported yet but we still want to test this
+        // just fake it with an ASAP charging plan for now
+        schedule.plan = ChargingPlan::Asap {
+            target_soc: 0.55,
+            power_limit: MAX_POWER,
+        };
 
         let before_period1 = period1_start - TimeDelta::minutes(30);
         assert_eq!(
-            RemainingDurationEnergy {
+            Some(RemainingDurationEnergy {
                 duration: period1_duration + period2_duration,
-                energy: ((period1_limit as u64 - CONST_POWER_LOSS as u64)
+                energy: ((period1_limit as u64 - bms::STATIC_LOSS as u64)
                     * (period1_duration.num_seconds() as u64)
                     / 60
                     / 60
                     + bms::MAX_AVAILABLE_POWER as u64 * (period2_duration.num_seconds() as u64)
                         / 60
                         / 60) as u32
-            },
-            schedule.remaining(before_period1, CONST_POWER_LOSS),
+            }),
+            schedule.remaining(before_period1, &bms),
         );
 
         let during_period1 = period1_start + TimeDelta::minutes(30);
         let during_period1_dur = period1_start + period1_duration - during_period1;
         assert_eq!(
-            RemainingDurationEnergy {
+            Some(RemainingDurationEnergy {
                 duration: during_period1_dur + period2_duration,
-                energy: ((period1_limit as u64 - CONST_POWER_LOSS as u64)
+                energy: ((period1_limit as u64 - bms::STATIC_LOSS as u64)
                     * (during_period1_dur.num_seconds() as u64)
                     / 60
                     / 60
                     + bms::MAX_AVAILABLE_POWER as u64 * (period2_duration.num_seconds() as u64)
                         / 60
                         / 60) as u32
-            },
-            schedule.remaining(during_period1, CONST_POWER_LOSS),
+            }),
+            schedule.remaining(during_period1, &bms),
         );
 
         let between_periods = period1_start + period1_duration + TimeDelta::minutes(30);
         assert!(between_periods < period2_start);
         assert_eq!(
-            RemainingDurationEnergy {
+            Some(RemainingDurationEnergy {
                 duration: period2_duration,
                 energy: (bms::MAX_AVAILABLE_POWER as u64 * (period2_duration.num_seconds() as u64)
                     / 60
                     / 60) as u32
-            },
-            schedule.remaining(between_periods, CONST_POWER_LOSS),
+            }),
+            schedule.remaining(between_periods, &bms),
         );
 
         let during_period2 = period2_start + TimeDelta::minutes(30);
         let during_period2_dur = period2_start + period2_duration - during_period2;
         assert_eq!(
-            RemainingDurationEnergy {
+            Some(RemainingDurationEnergy {
                 duration: during_period2_dur,
                 energy: (bms::MAX_AVAILABLE_POWER as u64
                     * (during_period2_dur.num_seconds() as u64)
                     / 60
                     / 60) as u32
-            },
-            schedule.remaining(during_period2, CONST_POWER_LOSS),
+            }),
+            schedule.remaining(during_period2, &bms),
         );
 
         let after_period2 = period2_start + period2_duration + TimeDelta::minutes(30);
-        assert!(
-            schedule
-                .remaining(after_period2, CONST_POWER_LOSS)
-                .is_zero(),
+        let rem = schedule.remaining(after_period2, &bms).unwrap();
+        assert!(rem.is_zero());
+    }
+
+    #[test]
+    fn remaining_unlimited() {
+        crate::tests::init();
+
+        let bms = Bms::builder(bms::DEFAULT_CAPACITY)
+            .initial_energy(1000)
+            .initial_soc(0.20)
+            .target_soc(0.55)
+            .build();
+
+        let energy_to_add = ((0.55 - 0.2) * bms::DEFAULT_CAPACITY as f32) as u64;
+
+        // FIXME unlimited could come with a target SoC
+        let schedule = ChargingSchedule::new_unlimited_active();
+        assert_eq!(
+            Some(RemainingDurationEnergy {
+                duration: chrono::Duration::seconds(
+                    (energy_to_add * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64) as _
+                ),
+                energy: energy_to_add as u32,
+            }),
+            schedule.remaining(Utc::now(), &bms),
         );
     }
 }

@@ -8,10 +8,14 @@
 use std::fmt::{self, Write};
 use std::str::FromStr;
 
-use chrono::{DateTime, Local, TimeDelta, Utc};
+use chrono::{DateTime, Duration, Local, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
-use crate::model::Ts;
+use crate::{
+    bms::{self, Bms},
+    model::Ts,
+};
 
 /// One consecutive block of a charging plan. Periods with `power_limit == 0`
 /// (W) are intentional gaps (future TOU pause behaviour).
@@ -98,6 +102,7 @@ pub enum ChargingPlan {
     /// Start now, stop at `target_soc` (*fraction* 0–1).
     Asap { target_soc: f32, power_limit: u32 },
     /// No plan in effect (no restriction on charging power).
+    // FIXME unlimited could come with a target SoC (needs a different name)
     Unlimited,
 }
 
@@ -143,6 +148,58 @@ impl ChargingPlan {
             _ => None,
         }
     }
+
+    // FIXME energy that will be added also depends on the SoC and DPM profile
+    pub fn remaining(
+        &self,
+        // FIXME need to provide a way to indicate the ts of the last known BMS update
+        // and current instant since they are used for different computations
+        from_instant: DateTime<Utc>,
+        periods: &[ChargingPeriod],
+        bms: &Bms,
+    ) -> Option<RemainingDurationEnergy> {
+        let mut rem = RemainingDurationEnergy::default();
+
+        if *self == ChargingPlan::Blocking {
+            return Some(rem);
+        }
+
+        if *self == ChargingPlan::Unlimited {
+            let Ok(energy) = bms
+                .remaining_energy_to_add()
+                .inspect_err(|err| error!(%err))
+            else {
+                return None;
+            };
+
+            // unlimited but we could compute the energy to add from the configured BMS
+            let duration =
+                Duration::seconds((energy as u64 * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64) as _);
+
+            return Some(RemainingDurationEnergy { duration, energy });
+        }
+
+        for period in periods.iter() {
+            let period_end = period.start.to_utc() + Duration::seconds(period.duration_s as _);
+
+            if from_instant >= period_end {
+                continue;
+            }
+            if from_instant > period.start.to_utc() && from_instant < period_end {
+                rem.add_duration(
+                    period_end - from_instant,
+                    period.power_limit - bms::STATIC_LOSS,
+                );
+                continue;
+            }
+            rem.add_duration(
+                Duration::seconds(period.duration_s as _),
+                period.power_limit - bms::STATIC_LOSS,
+            );
+        }
+
+        Some(rem)
+    }
 }
 
 impl fmt::Display for ChargingPlan {
@@ -180,6 +237,50 @@ impl fmt::Display for ChargingPlan {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub struct RemainingDurationEnergy {
+    pub duration: Duration,
+    pub energy: u32,
+}
+impl RemainingDurationEnergy {
+    fn zero() -> Self {
+        Default::default()
+    }
+
+    pub fn is_zero(&self) -> bool {
+        *self == RemainingDurationEnergy::zero()
+    }
+
+    fn add_duration(&mut self, duration: Duration, active_power: u32) {
+        if duration.num_seconds() < 1 {
+            return;
+        }
+        self.duration += duration;
+        self.energy += active_power * duration.num_seconds() as u32 / 60 / 60;
+    }
+}
+
+impl fmt::Display for RemainingDurationEnergy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_zero() {
+            return f.write_char('—');
+        }
+
+        let total_secs = self.duration.num_seconds();
+        let total_mins = total_secs / 60;
+        let hours = total_mins / 60;
+        let mins = total_mins % 60;
+        let secs = total_secs % 60;
+        if hours > 0 {
+            f.write_fmt(format_args!("+{hours}:{mins:02}:{secs:02}",))?;
+        } else {
+            f.write_fmt(format_args!("+{mins:02}:{secs:02}"))?;
+        }
+
+        f.write_fmt(format_args!(", {:.3} kWh", self.energy as f32 / 1_000.0))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ChargingPlanError {
     #[error("Unknonw plan kind {0}")]
@@ -204,7 +305,7 @@ pub enum ChargingPlanError {
 /// [`crate::Notification::ChargingPlan`] and what the server reports as the
 /// plan in effect (`ServerState`); shared by the server, the WASM web front
 /// end and the OLED status app.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AppliedChargingPlan {
     pub plan: ChargingPlan,
     /// The computed schedule (empty when the plan has no schedule).
@@ -213,10 +314,18 @@ pub struct AppliedChargingPlan {
 
 impl AppliedChargingPlan {
     /// End of the last period, if any.
-    pub fn end(&self) -> Option<Ts> {
+    pub fn end_ts(&self) -> Option<Ts> {
         self.periods
             .last()
             .map(|p| Ts(p.start.0 + (p.duration_s as i64) * 1_000))
+    }
+
+    pub fn remaining(
+        &self,
+        from_instant: DateTime<Utc>,
+        bms: &Bms,
+    ) -> Option<RemainingDurationEnergy> {
+        self.plan.remaining(from_instant, &self.periods, bms)
     }
 }
 

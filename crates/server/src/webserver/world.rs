@@ -59,36 +59,12 @@ impl World {
         }
     }
 
-    // ------------------------------------------------------------------
-    // internals
-    // ------------------------------------------------------------------
-
     pub fn push_meter_values(&mut self, mv: MeterValueSelection) {
         self.meter_values.push_back(mv);
         self.meter_values.retain_back(MAX_METER_VALUES);
     }
 
     pub fn push_event(&mut self, e: EventLogEntry) {
-        if let ChargeStatus::Charging(_) = e.status {
-            // don't stack all the Charging progresses:
-            // just keep the first one (transition preparing -> charging)
-            // and the last update. Others are not useful in the event history
-            let mut trailing_charging = 0;
-            for ev in self.events.iter().rev() {
-                if let ChargeStatus::Charging(_) = ev.status {
-                    trailing_charging += 1;
-                } else {
-                    break;
-                }
-            }
-            if trailing_charging >= 2 {
-                // The phase already has its start entry: only the live (latest)
-                // entry is updated. The `back()` above guarantees it exists.
-                *self.events.back_mut().expect("checked above") = e;
-                return;
-            }
-        }
-
         self.events.push_back(e);
         self.events.retain_back(MAX_EVENTS);
     }
@@ -97,71 +73,10 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use charge_system_common_model::{
-        bms::{self, SoC},
-        notification::ChargeProgress,
-    };
+    use charge_system_common_model::bms;
 
     fn entry(ts: i64, status: ChargeStatus) -> EventLogEntry {
         EventLogEntry { ts: Ts(ts), status }
-    }
-
-    fn charging_abs(soc: f32) -> ChargeStatus {
-        ChargeStatus::Charging(ChargeProgress {
-            soc: SoC::new_absolute(soc),
-            remaining_time: 100,
-        })
-    }
-
-    #[test]
-    fn charging_progress_updates_collapse_into_first_and_last() {
-        let mut w = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
-        w.push_event(entry(1, ChargeStatus::Available));
-        w.push_event(entry(2, charging_abs(0.2)));
-        w.push_event(entry(3, charging_abs(0.4)));
-        w.push_event(entry(4, charging_abs(0.6)));
-
-        assert_eq!(w.events.len(), 3);
-        // The first entry on the switch to Charging keeps its original ts ...
-        let start = w.events.get(1).unwrap();
-        assert_eq!(start.ts.0, 2);
-        // ... and later updates replace the live (latest) entry only.
-        let last = w.events.back().unwrap();
-        assert_eq!(last.ts.0, 4);
-        assert_eq!(last.status, charging_abs(0.6));
-        // `status()` still reports the live (latest) progress.
-        assert_eq!(w.status(), charging_abs(0.6));
-    }
-
-    #[test]
-    fn other_statuses_always_append() {
-        let mut w = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
-        w.push_event(entry(1, charging_abs(0.2)));
-        w.push_event(entry(
-            2,
-            ChargeStatus::SuspendedEvse(ChargeProgress {
-                soc: SoC::new_absolute(0.3),
-                remaining_time: 90,
-            }),
-        ));
-        w.push_event(entry(
-            3,
-            ChargeStatus::SuspendedEvse(ChargeProgress {
-                soc: SoC::new_absolute(0.4),
-                remaining_time: 80,
-            }),
-        ));
-        // A new Charging episode after a different status appends fresh, then
-        // collapses into its own start + live pair.
-        w.push_event(entry(4, charging_abs(0.5)));
-        w.push_event(entry(5, charging_abs(0.6)));
-        w.push_event(entry(6, charging_abs(0.7)));
-
-        assert_eq!(w.events.len(), 5);
-        assert_eq!(
-            w.events.iter().map(|e| e.ts.0).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 6] // entry 5 replaced the live entry (6)
-        );
     }
 
     #[test]

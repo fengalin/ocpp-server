@@ -6,7 +6,7 @@
 use charge_system_common_model::{
     bms::Bms,
     meter_value::MeterValueSelection,
-    model::EventLogEntry,
+    model::{EventLogEntry, Ts},
     notification::{ChargeStatus, Notification},
     plan_model::AppliedChargingPlan,
 };
@@ -183,9 +183,9 @@ fn urlenc(s: &str) -> String {
 // ---------------------------------------------------------------------
 
 pub struct StreamHandlers {
-    pub on_bms_update: Box<dyn Fn(Bms)>,
+    pub on_bms_update: Box<dyn Fn((Ts, Bms))>,
     pub on_meter_values: Box<dyn Fn(MeterValueSelection)>,
-    pub on_status: Box<dyn Fn(ChargeStatus)>,
+    pub on_status: Box<dyn Fn((Ts, ChargeStatus))>,
     pub on_charging_plan: Box<dyn Fn(AppliedChargingPlan)>,
     pub on_open: Box<dyn Fn()>,
 }
@@ -237,7 +237,7 @@ pub fn connect_stream(h: StreamHandlers) -> Result<EventSource, String> {
         &es,
         "bms_update",
         |n| match n {
-            Notification::BmsUpdate(b) => Some(b),
+            Notification::BmsUpdate { ts, bms } => Some((ts, bms)),
             _ => None,
         },
         h.on_bms_update,
@@ -246,7 +246,7 @@ pub fn connect_stream(h: StreamHandlers) -> Result<EventSource, String> {
         &es,
         "status",
         |n| match n {
-            Notification::Status(s) => Some(s),
+            Notification::Status { ts, status } => Some((ts, status)),
             _ => None,
         },
         h.on_status,

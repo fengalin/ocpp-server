@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::bms::{self, Bms};
 use crate::model::Ts;
-use crate::plan_model::{ChargingPeriod, LivePlan, Plan, PlanKind, PlanPreview};
+use crate::plan_model::{ChargingPeriod, PlanKind, PlanPreview};
 
 /// Compute the preview for a plan.
 ///
@@ -122,36 +122,6 @@ pub fn compute(
             })
         }
         PlanKind::Blocking | PlanKind::Unlimited => unreachable!("handled at fn start"),
-    }
-}
-
-/// Live progress of an active plan, as shown on the status tab.
-pub fn live(plan: &Plan, bms: &Bms, is_charging: bool, now: DateTime<Utc>) -> LivePlan {
-    let remaining_energy = bms
-        .target_soc_to_energy(plan.target_soc)
-        .expect("all absolute SoCs currently");
-
-    let end = plan.end();
-    let remaining_wall = (end - now).num_seconds().max(0) as u64;
-    let is_charging = is_charging && plan.limit_at(now) > 0;
-
-    let (remaining_time, eta) = if remaining_energy == 0 {
-        (0, now)
-    } else if is_charging {
-        let duration = remaining_energy as u64 * 60 * 60 / bms::MAX_AVAILABLE_POWER as u64;
-        (
-            duration,
-            (now + Duration::seconds(duration as i64)).min(end),
-        )
-    } else {
-        (remaining_wall, end)
-    };
-
-    LivePlan {
-        plan: plan.clone(),
-        remaining_energy,
-        remaining_time,
-        eta: Ts::from_utc(eta),
     }
 }
 

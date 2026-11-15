@@ -191,21 +191,33 @@ impl Bms {
         SoCProgress::from_soc_and_target(self.current_soc(), self.target_soc)
     }
 
-    /// Computes the raw energy to add to reach the target SoC,
+    /// Computes the raw energy to add to reach the configured target SoC,
+    /// not including constant power loss
+    pub fn remaining_energy_to_add(&self) -> Result<u32, BmsError> {
+        let Some(target_soc) = self.target_soc else {
+            return Err(BmsError::UnknownTargetSoCCantComputeEnergy);
+        };
+
+        self.target_soc_to_energy(target_soc)
+    }
+
+    /// Computes the raw energy to add to reach the specified target SoC,
     /// not including constant power loss
     pub fn target_soc_to_energy(&self, target_soc: f32) -> Result<u32, BmsError> {
         let target_soc = target_soc.clamp(0.0, 1.0);
 
-        use SoC::*;
-        let Abs(cur_soc) = self.current_soc() else {
+        let Some(init_soc) = self.initial_soc else {
             return Err(BmsError::UnknownInitSoCCantComputeEnergy);
         };
 
-        if cur_soc >= target_soc {
-            return Ok(0);
-        }
+        let Some(init_energy) = self.initial_energy else {
+            return Err(BmsError::UnknownInitEnergyCantComputeEnergy);
+        };
 
-        Ok((self.capacity * (target_soc - cur_soc)) as u32)
+        let soc_delta = (target_soc - init_soc).clamp(0.0, 1.0);
+        let cur_energy = self.current_energy.unwrap_or(init_energy);
+
+        Ok(((self.capacity * soc_delta) as u64 + init_energy).saturating_sub(cur_energy) as u32)
     }
 
     pub fn target_soc(&self) -> Option<f32> {
@@ -241,6 +253,10 @@ pub enum BmsError {
     InitSoCDefinedCantSetRelativeCur,
     #[error("Unknown initial SoC, can't compute energy to add")]
     UnknownInitSoCCantComputeEnergy,
+    #[error("Unknown target SoC, can't compute energy to add")]
+    UnknownTargetSoCCantComputeEnergy,
+    #[error("Unknown initial energy, can't compute energy to add")]
+    UnknownInitEnergyCantComputeEnergy,
 }
 
 pub struct BmsBuilder(Bms);

@@ -2,6 +2,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::ControlFlow;
 
 use anyhow::{Context, bail};
+use chrono::Utc;
 use futures::prelude::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
@@ -253,10 +254,10 @@ impl Dispatcher {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self
-            .notif_tx
-            .send(Notification::Connection(ChargeSystemConnectionState::Error))
-        {
+        if let Err(err) = self.notif_tx.send(Notification::Connection {
+            ts: Utc::now().into(),
+            state: ChargeSystemConnectionState::Error,
+        }) {
             error!("error sending notification: {err}");
         }
     }

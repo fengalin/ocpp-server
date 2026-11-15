@@ -5,17 +5,27 @@
 //! it does not speak OCPP — so the exact enum shapes here are the API the
 //! OLED app deserializes. Keep them stable.
 
-use crate::bms::{Bms, SoC};
+use crate::bms::Bms;
 use crate::meter_value::MeterValueSelection;
+use crate::model::Ts;
 use crate::plan_model::AppliedChargingPlan;
 
 pub const UNIX_SOCKET_PATH: &str = "/run/charge_system/socket";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Notification {
-    BmsUpdate(Bms),
-    Status(ChargeStatus),
-    Connection(ChargeSystemConnectionState),
+    BmsUpdate {
+        ts: Ts,
+        bms: Bms,
+    },
+    Status {
+        ts: Ts,
+        status: ChargeStatus,
+    },
+    Connection {
+        ts: Ts,
+        state: ChargeSystemConnectionState,
+    },
     MeterValues(MeterValueSelection),
     /// A plan was applied on the EVSE (including the plan-less `Unlimited` and
     /// the default post-session `Blocking`, both with no periods): the
@@ -28,9 +38,9 @@ impl Notification {
     /// `/api/stream` emits `Notification`s directly under these names).
     pub fn name(&self) -> &str {
         match self {
-            Notification::BmsUpdate(_) => "bms_update",
-            Notification::Status(_) => "status",
-            Notification::Connection(_) => "connection",
+            Notification::BmsUpdate { .. } => "bms_update",
+            Notification::Status { .. } => "status",
+            Notification::Connection { .. } => "connection",
             Notification::MeterValues(_) => "meter_values",
             Notification::ChargingPlan(_) => "charging_plan",
         }
@@ -47,24 +57,26 @@ impl Notification {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ChargeProgress {
-    /// Current state of charge (fraction 0–1).
-    pub soc: SoC,
-    /// Seconds until the end of the active charging schedule.
-    pub remaining_time: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChargeStatus {
     Available,
     Preparing,
-    Charging(ChargeProgress),
-    SuspendedEvse(ChargeProgress),
+    Charging,
+    SuspendedEvse,
+    SoCTargetReached,
     SuspendedEv,
     StoppedByUser,
     Finishing,
-    UnknownSession,
+    Unknown,
     Error,
+}
+
+impl ChargeStatus {
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            ChargeStatus::Preparing | ChargeStatus::Charging | ChargeStatus::SuspendedEvse
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

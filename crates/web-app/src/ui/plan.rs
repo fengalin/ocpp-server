@@ -3,6 +3,8 @@
 
 use std::rc::Rc;
 
+use chrono::Utc;
+
 use charge_system_common_model::{
     bms::{self, SoC},
     model::Ts,
@@ -17,9 +19,8 @@ use web_sys::{HtmlButtonElement, HtmlInputElement};
 
 use super::actions::confirm_show;
 use super::catchup::console_error;
-use super::render::{fmt_range, session_active};
-use crate::state::ClientState;
-use crate::ui::{now_ms, now_or_server_ts, on, with_ui, with_ui_ref};
+use super::render::fmt_range;
+use crate::ui::{now_or_server_ts, on, with_ui, with_ui_ref};
 use crate::{api, dom, state};
 
 /// The target SoC the form starts from until `bms.target_soc` (the source of
@@ -497,16 +498,9 @@ pub(crate) fn init_soc_sync() {
 
 /// While the remaining time is below this, show seconds on a per-second
 /// tick; above it, a per-minute update at minute granularity suffices.
-const COUNTDOWN_FINE_BELOW_MS: i64 = 3 * 60_000;
+const COUNTDOWN_FINE_BELOW_MS: i64 = 4 * 60_000;
 const COUNTDOWN_FINE_PERIOD_MS: i32 = 1_000;
-const COUNTDOWN_COARSE_PERIOD_MS: i32 = 60_000;
-
-/// Interpolated remaining time (ms) from the last server re-baseline, or
-/// `None` when no server value is known yet.
-fn remaining_now(s: &ClientState, now: i64) -> Option<i64> {
-    s.remaining_at
-        .map(|(secs, at)| (secs * 1_000 - (now - at)).max(0))
-}
+const COUNTDOWN_COARSE_PERIOD_MS: i32 = 30_000;
 
 /// Display format for the remaining time: `MM:SS` below the fine threshold,
 /// `H h MM min` / `M min` above it.
@@ -523,28 +517,15 @@ pub(crate) fn fmt_remaining(ms: i64) -> String {
 /// Update the plan card's "Remaining time" cell (which only exists once a
 /// plan has been rendered).
 fn update_remaining_texts() {
-    let Some(ms) = state::with_state(|s| remaining_now(s, now_ms())) else {
+    let Some(rem) = state::with_state(|s| {
+        s.server
+            .as_ref()
+            .and_then(|srv| srv.charging_plan.remaining(Utc::now(), &srv.bms))
+    }) else {
         return;
     };
     if let Some(el) = dom::el_option("plan-remaining") {
-        dom::set_text(&el, &fmt_remaining(ms));
-    }
-}
-
-/// Re-baseline the countdown from the fresh server state (the live charge
-/// progress's remaining time, the same source the `status` SSE events use).
-/// Called after each state fetch.
-pub(crate) fn countdown_rebaseline_from_state() {
-    let secs = state::with_state(|s| {
-        s.server.as_ref().and_then(|srv| match &srv.status {
-            ChargeStatus::Charging(p) | ChargeStatus::SuspendedEvse(p) => {
-                Some(p.remaining_time as i64)
-            }
-            _ => None,
-        })
-    });
-    if let Some(secs) = secs {
-        state::with_state(|s| s.remaining_at = Some((secs, now_ms())));
+        dom::set_text(&el, &fmt_remaining(rem.duration.num_milliseconds()));
     }
 }
 
@@ -552,18 +533,17 @@ pub(crate) fn countdown_rebaseline_from_state() {
 /// only. When the countdown reaches zero, drop the re-baseline and stop the
 /// timer (the next server update re-baselines and re-arms it).
 pub(crate) fn countdown_tick() {
-    let done = state::with_state(|s| {
-        if let Some((secs, at)) = s.remaining_at
-            && secs * 1_000 - (now_ms() - at) <= 0
-        {
-            s.remaining_at = None;
-            return true;
-        }
-        false
-    });
     update_remaining_texts();
-    if done {
+    let keep_ticking = state::with_state(|s| {
+        s.server
+            .as_ref()
+            .is_some_and(|srv| srv.status == ChargeStatus::Charging)
+    });
+    if !keep_ticking {
         set_countdown_timer(None);
+    } else {
+        // check if interval should be changed
+        countdown_sync();
     }
 }
 
@@ -574,48 +554,16 @@ pub(crate) fn countdown_tick() {
 pub(crate) fn countdown_sync() {
     let period = state::with_state(|s| {
         let srv = s.server.as_ref()?;
-        // A plan with a schedule counts down even before it starts.
-        if srv.charging_plan.periods.is_empty() {
-            // No schedule (e.g. blocking): nothing to count down — drop any
-            // stale re-baseline so the previous plan's time is not shown.
-            s.remaining_at = None;
-            return None;
-        }
-        let start_ms = match srv.charging_plan.periods.first().map(|p| p.start.0) {
-            Some(ms) => ms,
-            None => return None,
-        };
-        let end = srv.charging_plan.end()?;
-        if session_active(&srv.status) {
-            // A live session re-baselines from charge progress (`on_status`
-            // and state fetches); only fill in when none is set yet (e.g.
-            // just switched to Preparing).
-            if s.remaining_at.is_none() {
-                let secs = ((end.0 - now_ms()) / 1000).max(0);
-                if secs > 0 {
-                    s.remaining_at = Some((secs, now_ms()));
-                }
-            }
-        } else {
-            // No live progress: show the *charging time* still to come — the
-            // whole window before it starts, then its remaining part; nothing
-            // once the schedule has ended.
-            let now = now_ms();
-            let secs = if now < start_ms {
-                (end.0 - start_ms) / 1000
-            } else if now < end.0 {
-                (end.0 - now) / 1000
-            } else {
-                0
-            };
-            s.remaining_at = (secs > 0).then_some((secs, now));
-        }
-        match remaining_now(s, now_ms()) {
-            Some(ms) if ms > 0 => Some(if ms < COUNTDOWN_FINE_BELOW_MS {
-                COUNTDOWN_FINE_PERIOD_MS
-            } else {
-                COUNTDOWN_COARSE_PERIOD_MS
-            }),
+
+        let duration_ms = srv
+            .charging_plan
+            .remaining(Utc::now(), &srv.bms)?
+            .duration
+            .num_milliseconds();
+
+        match duration_ms {
+            500..COUNTDOWN_FINE_BELOW_MS => Some(COUNTDOWN_FINE_PERIOD_MS),
+            COUNTDOWN_FINE_BELOW_MS.. => Some(COUNTDOWN_COARSE_PERIOD_MS),
             _ => None,
         }
     });
@@ -628,13 +576,15 @@ pub(crate) fn countdown_sync() {
 fn set_countdown_timer(period_ms: Option<i32>) {
     let changed = with_ui(|ui| {
         if ui.countdown_period == period_ms {
-            return false;
+            false
+        } else {
+            if let Some(handle) = ui.countdown_timer.take() {
+                dom::window().clear_interval_with_handle(handle);
+            }
+            ui.countdown_period = period_ms;
+
+            true
         }
-        if let Some(handle) = ui.countdown_timer.take() {
-            dom::window().clear_interval_with_handle(handle);
-        }
-        ui.countdown_period = period_ms;
-        true
     });
     if !changed {
         return;
@@ -929,19 +879,5 @@ mod tests {
         assert_eq!(fmt_remaining(15_120_000), "4 h 12 min");
         assert_eq!(fmt_remaining(0), "00:00");
         assert_eq!(fmt_remaining(-5_000), "00:00");
-    }
-
-    #[test]
-    fn remaining_now_interpolates_down_and_clamps() {
-        let mut s = ClientState {
-            remaining_at: Some((120, 0)), // 120 s at client instant 0
-            ..Default::default()
-        };
-        assert_eq!(remaining_now(&s, 0), Some(120_000));
-        assert_eq!(remaining_now(&s, 30_000), Some(90_000));
-        assert_eq!(remaining_now(&s, 120_000), Some(0));
-        assert_eq!(remaining_now(&s, 200_000), Some(0)); // clamped at zero
-        s.remaining_at = None;
-        assert_eq!(remaining_now(&s, 0), None);
     }
 }

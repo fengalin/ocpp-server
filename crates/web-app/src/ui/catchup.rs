@@ -53,8 +53,10 @@ pub(crate) fn refresh(scope: RefreshScope) {
             // default, so the status/plan cards render from it right away.
             match api::get_state().await {
                 Ok(server) => {
-                    state::bump_rx_ts(server.ts.0);
-                    state::with_state(|s| s.server = Some(server));
+                    state::with_state(|s| {
+                        s.bump_rx_ts(server.ts.0);
+                        s.server = Some(server)
+                    });
                     render();
                 }
                 Err(e) => console_error("refresh: state", &e),
@@ -65,14 +67,7 @@ pub(crate) fn refresh(scope: RefreshScope) {
                 Ok(events) => {
                     state::with_state(|s| {
                         s.events = events.into_iter().rev().collect();
-                        if let Some(top) = s.events.first()
-                            && let ChargeStatus::Charging(_) | ChargeStatus::SuspendedEvse(_) =
-                                top.status
-                        {
-                            s.update_from_charge_status(top.status);
-                        }
                     });
-                    plan::countdown_rebaseline_from_state();
                     render();
                 }
                 Err(e) => console_error("refresh: events", &e),
@@ -89,11 +84,7 @@ pub(crate) fn refresh(scope: RefreshScope) {
         });
         match api::get_metrics(&from, &to).await {
             Ok(metrics) => {
-                let last_ts = metrics.last().map(|m| m.ts.0);
                 state::with_state(|s| s.metrics = metrics);
-                if let Some(ts) = last_ts {
-                    state::bump_rx_ts(ts);
-                }
                 if active_tab() == "metrics" {
                     // All enabled graphs redraw together on the shared window.
                     plot::sync();
@@ -145,11 +136,13 @@ pub(crate) fn on_charging_plan(applied: AppliedChargingPlan) {
     render();
 }
 
-pub(crate) fn on_bms_update(bms: Bms) {
+pub(crate) fn on_bms_update((ts, bms): (Ts, Bms)) {
     state::with_state(|s| {
         if let Some(ref mut srv) = s.server {
+            srv.ts = ts;
             srv.bms = bms;
         }
+        s.bump_rx_ts(ts.0);
     });
     // A BmsUpdate is the only event that may re-seed the target-SoC field:
     // a local edit persists across renders until the server overrides it.
@@ -158,17 +151,8 @@ pub(crate) fn on_bms_update(bms: Bms) {
 }
 
 pub(crate) fn on_meter_values(mv: MeterValueSelection) {
-    let ts = mv.ts.0;
-    let energy = mv.energy;
     state::with_state(|s| {
         s.metrics.push(mv);
-        // MeterValues with a defined energy is the source of the server BMS
-        // copy's `current_energy` (session energy derives from it).
-        if let Some(server) = s.server.as_mut()
-            && let Some(energy) = energy
-        {
-            server.bms.update_energy(energy);
-        }
         // Keep the visible window anchored to the newest MeterValues so all
         // graphs share the same timeframe. MeterValues are time-ordered, so cut
         // the expired prefix by binary search instead of rescanning the vec.
@@ -180,7 +164,6 @@ pub(crate) fn on_meter_values(mv: MeterValueSelection) {
             }
         }
     });
-    state::bump_rx_ts(ts);
     // Redraw every enabled graph on arrival (even when this update carries
     // no value for one of them) so they stay aligned on the same window.
     if active_tab() == "metrics" {
@@ -191,16 +174,17 @@ pub(crate) fn on_meter_values(mv: MeterValueSelection) {
 /// SSE `status` handler: apply the charge status (and its live SoC and
 /// remaining time) to the server state, append the event-log entry it
 /// represents on the server side, re-baseline the countdown, then render.
-pub(crate) fn on_status(cs: ChargeStatus) {
+pub(crate) fn on_status((ts, cs): (Ts, ChargeStatus)) {
     // Every status notification is exactly one event-log entry on the
     // server; reconstruct it here (client clock — a refresh replaces the
     // log with the server's authoritative history).
-    state::push_event_local(EventLogEntry {
-        ts: Ts(now_ms()),
-        status: cs,
-    });
+    state::push_event_local(EventLogEntry { ts, status: cs });
     state::with_state(|s| {
-        s.update_from_charge_status(cs);
+        if let Some(ref mut srv) = s.server {
+            srv.ts = ts;
+            srv.status = cs;
+        }
+        s.bump_rx_ts(ts.0);
     });
     // `render()` re-syncs the countdown from the fresh re-baseline.
     render();

@@ -77,9 +77,9 @@ impl UnixSocketNotifier {
         loop {
             let msg = self.notif_rx.recv().await.context("notif chan receiver")?;
             match &msg {
-                Notification::Status(_)
-                | Notification::BmsUpdate(_)
-                | Notification::Connection(_)
+                Notification::Status { .. }
+                | Notification::BmsUpdate { .. }
+                | Notification::Connection { .. }
                 | Notification::ChargingPlan(_) => (),
                 Notification::MeterValues(_) => continue,
             }

@@ -39,12 +39,13 @@ pub(crate) fn status_color(s: &ChargeStatus) -> &'static str {
     match s {
         Available => "#7d8590",
         Preparing => "#5aa9e6",
-        Charging(_) => "#4cc38a",
-        SuspendedEvse(_) => "#e6b45a",
+        Charging => "#4cc38a",
+        SuspendedEvse => "#e6b45a",
+        SoCTargetReached => "#9b8ae6",
         SuspendedEv => "#9b8ae6",
         StoppedByUser => "#9b8ae6",
         Finishing => "#9b8ae6",
-        UnknownSession => "#7d8590",
+        Unknown => "#7d8590",
         Error => "#e05a5a",
     }
 }
@@ -55,12 +56,13 @@ pub(crate) fn status_name(s: &ChargeStatus) -> &'static str {
     match s {
         Available => "Available",
         Preparing => "Preparing",
-        Charging(_) => "Charging",
-        SuspendedEvse(_) => "Suspended (EVSE)",
+        Charging => "Charging",
+        SuspendedEvse => "Suspended (EVSE)",
+        SoCTargetReached => "SoC target reached",
         SuspendedEv => "Suspended (EV)",
         StoppedByUser => "Stopped by user",
         Finishing => "Finishing",
-        UnknownSession => "Unknown session",
+        Unknown => "Unknown",
         Error => "Error",
     }
 }

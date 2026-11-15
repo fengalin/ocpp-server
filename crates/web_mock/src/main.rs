@@ -30,7 +30,7 @@ use charge_system_common_model::{
     bms::{self, Bms, SoC},
     meter_value::MeterValueSelection,
     model::{EventLogEntry, Ts},
-    notification::{ChargeProgress, ChargeStatus, Notification},
+    notification::{ChargeStatus, Notification},
     plan,
     plan_model::{AppliedChargingPlan, ChargingPlan, PlanKind},
 };
@@ -88,18 +88,6 @@ impl World {
     /// `webserver/world.rs`): a charging phase keeps its start entry plus
     /// one live entry; every other status appends. Capped at `MAX_EVENTS`.
     fn push_event(&mut self, e: EventLogEntry) {
-        let mut trailing_charging = 0;
-        for ev in self.events.iter().rev() {
-            if matches!(ev.status, ChargeStatus::Charging(_)) {
-                trailing_charging += 1;
-            } else {
-                break;
-            }
-        }
-        if matches!(&e.status, ChargeStatus::Charging(_)) && trailing_charging >= 2 {
-            *self.events.back_mut().expect("live Charging entry") = e;
-            return;
-        }
         self.events.push_back(e);
         self.events.retain_back(MAX_EVENTS);
     }
@@ -453,6 +441,8 @@ async fn drive(st: AppState) {
     let world = st.world.clone();
 
     loop {
+        let ts = Utc::now().into();
+
         // Available — like the server on Finishing -> Available, the default
         // (Blocking) plan is applied between sessions.
         let applied = AppliedChargingPlan {
@@ -467,7 +457,10 @@ async fn drive(st: AppState) {
                 status: ChargeStatus::Available,
             });
         }
-        let _ = tx.send(Notification::Status(ChargeStatus::Available));
+        let _ = tx.send(Notification::Status {
+            ts,
+            status: ChargeStatus::Available,
+        });
         let _ = tx.send(Notification::ChargingPlan(applied));
         sleep(StdDuration::from_secs(2)).await;
 
@@ -492,13 +485,19 @@ async fn drive(st: AppState) {
                 .periods;
             w.charging_plan = AppliedChargingPlan { plan, periods };
             w.push_event(EventLogEntry {
-                ts: Ts::from_utc(Utc::now()),
+                ts,
                 status: ChargeStatus::Preparing,
             });
             // Like the server: a new session changes the BMS (initial/current
             // energy) — broadcast it so session-energy bookkeeping is correct.
-            let _ = tx.send(Notification::BmsUpdate(w.bms.clone()));
-            let _ = tx.send(Notification::Status(ChargeStatus::Preparing));
+            let _ = tx.send(Notification::BmsUpdate {
+                ts,
+                bms: w.bms.clone(),
+            });
+            let _ = tx.send(Notification::Status {
+                ts,
+                status: ChargeStatus::Preparing,
+            });
             let _ = tx.send(Notification::ChargingPlan(w.charging_plan.clone()));
         }
         sleep(StdDuration::from_secs(2)).await;
@@ -509,9 +508,8 @@ async fn drive(st: AppState) {
             let mut energy = 5_000u64;
             let mut i = 0u64;
             loop {
-                let now = Utc::now();
                 let mv = MeterValueSelection {
-                    ts: Ts::from_utc(now),
+                    ts: Utc::now().into(),
                     energy: Some(energy),
                     // Mirror the CP's mixed MeterValues: every 4th sample has
                     // no power measure, every 7th has no temperature.
@@ -525,25 +523,13 @@ async fn drive(st: AppState) {
                     w.bms
                         .sync_current_soc(SoC::new_absolute(soc).round_per_1000())
                         .unwrap();
+                    let _ = tx.send(Notification::BmsUpdate {
+                        ts: mv.ts,
+                        bms: w.bms.clone(),
+                    });
                     w.push_sample(mv.clone());
                 }
                 let _ = tx.send(Notification::MeterValues(mv));
-                // Like the real server, charge progress rides on status
-                // updates (here: every 5th sample, 1 s apart), carrying the
-                // live SoC and the synthetic ramp's remaining time.
-                if i.is_multiple_of(5) {
-                    let remaining = (((0.90 - soc) / 0.005).ceil() as u32).max(1);
-                    let status = ChargeStatus::Charging(ChargeProgress {
-                        soc: SoC::new_absolute(soc).round_per_1000(),
-                        remaining_time: remaining,
-                    });
-                    let mut w = world.lock().await;
-                    w.push_event(EventLogEntry {
-                        ts: Ts::from_utc(Utc::now()),
-                        status,
-                    });
-                    let _ = tx.send(Notification::Status(status));
-                }
                 energy += 12; // ~12 Wh per sample (7 kW * 1 s / 3600 ~ 2 Wh, scaled up for visibility)
                 soc = (soc + 0.005).min(0.90);
                 i += 1;
@@ -562,7 +548,10 @@ async fn drive(st: AppState) {
                 ts: Ts::from_utc(Utc::now()),
                 status: ChargeStatus::SuspendedEv,
             });
-            let _ = tx.send(Notification::Status(ChargeStatus::SuspendedEv));
+            let _ = tx.send(Notification::Status {
+                ts: Utc::now().into(),
+                status: ChargeStatus::SuspendedEv,
+            });
         }
         sleep(StdDuration::from_secs(6)).await;
     }

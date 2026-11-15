@@ -3,7 +3,10 @@ use ocpp_rs::v16::enums;
 use std::{fmt, str};
 use tracing::{debug, error};
 
-use charge_system_common_model::bms::{Bms, SoC, SoCProgress};
+use charge_system_common_model::{
+    bms::{Bms, SoC, SoCProgress},
+    notification::ChargeStatus,
+};
 
 use crate::Database;
 
@@ -437,6 +440,12 @@ impl str::FromStr for ChargingSessionState {
 
 impl From<enums::ChargePointStatus> for ChargingSessionState {
     fn from(cp_status: enums::ChargePointStatus) -> Self {
+        ChargingSessionState::from(&cp_status)
+    }
+}
+
+impl<'a> From<&'a enums::ChargePointStatus> for ChargingSessionState {
+    fn from(cp_status: &'a enums::ChargePointStatus) -> Self {
         use ChargingSessionState::*;
         use enums::ChargePointStatus::*;
         match cp_status {
@@ -474,6 +483,28 @@ impl From<Option<&enums::Reason>> for ChargingSessionState {
             enums::Reason::Reboot => ChargingSessionState::Reboot,
             Other => Error("other".to_string()),
             enums::Reason::Unknown(code) => Error(format!("unknown({code}")),
+        }
+    }
+}
+
+impl From<ChargingSessionState> for ChargeStatus {
+    fn from(state: ChargingSessionState) -> Self {
+        ChargeStatus::from(&state)
+    }
+}
+
+impl<'a> From<&'a ChargingSessionState> for ChargeStatus {
+    fn from(state: &'a ChargingSessionState) -> Self {
+        use ChargingSessionState::*;
+        match state {
+            Preparing => ChargeStatus::Preparing,
+            Charging => ChargeStatus::Charging,
+            SoCTargetReached => ChargeStatus::SoCTargetReached,
+            SuspendedByEvse => ChargeStatus::SuspendedEvse,
+            SuspendedByEv => ChargeStatus::SuspendedEv,
+            StoppedByUser => ChargeStatus::StoppedByUser,
+            Reboot | UnlockCommandFromServer | Unknown => ChargeStatus::Unknown,
+            Error(_) => ChargeStatus::Error,
         }
     }
 }

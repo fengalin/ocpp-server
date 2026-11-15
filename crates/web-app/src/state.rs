@@ -7,14 +7,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use charge_system_common_model::{
-    meter_value::MeterValueSelection, model::EventLogEntry, notification::ChargeStatus,
-};
+use charge_system_common_model::{meter_value::MeterValueSelection, model::EventLogEntry};
 use charge_system_web_model::model::{MAX_EVENTS, ServerState};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
-use crate::{dom, ui::now_ms};
+use crate::dom;
 
 /// SSE link state, shown by the header dot: grey while connecting, green
 /// once open, red on error (the browser auto-retries in the background).
@@ -32,13 +30,12 @@ pub struct ClientState {
     pub link: Link,
     /// Timestamp (ms) of the newest message received from the server — the
     /// header's freshness indicator ("last update").
-    pub last_rx_ts: i64,
+    pub last_rx_ts: Option<i64>,
     /// Selected tab (persisted; the DOM's `active` classes mirror it).
     pub tab: String,
     /// Remaining charging time as last reported by the server:
     /// `(seconds remaining, client-ms instant of the report)`. The countdown
     /// interpolates from this re-baseline between updates.
-    pub remaining_at: Option<(i64, i64)>,
     pub window: i64, // metrics window in ms
     pub power: bool,
     pub energy: bool,
@@ -50,24 +47,10 @@ pub struct ClientState {
 }
 
 impl ClientState {
-    pub fn update_from_charge_status(&mut self, cs: ChargeStatus) {
-        if let ChargeStatus::Charging(p) | ChargeStatus::SuspendedEvse(p) = &cs {
-            if let Some(ref mut srv) = self.server
-                && let Err(err) = srv.bms.sync_current_soc(p.soc)
-            {
-                web_sys::console::error_1(&JsValue::from_str(&format!(
-                    "failed to sync bms {:?} with SoC {} progress: {err}",
-                    srv.bms, p.soc,
-                )));
-            }
-            // Copy out the remaining time before `cs` is moved into the log entry.
-            self.remaining_at = Some((p.remaining_time as i64, now_ms()));
-        } else {
-            self.remaining_at = None;
-        }
-
-        if let Some(ref mut srv) = self.server {
-            srv.status = cs;
+    /// Record a server-provided timestamp for the header's freshness indicator.
+    pub fn bump_rx_ts(&mut self, ts: i64) {
+        if self.last_rx_ts.is_none_or(|last_ts| ts > last_ts) {
+            self.last_rx_ts = Some(ts);
         }
     }
 }
@@ -79,9 +62,8 @@ impl Default for ClientState {
             metrics: Vec::new(),
             events: Vec::new(),
             link: Link::Connecting,
-            last_rx_ts: 0,
+            last_rx_ts: None,
             tab: "status".into(),
-            remaining_at: None,
             window: DEFAULT_WINDOW_MS,
             power: true,
             energy: false,
@@ -136,15 +118,6 @@ pub fn set_link(link: Link) {
     with_state(|s| s.link = link);
 }
 
-/// Record a server-provided timestamp for the header's freshness indicator.
-pub fn bump_rx_ts(ts: i64) {
-    with_state(|s| {
-        if ts > s.last_rx_ts {
-            s.last_rx_ts = ts;
-        }
-    });
-}
-
 /// Append a status entry to the local event log, mirroring the server's
 /// retention rule (see `World::push_event`): a charging phase keeps its start
 /// entry plus one live entry — a new `Charging` entry appends while the phase
@@ -153,18 +126,6 @@ pub fn bump_rx_ts(ts: i64) {
 /// whole log with the server's authoritative history.
 pub fn push_event_local(e: EventLogEntry) {
     with_state(|s| {
-        let mut leading_charging = 0;
-        for ev in s.events.iter() {
-            if matches!(ev.status, ChargeStatus::Charging(_)) {
-                leading_charging += 1;
-            } else {
-                break;
-            }
-        }
-        if matches!(&e.status, ChargeStatus::Charging(_)) && leading_charging >= 2 {
-            s.events[0] = e; // the newest entry is the live one
-            return;
-        }
         s.events.insert(0, e);
         s.events.truncate(MAX_EVENTS);
     });
@@ -442,9 +403,8 @@ pub fn from_iso(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use charge_system_common_model::bms::SoC;
-
     use super::*;
+    use charge_system_common_model::notification::ChargeStatus;
 
     #[test]
     fn dur_formats() {
@@ -463,9 +423,8 @@ mod tests {
         assert!(!s.energy);
         assert!(!s.voltage);
         assert_eq!(s.link, Link::Connecting);
-        assert_eq!(s.last_rx_ts, 0);
+        assert!(s.last_rx_ts.is_none());
         assert_eq!(s.tab, "status");
-        assert_eq!(s.remaining_at, None);
         assert!(s.metrics.is_empty());
         assert!(s.events.is_empty());
     }
@@ -489,33 +448,6 @@ mod tests {
             ts: charge_system_common_model::model::Ts(ts),
             status,
         }
-    }
-
-    fn charging_abs(soc: f32) -> ChargeStatus {
-        ChargeStatus::Charging(charge_system_common_model::notification::ChargeProgress {
-            soc: SoC::new_absolute(soc),
-            remaining_time: 100,
-        })
-    }
-
-    #[test]
-    fn local_event_log_mirrors_server_dedup() {
-        // Newest first: push a charging phase with three progress updates.
-        with_state(|s| {
-            s.events.clear();
-        });
-        push_event_local(entry(1, ChargeStatus::Available));
-        push_event_local(entry(2, charging_abs(0.2)));
-        push_event_local(entry(3, charging_abs(0.4)));
-        push_event_local(entry(4, charging_abs(0.6)));
-
-        let list = with_state(|s| s.events.clone());
-        assert_eq!(list.len(), 3);
-        // Newest first: live entry (latest) first, then the frozen start
-        // entry, then the rest of the history.
-        assert_eq!(list[0].ts.0, 4);
-        assert_eq!(list[1].ts.0, 2);
-        assert_eq!(list[2].ts.0, 1);
     }
 
     #[test]

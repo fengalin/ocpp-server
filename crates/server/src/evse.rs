@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use ocpp_rs::v16::{call, enums::*};
 use tokio::sync::broadcast;
 use tracing::*;
@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use charge_system_common_model::notification::{self, Notification};
 use charge_system_common_model::{
-    bms::{self, Bms},
+    bms::Bms,
     meter_value::MeterValueSelection,
     plan_model::{AppliedChargingPlan, ChargingPlan},
 };
@@ -104,7 +104,7 @@ impl Evse {
         info!(bms = %this.bms, "BMS");
 
         this.notify_charging_plan(this.charging_schedule.get_applied_plan());
-        this.broadcast_bms_update();
+        this.broadcast_bms_update(Utc::now());
 
         this
     }
@@ -118,18 +118,18 @@ impl Evse {
                 cs.apply_bms_updates(&Database::get(), &mut self.bms);
             }
 
-            self.broadcast_bms_update();
+            self.broadcast_bms_update(Utc::now());
         } else {
             warn!(%init_soc, "## not updating");
         }
     }
 
-    pub fn broadcast_bms_update(&self) {
+    pub fn broadcast_bms_update(&self, ts: DateTime<Utc>) {
         info!(bms = %self.bms, "## broadcasting BMS update");
-        if let Err(err) = self
-            .notif_tx
-            .send(Notification::BmsUpdate(self.bms.clone()))
-        {
+        if let Err(err) = self.notif_tx.send(Notification::BmsUpdate {
+            ts: ts.into(),
+            bms: self.bms.clone(),
+        }) {
             error!(%err, "error broadcasting BMS update");
         }
     }
@@ -192,7 +192,7 @@ impl Evse {
         if let Err(err) = self.notif_tx.send(Notification::ChargingPlan(applied)) {
             error!("error broadcasting charging plan notification: {err}");
         }
-        self.notif_session_progress();
+        self.notif_session_progress(Utc::now());
     }
 
     pub fn refresh_charging_schedule(&mut self) {
@@ -294,7 +294,6 @@ impl Evse {
                                         .to_string(),
                                 ),
                             );
-                            self.notif_session_progress();
                             self.charging_session = None;
                         } else {
                             if self.saw_finishing {
@@ -314,8 +313,8 @@ impl Evse {
                                 // might have reconnected re-apply last known plan
                                 self.commit_charging_schedule();
                             }
-                            self.notif_state(notification::ChargeStatus::Available);
                         }
+                        self.notif_state(status_ts, notification::ChargeStatus::Available);
                     }
                     ChargePointStatus::Finishing => {
                         if let Some(ref mut cs) = self.charging_session {
@@ -338,14 +337,12 @@ impl Evse {
                                     cs.last_energy(),
                                     ChargePointStatus::Finishing,
                                 );
-                                self.notif_session_progress();
                             } else {
                                 cs.set_state(status.status.clone());
-                                self.notif_session_progress();
                             }
-                        } else {
-                            self.notif_state(notification::ChargeStatus::Finishing);
+                            self.notif_session_progress(status_ts);
                         }
+                        self.notif_state(status_ts, notification::ChargeStatus::Finishing);
                     }
                     ChargePointStatus::Preparing
                     | ChargePointStatus::Charging
@@ -358,36 +355,38 @@ impl Evse {
                             // and can only hope we got at least one MeterValue
                             // with the transaction id before getting this
                             // StatusNotification
-                            cs.set_state(status.status.clone());
-                            self.notif_session_progress();
+                            cs.set_state(&status.status);
+                            self.notif_session_progress(status_ts);
+                            self.notif_state(
+                                status_ts,
+                                ChargingSessionState::from(&status.status).into(),
+                            );
                         } else if matches!(status.status, ChargePointStatus::Preparing) {
-                            self.notif_state(notification::ChargeStatus::Preparing);
+                            self.notif_state(status_ts, notification::ChargeStatus::Preparing);
                         } else {
                             // FIXME start a new session instead
-                            self.notif_state(notification::ChargeStatus::UnknownSession);
+                            self.notif_state(status_ts, notification::ChargeStatus::Unknown);
                         }
                     }
                     ChargePointStatus::SuspendedEV => {
                         // FIXME reached 100% => not restarting the session?
                         if let Some(ref mut cs) = self.charging_session {
                             cs.set_state(status.status.clone());
-                            self.notif_session_progress();
-                        } else {
-                            self.notif_state(notification::ChargeStatus::SuspendedEv);
+                            self.notif_session_progress(status_ts);
                         }
+                        self.notif_state(status_ts, notification::ChargeStatus::SuspendedEv);
                     }
                     ChargePointStatus::Faulted => {
                         // FIXME reached 100% => not restarting the session?
                         if let Some(ref mut cs) = self.charging_session {
                             cs.set_state(status.status.clone());
-                            self.notif_session_progress();
-                        } else {
-                            self.notif_state(notification::ChargeStatus::Error);
+                            self.notif_session_progress(status_ts);
                         }
+                        self.notif_state(status_ts, notification::ChargeStatus::Error);
                     }
                     _ => {
                         warn!("unhandled charging point status: {:?}", status.status);
-                        self.notif_state(notification::ChargeStatus::Error);
+                        self.notif_state(status_ts, notification::ChargeStatus::Error);
                     }
                 }
 
@@ -452,7 +451,7 @@ impl Evse {
         // A new session changed the BMS (initial/current energy) — broadcast
         // it so clients' session-energy bookkeeping (current − initial) is
         // correct from the first status event.
-        self.broadcast_bms_update();
+        self.broadcast_bms_update(ts);
     }
 
     /// Handles incoming stop transaction from charging point
@@ -542,6 +541,8 @@ impl Evse {
         // so consider incoming energy significant for current charging session, if any
 
         if let Some(energy) = mv.energy {
+            let ts = mv.ts.to_utc();
+
             use EnergyTracker::*;
             self.energy_tracker.have_energy(energy);
             match self.energy_tracker {
@@ -554,27 +555,29 @@ impl Evse {
                                 warn!(
                                     received_tid = tid,
                                     expected_tid = cs.transaction_id(),
+                                    ts = %ts.with_timezone(&Local),
                                     "## Increasing energy & tid mismatch",
                                 );
                                 cs.set_state(ChargingSessionState::Error(
                                     "transaction id mismatch".to_string(),
                                 ));
 
-                                self.start_session(mv.ts.to_utc(), tid, energy);
-                                self.notif_session_progress();
+                                self.start_session(ts, tid, energy);
+                                self.notif_session_progress(ts);
                             }
                         } else {
                             warn!(
                                 tid = cs.transaction_id(),
+                                ts = %ts.with_timezone(&Local),
                                 "## Increasing energy & missing tid - updating current session anyway",
                             );
                             self.update_current_session(mv, energy);
                         }
                     } else if let Some(tid) = tid {
-                        warn!(tid, "## Increasing energy & tid for unknown session");
+                        warn!(tid, ts = %ts.with_timezone(&Local), "## Increasing energy & tid for unknown session");
 
-                        self.start_session(mv.ts.to_utc(), tid, energy);
-                        self.notif_session_progress();
+                        self.start_session(ts, tid, energy);
+                        self.notif_session_progress(ts);
                     }
                 }
                 Stationnary(_) => {
@@ -584,36 +587,38 @@ impl Evse {
                                 if let Some(last_snapshot) = cs.last_snapshot()
                                     && last_snapshot.energy != energy
                                 {
-                                    warn!("## Stationary energy, but session is not up to date");
+                                    warn!(ts = %ts.with_timezone(&Local), "## Stationary energy, but session is not up to date");
                                     self.update_current_session(mv, energy);
                                 }
                             } else {
                                 warn!(
                                     received_tid = tid,
                                     expected_tid = cs.transaction_id(),
+                                    ts = %ts.with_timezone(&Local),
                                     "## Stationary energy & tid mismatch",
                                 );
                                 cs.set_state(ChargingSessionState::Error(
                                     "transaction id mismatch".to_string(),
                                 ));
 
-                                self.start_session(mv.ts.to_utc(), tid, energy);
-                                self.notif_session_progress();
+                                self.start_session(ts, tid, energy);
+                                self.notif_session_progress(ts);
                             }
                         } else if let Some(last_snapshot) = cs.last_snapshot()
                             && last_snapshot.energy != energy
                         {
                             warn!(
                                 expected_tid = cs.transaction_id(),
+                                ts = %ts.with_timezone(&Local),
                                 "## Stationary energy & missing tid - updating session which is not up to date",
                             );
                             self.update_current_session(mv, energy);
                         }
                     } else if let Some(tid) = tid {
-                        warn!(tid, "## Stationary energy with tid & for unknown session");
+                        warn!(tid, ts = %ts.with_timezone(&Local), "## Stationary energy with tid & for unknown session");
 
-                        self.start_session(mv.ts.to_utc(), tid, energy);
-                        self.notif_session_progress();
+                        self.start_session(ts, tid, energy);
+                        self.notif_session_progress(ts);
                     }
                 }
                 Probation(_) => {
@@ -625,7 +630,7 @@ impl Evse {
                         self.update_current_session(mv, energy);
                     }
 
-                    info!(">> MeterValue with energy set to probation");
+                    info!(ts = %ts.with_timezone(&Local), ">> MeterValue with energy set to probation");
                 }
                 Unknown => unreachable!("energy added"),
             }
@@ -637,11 +642,9 @@ impl Evse {
             return;
         };
 
-        let remain_sched = self
-            .charging_schedule
-            .remaining(Utc::now(), bms::STATIC_LOSS);
+        let ts = mv.ts.to_utc();
 
-        let snapshot = ChargingSessionSnapshot::builder(mv.ts.to_utc(), energy)
+        let snapshot = ChargingSessionSnapshot::builder(ts, energy)
             .power(mv.power)
             .l1_voltage(mv.voltage)
             .temperature(mv.temperature)
@@ -649,24 +652,28 @@ impl Evse {
 
         let soc_progress = cs.add_snapshot(&mut self.bms, snapshot);
 
-        if soc_progress.is_complete()
+        if self.charging_schedule.plan == ChargingPlan::Unlimited
             && !cs.is_complete()
-            // don't stop if we are nearly done with the schedule
+            && soc_progress.is_complete()
+        {
+            // just reached the target SoC with an unlimited plan
+            // don't stop now if we are nearly done with the scheduled energy
             // (less than 1% here) so we can start a new one without unplugging
             // FIXME could be an option
             // FIXME implement an optional intermediate SoC target for multi-period scheds
-            && remain_sched.energy as f32 > self.bms.capacity() / 100.0
-        {
-            info!(
-                "## Stopping session {}: {soc_progress}",
-                cs.transaction_id()
-            );
-            cs.set_state(ChargingSessionState::SoCTargetReached);
-            self.command_queue
-                .push_back(CommandToChargingPoint::StopTransaction);
-        }
+            let remain_sched = self.charging_schedule.remaining(ts, &self.bms);
+            if remain_sched.is_some_and(|rem| rem.energy as f32 > self.bms.capacity() / 100.0) {
+                info!(tid = %cs.transaction_id(), % soc_progress, "## Stopping session");
 
-        self.notif_session_progress();
+                cs.set_state(ChargingSessionState::SoCTargetReached);
+                self.command_queue
+                    .push_back(CommandToChargingPoint::StopTransaction);
+                self.notif_state(ts, ChargingSessionState::SoCTargetReached.into());
+            }
+        }
+        // else: other non-blocking charging plans are deadline bound
+
+        self.notif_session_progress(ts);
     }
 
     pub fn have_dpm_data(&mut self, dpm_data: DpmSelection) {
@@ -690,7 +697,7 @@ impl Evse {
         self.commit_charging_schedule();
     }
 
-    fn notif_session_progress(&self) {
+    fn notif_session_progress(&self, ts: DateTime<Utc>) {
         let Some(ref cs) = self.charging_session else {
             return;
         };
@@ -698,46 +705,23 @@ impl Evse {
             return;
         }
 
-        let remain_sched = self
-            .charging_schedule
-            .remaining(Utc::now(), bms::STATIC_LOSS);
-
         info!(
             %cs,
-            %remain_sched,
+            ts = %ts.with_timezone(&Local),
+            remain_sched = %self.charging_schedule.remaining(ts, &self.bms).map_or(String::from('—'), |rem| rem.to_string()),
             soc_target = %self.bms.target_soc_str(),
             "## session",
         );
 
-        use ChargingSessionState::*;
-        use notification::ChargeStatus;
-        let charge_state = match *cs.state() {
-            Preparing => ChargeStatus::Preparing,
-            Charging | SuspendedByEvse | SoCTargetReached => {
-                let charge_progress = notification::ChargeProgress {
-                    // reduce size on wire - clients don't need the extra precision
-                    soc: cs.last_soc().round_per_1000(),
-                    remaining_time: remain_sched.duration.num_seconds() as u32,
-                };
-                match *cs.state() {
-                    Charging => notification::ChargeStatus::Charging(charge_progress),
-                    SuspendedByEvse | SoCTargetReached => {
-                        notification::ChargeStatus::SuspendedEvse(charge_progress)
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            SuspendedByEv => ChargeStatus::SuspendedEv,
-            Error(_) => ChargeStatus::Error,
-            _ => return,
-        };
-
-        self.notif_state(charge_state);
+        self.broadcast_bms_update(ts);
     }
 
-    fn notif_state(&self, state: notification::ChargeStatus) {
-        trace!("notifiying {state:?}");
-        if let Err(err) = self.notif_tx.send(Notification::Status(state)) {
+    fn notif_state(&self, ts: DateTime<Utc>, status: notification::ChargeStatus) {
+        trace!("notifiying {status:?}");
+        if let Err(err) = self.notif_tx.send(Notification::Status {
+            ts: ts.into(),
+            status,
+        }) {
             error!("error sending notification: {err}");
         }
     }

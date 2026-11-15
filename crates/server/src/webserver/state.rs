@@ -2,15 +2,13 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use log::{debug, warn};
 use tokio::sync::{Mutex, broadcast};
-use tracing::error;
 
 use charge_system_common_model::{
     bms::{self, Bms},
-    model::{EventLogEntry, Ts},
-    notification::{ChargeStatus, Notification},
+    model::EventLogEntry,
+    notification::Notification,
 };
 
 use crate::CommandSender;
@@ -29,7 +27,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(cmd_tx: CommandSender, notif_tx: broadcast::Sender<Notification>) -> Self {
-        let world = World::new(Utc::now(), Bms::builder(bms::DEFAULT_CAPACITY).build());
+        let world = World::new(
+            chrono::Utc::now(),
+            Bms::builder(bms::DEFAULT_CAPACITY).build(),
+        );
         Self {
             world: Arc::new(Mutex::new(world)),
             notif_tx,
@@ -67,8 +68,9 @@ impl AppState {
     /// clients subscribe to the channel directly.
     pub async fn record(&self, notif: Notification) {
         match notif {
-            Notification::BmsUpdate(bms) => {
+            Notification::BmsUpdate { ts, bms } => {
                 let mut world = self.world.lock().await;
+                world.last_ts = ts.to_utc();
                 world.bms = bms.clone();
             }
             Notification::MeterValues(meter_values) => {
@@ -81,34 +83,17 @@ impl AppState {
                 }
                 world.push_meter_values(meter_values.clone());
             }
-            Notification::Status(status) => {
+            Notification::Status { ts, status } => {
                 let mut world = self.world.lock().await;
+                world.last_ts = ts.to_utc();
 
-                if let ChargeStatus::Charging(progress) | ChargeStatus::SuspendedEvse(progress) =
-                    status
-                {
-                    // A charge-progress update carries the current SoC; apply
-                    // it to the world BMS so `/api/state` and the frontend
-                    // stay current between meter values (which own
-                    // `current_energy`).
-                    if let Err(err) = world.bms.sync_current_soc(progress.soc) {
-                        error!(%err, soc = %progress.soc, "failed to sync progress SoC");
-                    }
-                }
-
-                world.push_event(EventLogEntry {
-                    ts: Ts::from_utc(Utc::now()),
-                    status,
-                });
+                world.push_event(EventLogEntry { ts, status });
             }
-            Notification::Connection(_) => (),
+            Notification::Connection { ts, .. } => {
+                self.world.lock().await.last_ts = ts.to_utc();
+            }
             Notification::ChargingPlan(applied) => {
                 let mut world = self.world.lock().await;
-                // The plan's target SoC *is* the EVSE's BMS target: mirror it
-                // onto the world BMS (plans without a charging target clear
-                // any stale value — the EVSE no longer sends a separate
-                // BmsUpdate on the plan path).
-                world.bms.target_soc = applied.plan.target_soc();
                 // `Unlimited` means no plan is in effect (the charging point's
                 // charging is unrestricted); every other variant — including
                 // the default post-session `Blocking` — is the plan now active

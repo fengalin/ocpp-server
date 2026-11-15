@@ -11,15 +11,6 @@ use charge_system_common_model::{
 use crate::ui::{plan, status_color, status_name};
 use crate::{dom, plot, state};
 
-/// A charging session is in progress when the CP is preparing, charging or
-/// suspended by the EVSE.
-pub(crate) fn session_active(s: &ChargeStatus) -> bool {
-    matches!(
-        s,
-        ChargeStatus::Preparing | ChargeStatus::Charging(_) | ChargeStatus::SuspendedEvse(_)
-    )
-}
-
 /// Name of the active tab. The source of truth is `state.tab` (kept by
 /// `tabs::activate_tab`); the DOM's `active` classes mirror it.
 pub(crate) fn active_tab() -> String {
@@ -81,36 +72,47 @@ pub(crate) fn fmt_range(start_ms: i64, end_ms: i64) -> String {
 fn plan_card_html(applied: &AppliedChargingPlan, bms: &Bms, remaining_id: &str) -> String {
     let plan = &applied.plan;
     // Blocking has no schedule, target or remaining time — the card body is
-    // just the plan name. (Unlimited never reaches here: it hides the whole
-    // card upstream by mapping to `None`.)
-    if matches!(plan, ChargingPlan::Blocking) {
+    // just the plan name.
+    // FIXME also allow defining a target SoC for Unlimited
+    if matches!(plan, ChargingPlan::Blocking | ChargingPlan::Unlimited) {
         return format!(
             "<div class=\"kv\"><span>Plan</span><b>{}</b></div>",
             plan.kind()
         );
     }
-    let schedule_txt = match (applied.periods.first(), applied.end()) {
-        (Some(first), Some(end)) => fmt_range(first.start.0, end.0),
-        _ => "—".to_string(),
+
+    let schedule_txt =
+        if let Some((first_period, end)) = Option::zip(applied.periods.first(), applied.end_ts()) {
+            fmt_range(first_period.start.0, end.0)
+        } else {
+            "—".to_string()
+        };
+
+    let target_soc = plan.target_soc();
+    let target_soc_str = if let Some(target_soc) = target_soc {
+        format!("{:.0} %", target_soc * 100.0)
+    } else {
+        "—".to_string()
     };
-    let target = plan.target_soc();
-    let target_txt = target
-        .map(|t| format!("{:.0} %", t * 100.0))
-        .unwrap_or_else(|| "—".to_string());
-    let remaining = match (target, bms.current_soc().absolute()) {
-        (Some(t), Some(s)) => {
-            let pct = ((t - s) * 100.0).max(0.0);
-            match bms.target_soc_to_energy(t) {
-                Ok(w) => format!("{pct:.1} % · {:.1} kWh", w as f64 / 1000.0),
-                _ => format!("{pct:.1} %"),
-            }
+
+    let remaining = if let Some((target_soc, cur_soc)) =
+        Option::zip(target_soc, bms.current_soc().absolute())
+    {
+        let delta_soc = ((target_soc - cur_soc) * 100.0).max(0.0);
+
+        if let Ok(energy) = bms.target_soc_to_energy(target_soc) {
+            format!("{delta_soc:.1} % · {:.1} kWh", energy as f32 / 1000.0)
+        } else {
+            format!("{delta_soc:.1} %")
         }
-        _ => "—".to_string(),
+    } else {
+        "—".to_string()
     };
+
     format!(
         "<div class=\"kv\"><span>Plan</span><b>{}</b></div>\
          <div class=\"kv\"><span>Schedule</span><b>{schedule_txt}</b></div>\
-         <div class=\"kv\"><span>Target</span><b>{target_txt}</b></div>\
+         <div class=\"kv\"><span>Target</span><b>{target_soc_str}</b></div>\
          <div class=\"kv\"><span>Remaining</span><b>{remaining}</b></div>\
          <div class=\"kv\"><span>Remaining time</span><b id=\"{remaining_id}\">—</b></div>",
         plan.kind(),
@@ -123,8 +125,8 @@ pub(crate) fn render_header() {
     let (txt, cls, title) = state::with_state(|s| {
         // The clock shows the last message received from the server — a
         // freshness indicator, not a ticking wall clock.
-        let txt = if s.last_rx_ts > 0 {
-            state::fmt_time(s.last_rx_ts, true)
+        let txt = if let Some(last_ts) = s.last_rx_ts {
+            state::fmt_time(last_ts, true)
         } else {
             "connecting…".to_string()
         };
@@ -156,7 +158,7 @@ fn render_badge() {
             (
                 status_name(&srv.status),
                 status_color(&srv.status),
-                session_active(&srv.status),
+                srv.status.is_active(),
             )
         })
     }) else {
@@ -229,9 +231,8 @@ fn render_tiles() {
     let tiles: Option<Vec<(&str, String)>> = state::with_state(|s| {
         let srv = s.server.as_ref()?;
         let last = s.metrics.last();
-        let charging = session_active(&srv.status) && last.and_then(|m| m.power).is_some();
-        let power_txt = match (charging, last.and_then(|m| m.power)) {
-            (true, Some(p)) => format!("{:.3} kW", p as f64 / 1000.0),
+        let power_txt = match (srv.status, last.and_then(|m| m.power)) {
+            (ChargeStatus::Charging, Some(p)) => format!("{:.3} kW", p as f64 / 1000.0),
             _ => "—".to_string(),
         };
         Some(vec![

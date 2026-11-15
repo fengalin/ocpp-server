@@ -92,10 +92,10 @@ impl OcppInterface {
 
     fn notif_error(&self) {
         trace!("notifiying error");
-        if let Err(err) = self
-            .notif_tx
-            .send(Notification::Connection(ChargeSystemConnectionState::Error))
-        {
+        if let Err(err) = self.notif_tx.send(Notification::Connection {
+            ts: chrono::Utc::now().into(),
+            state: ChargeSystemConnectionState::Error,
+        }) {
             error!("error sending notification: {err}");
         }
     }
@@ -205,9 +205,10 @@ impl OcppInterface {
             }
             Action::Heartbeat(heartbeat) => {
                 debug!(">> incoming {heartbeat:?}");
-                if let Err(err) = self.notif_tx.send(Notification::Connection(
-                    ChargeSystemConnectionState::Heartbeat,
-                )) {
+                if let Err(err) = self.notif_tx.send(Notification::Connection {
+                    ts: chrono::Utc::now().into(),
+                    state: ChargeSystemConnectionState::Heartbeat,
+                }) {
                     error!("error sending notification: {err}");
                 }
                 self.prepare_response(

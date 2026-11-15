@@ -10,7 +10,6 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlButtonElement, HtmlElement, KeyboardEvent};
 
 use crate::ui::catchup::console_error;
-use crate::ui::render::session_active;
 use crate::ui::{ConfirmResolve, on, with_ui, with_ui_ref};
 use crate::{api, dom, state};
 
@@ -195,11 +194,8 @@ pub(crate) fn init_confirm() {
     let stop_btn = dom::el_html("stop-session-btn");
     let attach = |el: &web_sys::HtmlElement| {
         on(el, "click", move |_e| {
-            let can_stop = state::with_state(|s| {
-                s.server
-                    .as_ref()
-                    .is_some_and(|srv| session_active(&srv.status))
-            });
+            let can_stop =
+                state::with_state(|s| s.server.as_ref().is_some_and(|srv| srv.status.is_active()));
             if with_ui_ref(|ui| ui.confirm_open) || !can_stop {
                 return;
             }
